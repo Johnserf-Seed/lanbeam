@@ -1,0 +1,520 @@
+/* ── LanBeam design system · from「LanBeam 原型 v2」handoff ─────────────────
+   Low-contrast harmonious palette; teal accent (send ↑) + green (receive ↓).
+   Tokens on :root, dark via [data-theme="dark"]. Tokens → base → components. */
+
+:root {
+  --font:
+    "Space Grotesk", system-ui, -apple-system, "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  --bg: #faf9f6;
+  --panel: #ffffff;
+  --sidebar: #f3f1ec;
+  --ink: #3d4149;
+  --ink2: #33373e;
+  --muted: #9a9da3;
+  --muted2: #6f7378;
+  --border: rgba(61, 65, 73, 0.08);
+  --border2: rgba(61, 65, 73, 0.15);
+  --accent: #4b8ba3;
+  --accent-ink: #3c6e82;
+  --accent-soft: rgba(75, 139, 163, 0.11);
+  --accent-fg: #ffffff;
+  --success: #6fae87;
+  --success-soft: rgba(111, 174, 135, 0.15);
+  --danger: #c4766a;
+  --danger-soft: rgba(196, 118, 106, 0.12);
+  --toast-accent: #9fe0e0;
+  --cat-img: #8583b8;
+  --cat-img-soft: rgba(133, 131, 184, 0.13);
+  --cat-vid: #b87f93;
+  --cat-vid-soft: rgba(184, 127, 147, 0.13);
+  --cat-aud: #6f93b8;
+  --cat-aud-soft: rgba(111, 147, 184, 0.13);
+  --cat-doc: #ab8a66;
+  --cat-doc-soft: rgba(171, 138, 102, 0.14);
+  --ring-a: rgba(75, 139, 163, 0.17);
+  --ring-b: rgba(75, 139, 163, 0.1);
+  --ring-c: rgba(75, 139, 163, 0.06);
+  --sweep: rgba(75, 139, 163, 0.13);
+  --radial: rgba(75, 139, 163, 0.05);
+  --dot-live: #4b8ba3;
+  --glow: rgba(75, 139, 163, 0.45);
+  --track: rgba(61, 65, 73, 0.08);
+  --hover: rgba(61, 65, 73, 0.045);
+  --shadow: 0 16px 48px rgba(35, 40, 48, 0.18);
+  --scrim: rgba(35, 38, 44, 0.34);
+  --toast-bg: #33373e;
+  --toast-fg: #f5f4f1;
+}
+
+[data-theme="dark"] {
+  --bg: #10151d;
+  --panel: #171e28;
+  --sidebar: #0c1117;
+  --ink: #c6d0da;
+  --ink2: #e2eaf1;
+  --muted: #66727f;
+  --muted2: #8b98a5;
+  --border: rgba(255, 255, 255, 0.06);
+  --border2: rgba(255, 255, 255, 0.12);
+  --accent: #7fd4d4;
+  --accent-ink: #93dede;
+  --accent-soft: rgba(127, 212, 212, 0.12);
+  --accent-fg: #0d1319;
+  --success: #7fbf93;
+  --success-soft: rgba(127, 191, 147, 0.15);
+  --danger: #cf8a80;
+  --danger-soft: rgba(207, 138, 128, 0.14);
+  --toast-accent: #2f6273;
+  --cat-img: #a8a6d4;
+  --cat-img-soft: rgba(168, 166, 212, 0.14);
+  --cat-vid: #d4a0b3;
+  --cat-vid-soft: rgba(212, 160, 179, 0.14);
+  --cat-aud: #96b6d4;
+  --cat-aud-soft: rgba(150, 182, 212, 0.14);
+  --cat-doc: #cbaa84;
+  --cat-doc-soft: rgba(203, 170, 132, 0.15);
+  --ring-a: rgba(127, 212, 212, 0.14);
+  --ring-b: rgba(127, 212, 212, 0.09);
+  --ring-c: rgba(127, 212, 212, 0.055);
+  --sweep: rgba(127, 212, 212, 0.13);
+  --radial: rgba(127, 212, 212, 0.05);
+  --dot-live: #7fd4d4;
+  --glow: rgba(127, 212, 212, 0.6);
+  --track: rgba(255, 255, 255, 0.08);
+  --hover: rgba(255, 255, 255, 0.045);
+  --shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+  --scrim: rgba(4, 7, 11, 0.55);
+  --toast-bg: #e2eaf1;
+  --toast-fg: #10151d;
+}
+
+/* ── base ────────────────────────────────────────────────────────────── */
+
+* {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--border2) transparent;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font);
+  font-size: 13px;
+  line-height: 1.5;
+  transition:
+    background 0.25s ease,
+    color 0.25s ease;
+  user-select: none;
+  -webkit-user-select: none;
+  overflow: hidden;
+}
+
+input,
+textarea {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+a {
+  color: var(--accent-ink);
+  text-decoration: none;
+}
+
+button {
+  font-family: inherit;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+/* ── keyframes (opacity/margin only — no transform on text blocks) ───── */
+
+@keyframes lbPulseC {
+  0% {
+    width: 80px;
+    height: 80px;
+    margin: -40px 0 0 -40px;
+    opacity: 0.55;
+  }
+  100% {
+    width: 168px;
+    height: 168px;
+    margin: -84px 0 0 -84px;
+    opacity: 0;
+  }
+}
+@keyframes lbPulseDot {
+  0% {
+    inset: -7px;
+    opacity: 0.55;
+  }
+  100% {
+    inset: -21px;
+    opacity: 0;
+  }
+}
+@keyframes lbBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+@keyframes lbFade {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes lbUp {
+  from {
+    opacity: 0;
+  }
+}
+@keyframes lbCard {
+  from {
+    opacity: 0;
+    margin-top: 14px;
+  }
+}
+@keyframes lbCardOut {
+  to {
+    opacity: 0;
+    margin-top: -14px;
+  }
+}
+@keyframes lbDash {
+  to {
+    background-position: 26px 0;
+  }
+}
+@keyframes lbDrawer {
+  from {
+    opacity: 0;
+    margin-right: -18px;
+  }
+}
+
+/* ── buttons ─────────────────────────────────────────────────────────── */
+
+.btn {
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--panel);
+  color: var(--muted2);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+.btn:hover {
+  background: var(--hover);
+}
+.btn.sm {
+  height: 30px;
+}
+.btn.ink {
+  color: var(--ink);
+}
+.btn.danger {
+  color: var(--danger);
+}
+.btn.danger:hover {
+  background: var(--panel);
+  border-color: var(--danger);
+}
+.btn.primary {
+  border: none;
+  background: var(--accent);
+  color: var(--accent-fg);
+  font-size: 12.5px;
+  padding: 0 15px;
+}
+.btn.primary:hover {
+  background: var(--accent);
+  filter: brightness(0.94);
+}
+.btn.primary:disabled,
+.btn.primary.off {
+  background: var(--track);
+  color: var(--muted);
+  filter: none;
+  cursor: default;
+}
+.btn.ghost {
+  border: none;
+  background: none;
+}
+.btn.ghost:hover {
+  background: var(--hover);
+}
+.btn.icon {
+  width: 32px;
+  padding: 0;
+  font-size: 13px;
+}
+
+/* ── window controls (frameless chrome) ──────────────────────────────── */
+
+.win-btn {
+  width: 34px;
+  height: 30px;
+  border-radius: 8px;
+  border: none;
+  background: none;
+  color: var(--muted2);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+.win-btn:hover {
+  background: var(--hover);
+  color: var(--ink2);
+}
+.win-btn.close:hover {
+  background: var(--danger);
+  color: #fff;
+}
+
+/* ── inputs ──────────────────────────────────────────────────────────── */
+
+.input,
+select.input {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border2);
+  background: var(--panel);
+  color: var(--ink);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+.input.mono {
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+/* ── segmented control ───────────────────────────────────────────────── */
+
+.seg {
+  display: flex;
+  gap: 2px;
+  background: var(--sidebar);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 3px;
+}
+.seg-item {
+  padding: 4px 12px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  color: var(--muted);
+  border: none;
+}
+.seg-item.active {
+  background: var(--panel);
+  color: var(--ink2);
+}
+
+/* ── toggle switch ───────────────────────────────────────────────────── */
+
+.toggle {
+  width: 36px;
+  height: 20px;
+  border-radius: 99px;
+  background: var(--track);
+  position: relative;
+  cursor: pointer;
+  flex: none;
+  transition: background 0.18s ease;
+  border: none;
+  padding: 0;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.25);
+  margin-left: 0;
+  transition: margin-left 0.18s ease;
+}
+.toggle.on {
+  background: var(--accent);
+}
+.toggle.on::after {
+  margin-left: 16px;
+}
+.toggle.sm {
+  width: 32px;
+  height: 18px;
+}
+.toggle.sm::after {
+  width: 14px;
+  height: 14px;
+}
+.toggle.sm.on::after {
+  margin-left: 14px;
+}
+.toggle.xs {
+  width: 30px;
+  height: 17px;
+}
+.toggle.xs::after {
+  width: 13px;
+  height: 13px;
+}
+.toggle.xs.on::after {
+  margin-left: 13px;
+}
+
+/* ── cards / panels ──────────────────────────────────────────────────── */
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden; /* rounded containers must clip full-width child rows */
+}
+
+.hover-row:hover {
+  background: var(--hover);
+}
+
+/* ── modal scaffolding ───────────────────────────────────────────────── */
+
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--scrim);
+  display: grid;
+  place-items: center;
+  animation: lbFade 0.18s ease;
+}
+.modal {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  overflow: hidden;
+  animation: lbUp 0.22s ease;
+  color: var(--ink);
+}
+.modal-foot {
+  background: var(--sidebar);
+  padding: 10px 20px;
+  font-size: 10.5px;
+  color: var(--muted2);
+}
+
+/* ── shared pills / chips ────────────────────────────────────────────── */
+
+.dir-badge {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 700;
+  border-radius: 99px;
+  padding: 2px 8px;
+  white-space: nowrap;
+}
+.dir-badge.out {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+}
+.dir-badge.in {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.ext-chip {
+  border-radius: 8px;
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-weight: 600;
+  flex: none;
+}
+
+/* ── scroll areas ────────────────────────────────────────────────────── */
+
+.scroll-y {
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+}
+.scroll-y::-webkit-scrollbar {
+  width: 8px;
+}
+.scroll-y::-webkit-scrollbar-thumb {
+  background: var(--border2);
+  border-radius: 99px;
+}
+.scroll-y::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── settings rows ───────────────────────────────────────────────────── */
+
+.set-section {
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  padding: 18px 0 6px;
+}
+.set-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.set-row.last {
+  border-bottom: none;
+}
+.set-label {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink2);
+}
+.set-desc {
+  font-size: 11px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+.set-desc.mono {
+  font-family: var(--mono);
+  font-size: 10.5px;
+}

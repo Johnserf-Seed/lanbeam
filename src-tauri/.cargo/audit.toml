@@ -1,0 +1,30 @@
+# cargo-audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+#
+# Run from src-tauri/:  cargo audit
+#
+# The advisories ignored below are ACCEPTED, not unnoticed — each is a
+# transitive dependency we cannot bump directly, with a rationale for why it is
+# not exploitable in LanBeam's shipped (Windows) build. Revisit on every
+# dependency bump: if an upstream release drops the offending crate, delete the
+# corresponding ignore so the advisory can resurface if it ever returns.
+#
+# The ~17 "unmaintained"/"unsound" advisories NOT listed here (unic-* via
+# urlpattern, and the gtk-rs GTK3 stack: atk/gdk/gtk/glib/… ) are already
+# non-failing warnings in cargo-audit and come entirely from Tauri's own tree
+# (the GTK3 ones only compile for the Linux webkit2gtk target — never on
+# Windows/WebView2). They need no ignore entry and will clear as Tauri updates.
+
+[advisories]
+ignore = [
+    # ── quick-xml 0.39.4: quadratic-runtime + memory-exhaustion DoS (CVSS 7.5) ──
+    # Pulled ONLY by wayland-scanner -> wayland-client -> wl-clipboard-rs ->
+    # arboard -> tauri-plugin-clipboard-manager. That whole chain is the Linux
+    # Wayland clipboard backend: it is not compiled on Windows (arboard uses the
+    # Win32 clipboard there), and even on Linux quick-xml here is wayland-scanner
+    # parsing the TRUSTED Wayland protocol XML bundled with the crate at BUILD
+    # time — never attacker-controlled input. wayland-scanner 0.31.10 hard-pins
+    # `quick-xml = "^0.39"`, so it cannot be forced to the fixed >=0.41 until the
+    # arboard/wl-clipboard-rs chain releases an update. Nil exposure for LanBeam.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
