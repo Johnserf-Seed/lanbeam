@@ -1,0 +1,89 @@
+name: CI
+
+# The point of the matrix is NOT completeness for its own sake. The backend was
+# shipped with `keyring = { features = ["windows-native"] }`, which on macOS and
+# Linux made keyring fall back to its in-memory MOCK store: `Identity::load_or_create`
+# minted a brand-new X25519 key on every launch, silently, so the Device ID changed
+# on every restart and every peer's pinned fingerprint went stale. The repo's own
+# `identity::tests::identity_is_stable_across_loads` proves it — it just had never
+# been run anywhere but Windows. Running the same tests on three platforms is what
+# makes a bug like that loud instead of invisible.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec biome check ./src
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm test
+      - run: pnpm build
+
+  backend:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: src-tauri
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux deps, plus the two the app actually needs at runtime:
+      # webkit2gtk (the webview) and libayatana-appindicator (the tray — the
+      # `tray-icon` feature pulls it in, and without it the app has no tray at all).
+      # libdbus/libsecret is what the keyring's secret-service backend talks to.
+      - name: Linux system deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf \
+            libayatana-appindicator3-dev libdbus-1-dev libsecret-1-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+      # The keychain is a real, per-platform service. On Linux there is no session
+      # keyring in a bare CI container, so run the suite under a throwaway D-Bus +
+      # gnome-keyring — otherwise the identity tests would "pass" against nothing,
+      # which is exactly the failure mode this matrix exists to catch.
+      - name: Test (Linux, with a real secret service)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get install -y gnome-keyring dbus-x11
+          eval "$(dbus-launch --sh-syntax)"
+          echo -n "ci" | gnome-keyring-daemon --unlock --components=secrets
+          cargo test -- --test-threads=1
+
+      # Windows: MockRuntime integration tests can crash with 0xc0000005 when run
+      # in parallel — an environment quirk, not a logic error. Serial, like the
+      # other two, so a red run means something real.
+      - name: Test
+        if: matrix.os != 'ubuntu-latest'
+        run: cargo test -- --test-threads=1
