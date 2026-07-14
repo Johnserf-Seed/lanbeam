@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <rect width="1280" height="640" fill="#F4F2ED"></rect>
+  <g>
+    <circle cx="150" cy="470" r="58" fill="rgba(43,145,180,.12)"></circle>
+    <circle cx="150" cy="470" r="30" fill="#23768F"></circle>
+    <path d="M150 320 A150 150 0 0 1 300 470" stroke="#2C9FC0" stroke-width="42" fill="none" stroke-linecap="round"></path>
+    <path d="M150 220 A250 250 0 0 1 400 470" stroke="#2C9FC0" stroke-width="42" fill="none" stroke-linecap="round" opacity=".55"></path>
+    <path d="M150 120 A350 350 0 0 1 500 470" stroke="#2C9FC0" stroke-width="42" fill="none" stroke-linecap="round" opacity=".26"></path>
+    <path d="M150 20 A450 450 0 0 1 600 470" stroke="#2C9FC0" stroke-width="42" fill="none" stroke-linecap="round" opacity=".1"></path>
+  </g>
+  <text x="600" y="300" font-family="&#39;Space Grotesk&#39;,&#39;Noto Sans SC&#39;,sans-serif" font-weight="600" font-size="92" letter-spacing="-0.015em"><tspan fill="#2E3841">Lan</tspan><tspan fill="#23768F">Beam</tspan></text>
+  <text x="602" y="352" font-family="&#39;Noto Sans SC&#39;,sans-serif" font-size="30" letter-spacing="0.1em" fill="#6f7378">局域网快传 · 不走云端</text>
+  <text x="602" y="402" font-family="&#39;IBM Plex Mono&#39;,monospace" font-size="21" letter-spacing="0.13em" fill="#B6BDC2">SHARE OVER LAN — NO CLOUD</text>
+</svg>
