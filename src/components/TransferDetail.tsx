@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
 import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
-import { resendTransfer, revealFile } from "../lib/sendops";
+import { resendTransfer, revealFile, transferErrText } from "../lib/sendops";
 import {
   sendFileFromPath,
   showToast,
@@ -96,16 +96,16 @@ export default function TransferDetail() {
   // line reads "waiting for a slot" instead of a misleading 0.0 MB/s.
   const isQueued = tr.status === "queued";
   const isTerminal = isDone || isError;
-  // Known machine codes translate at render time — the stored `error` string
-  // is the backend's English diagnostic, frozen at emit time (M4.2/M4.5).
+  // Every code translates at render time. This used to hand-translate three of
+  // them and fall back to `tr.error` for the rest — and `tr.error` is the
+  // backend's English internal diagnostic, so cancelling a transfer showed the
+  // peer a line of raw Rust ("protocol: peer closed connection") and an I/O
+  // failure showed them a local absolute path. `transferErrText` covers the
+  // whole closed set of codes and never reaches for the raw string.
   const isCanceled = tr.errorCode === "cancelled";
   const errorText = isCanceled
     ? t("transfers.statusCanceled")
-    : tr.errorCode === "peer_too_old"
-      ? t("errors.peerTooOld")
-      : tr.errorCode === "integrity"
-        ? t("errors.integrity")
-        : tr.error;
+    : transferErrText(tr.errorCode);
   const peer = tr.peerName ?? "";
   const firstName =
     tr.name ?? tr.files?.[0]?.name ?? tr.savedNames?.[0] ?? tr.sessionId;

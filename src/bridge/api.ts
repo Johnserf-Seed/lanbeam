@@ -48,6 +48,10 @@ export type Settings = {
   maxConcurrent: number;
   /** per-transfer throughput cap (M6.7): "unlimited" or an MB/s count; default "unlimited" */
   rateLimit: string;
+  /** interface scale; 1.0 = the design size. The webview is zoomed to this AND the
+   *  window's minimum size scales with it — a zoom shrinks the CSS viewport, so a
+   *  window floor that ignored it would let the layout be scaled off its own edge. */
+  uiZoom: number;
   /** an incoming quick text is also written to this machine's clipboard when
    *  the sender asks for it (M7.3); default off (opt-in consent) */
   clipShare: boolean;
@@ -129,6 +133,12 @@ export type DiscoveredDevice = {
   name: string;
   address: string;
   port: number;
+  /** In the list because someone typed its address (IP-direct / pair-by-code),
+   *  not because it announced itself. A manual peer is the one kind that 删除设备
+   *  can actually delete for good — a device broadcasting on the LAN comes back
+   *  on its next announce, and offering to delete it promises what nothing can
+   *  deliver. Additive: absent in browser-mode demo data. */
+  manual?: boolean;
 };
 
 export type FileEntry = { name: string; size: number };
@@ -283,6 +293,7 @@ let demoSettings: Settings = {
   organize: "device",
   maxConcurrent: 3,
   rateLimit: "unlimited",
+  uiZoom: 1,
   clipShare: false,
   stripExif: true,
 };
@@ -300,6 +311,34 @@ export const getSettings = () =>
   isTauri
     ? invoke<Settings>("get_settings")
     : Promise.resolve({ ...demoSettings });
+
+/** Every user-facing string in the tray menu plus its live state. The backend
+ *  has no i18n layer, so the UI pushes the whole localized snapshot; the call is
+ *  idempotent and re-sent whenever the language, device name, LAN IP or
+ *  discoverability changes, so the menu can never drift out of sync. */
+export type TraySync = {
+  /** the disabled header line, e.g. "书房 · 192.168.1.20" */
+  status: string;
+  tooltip: string;
+  show: string;
+  send: string;
+  quickText: string;
+  share: string;
+  pair: string;
+  discoverable: string;
+  openDir: string;
+  inbox: string;
+  transfers: string;
+  settings: string;
+  quit: string;
+  /** whether the「可被发现」item shows its tick */
+  isDiscoverable: boolean;
+};
+
+/** Push the localized labels + live state into the tray menu. A no-op in the
+ *  browser demo (there is no tray). */
+export const syncTray = (sync: TraySync) =>
+  isTauri ? invoke<void>("sync_tray", { sync }) : Promise.resolve();
 
 export const setDeviceName = (name: string) => {
   if (!isTauri) {
@@ -470,6 +509,11 @@ export const setOrganize = (mode: string) => {
 
 // M6.7: concurrency cap (how many transfers stream at once) — clamped to 1–8
 // backend-side, read live at each transfer's gate.
+/** Interface scale. Applies immediately (webview zoom + a matching window floor)
+ *  and persists. Out-of-range values are clamped by the backend, not refused. */
+export const setUiZoom = (zoom: number) =>
+  isTauri ? invoke<void>("set_ui_zoom", { zoom }) : Promise.resolve();
+
 export const setMaxConcurrent = (max: number) => {
   if (!isTauri) {
     demoSettings = { ...demoSettings, maxConcurrent: max };
@@ -532,9 +576,9 @@ export const cancelPairing = () =>
 // A cold-start lanbeam://pair deep link the app was launched with, if any —
 // pulled once on mount to open the pairing form for a link that arrived before
 // the webview could listen. Null when launched normally (and in browser mode).
-export const takePendingPairLink = () =>
+export const takePendingDeepLink = () =>
   isTauri
-    ? invoke<string | null>("take_pending_pair_link")
+    ? invoke<string | null>("take_pending_deep_link")
     : Promise.resolve<string | null>(null);
 
 // M7.1: join a device showing a pairing code. `addr` is its ip[:port] or a
@@ -653,10 +697,6 @@ export const connectDevice = (deviceId: string) =>
     : Promise.resolve("483921");
 
 // M2: loopback self-test of the encrypted handshake; returns the SAS.
-export const selfTestSecureChannel = () =>
-  isTauri
-    ? invoke<string>("self_test_secure_channel")
-    : Promise.resolve("483921");
 
 // M3: file transfer. `stripExif` (M9.1) removes photo metadata (location,
 // camera, time) from JPEG/PNG/WebP images before sending — the per-send choice
@@ -698,6 +738,21 @@ export const resumeTransfer = (sessionId: string) =>
 
 // M6.4: discard the persisted resume state for a peer (forget every partial and
 // delete the half-written files). The counterpart to letting a transfer resume.
+/** One interrupted receive still holding bytes in the download folder. */
+export type Partial = {
+  deviceId: string;
+  name: string;
+  written: number;
+  size: number;
+};
+
+/** Half-written files still on disk. They are saved under their FINAL name —
+ *  `holiday.mp4`, 1.2 GB of 4 GB — so the download folder shows something that
+ *  looks perfectly normal and plays for thirty seconds. The backend has always
+ *  known about them (it is what makes resume work); nothing ever asked. */
+export const listPartials = (): Promise<Partial[]> =>
+  isTauri ? invoke<Partial[]>("list_partials") : Promise.resolve([]);
+
 export const discardPartials = (deviceId: string) =>
   isTauri ? invoke<void>("discard_partials", { deviceId }) : Promise.resolve();
 
@@ -705,6 +760,15 @@ export const getDownloadDir = () =>
   isTauri
     ? invoke<string>("get_download_dir")
     : Promise.resolve("~/Downloads/LanBeam");
+
+/** Open a path (a received file, or the download folder) with the OS default
+ *  handler. Goes through the BACKEND rather than the opener plugin's JS
+ *  `openPath`: that command is scope-gated, and the only static scope that would
+ *  cover a user-relocatable download folder is "**" — a blanket "open any file
+ *  on this machine" grant to the webview. Rejects with a `NotFound` error when
+ *  the path is genuinely gone, so the UI can tell that apart from a failure. */
+export const openLocalPath = (path: string) =>
+  isTauri ? invoke<void>("open_local_path", { path }) : Promise.resolve();
 
 export const revealReceived = (sessionId: string) =>
   isTauri
@@ -737,6 +801,15 @@ export const setTrusted = (
 
 export const removeTrusted = (deviceId: string) =>
   isTauri ? invoke<void>("remove_trusted", { deviceId }) : Promise.resolve();
+
+/** Delete a device: its trust record AND the manually-added address (IP-direct /
+ *  pair-by-code) that keeps it in the device list. Untrusting is `removeTrusted`
+ *  — a device you stop trusting is still one you want to be able to reach. This
+ *  is the stronger act, and it is what「删除设备」 has to call: `remove_trusted`
+ *  alone left the peer sitting in the manual address table, back on the next
+ *  list, with nothing anywhere able to take it out. */
+export const forgetDevice = (deviceId: string) =>
+  isTauri ? invoke<void>("forget_device", { deviceId }) : Promise.resolve();
 
 // M4.6: degradations recorded at bind time. The matching `net_degraded`
 // events fire during setup(), before the webview has any listener and Tauri

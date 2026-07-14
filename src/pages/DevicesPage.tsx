@@ -30,6 +30,21 @@ import { ExtChip } from "../components/ui";
 
 const mbps = (bps: number): string => `${(bps / 1048576).toFixed(1)} MB/s`;
 
+/** The radar's intrinsic box, at scale 1.
+ *
+ *  HEIGHT IS NOT ARBITRARY: the artwork is drawn from the CENTRE outward, and
+ *  its widest element is the outer glow at radius 280 — so the radar really
+ *  needs 2×280 = 560px of height. The box used to claim 500, which put the glow
+ *  at y ∈ [-30, 530]: 30px past the box top AND bottom. With the wrapper's
+ *  `overflow: hidden` (and only 8px of slack in the scale formula) that quietly
+ *  sliced the outer ring off — worst when the empty-state checklist takes the
+ *  vertical room. Keep this ≥ 2× the largest radius drawn below.
+ *
+ *  WIDTH stays wider than the circle on purpose: device chips sit around the
+ *  rings and need the horizontal room. */
+const RADAR_W = 690;
+const RADAR_H = 560;
+
 type NodePos = { x: number; y: number; mirror: boolean };
 
 type Beam = {
@@ -93,6 +108,18 @@ export default function DevicesPage() {
     }
   };
 
+  /* ── `lanbeam://connect?a=…` deep link ──────────────────────────────────
+     A link may STAGE an address here — it may never dial one. We drop it into
+     the field, consume the stage (so a later visit starts clean) and stop: the
+     user reads the address and presses 「IP 直连」 themselves. An untrusted link
+     that could connect on its own would be an attacker's connect button. */
+  const connectPrefill = useOverlays((s) => s.connectPrefill);
+  useEffect(() => {
+    if (!connectPrefill) return;
+    setIpTry(connectPrefill);
+    useOverlays.getState().setConnectPrefill(null);
+  }, [connectPrefill]);
+
   /* ── clock tick so「刚刚发现」expires (60 s window) ─────────────────── */
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -110,9 +137,11 @@ export default function DevicesPage() {
     const measure = () => {
       const r = el.getBoundingClientRect();
       if (!r.width || !r.height) return;
+      // Scale against the radar's TRUE extent (see RADAR_H): dividing by a box
+      // shorter than the artwork is what silently clipped the outer ring.
       const sc = Math.max(
-        0.55,
-        Math.min(1, (r.height - 8) / 500, (r.width - 16) / 690),
+        0.5,
+        Math.min(1, (r.height - 8) / RADAR_H, (r.width - 16) / RADAR_W),
       );
       setRk((p) => (Math.abs(sc - p) > 0.004 ? sc : p));
     };
@@ -123,8 +152,8 @@ export default function DevicesPage() {
     measure();
   }, []);
 
-  const rW = Math.round(690 * rk);
-  const rH = Math.round(500 * rk);
+  const rW = Math.round(RADAR_W * rk);
+  const rH = Math.round(RADAR_H * rk);
   const rcX = Math.round(rW / 2);
   const rcY = Math.round(rH / 2);
   const rr = (v: number) => Math.round(v * rk);
@@ -518,7 +547,7 @@ export default function DevicesPage() {
                   tabIndex={0}
                   onClick={() => {
                     if (oldId) {
-                      setFpAlert({ deviceId: oldId, step: "warn" });
+                      setFpAlert({ deviceId: oldId });
                       return;
                     }
                     openSend(d.deviceId, recents);
@@ -527,7 +556,7 @@ export default function DevicesPage() {
                     if (e.key === "Enter" || e.key === " ") {
                       if (e.key === " ") e.preventDefault();
                       if (oldId) {
-                        setFpAlert({ deviceId: oldId, step: "warn" });
+                        setFpAlert({ deviceId: oldId });
                         return;
                       }
                       openSend(d.deviceId, recents);
@@ -691,41 +720,69 @@ export default function DevicesPage() {
               {t("devices.emptySub")}
             </span>
           </div>
-          {(
-            [
-              [
-                vis === "on" ? "✓" : "!",
-                vis === "on" ? "var(--success)" : "var(--danger)",
-                vis === "on"
-                  ? t("devices.ck1On")
-                  : vis === "ghost"
-                    ? t("devices.ck1Ghost")
-                    : t("devices.ck1Off"),
-                "7px 16px",
-                700,
-              ],
-              ["○", "var(--muted)", t("devices.ck2"), "7px 16px", 400],
-              ["○", "var(--muted)", t("devices.ck3"), "7px 16px", 400],
-              ["○", "var(--muted)", t("devices.ck4"), "7px 16px 11px", 400],
-            ] as [string, string, string, string, number][]
-          ).map(([mark, color, text, pad, weight], i) => (
-            <div
-              key={i}
+          {/* The ONE thing LanBeam can actually verify about itself. */}
+          <div
+            style={{
+              display: "flex",
+              alignItems: "baseline",
+              gap: 9,
+              padding: "7px 16px 9px",
+              fontSize: 11.5,
+              color: "var(--muted2)",
+            }}
+          >
+            <span
               style={{
-                display: "flex",
-                alignItems: "baseline",
-                gap: 9,
-                padding: pad,
-                fontSize: 11.5,
-                color: "var(--muted2)",
+                color: vis === "on" ? "var(--success)" : "var(--danger)",
+                fontWeight: 700,
+                flex: "none",
               }}
             >
-              <span style={{ color, fontWeight: weight, flex: "none" }}>
-                {mark}
-              </span>
-              <span>{text}</span>
-            </div>
-          ))}
+              {vis === "on" ? "✓" : "!"}
+            </span>
+            <span>
+              {vis === "on"
+                ? t("devices.ck1On")
+                : vis === "ghost"
+                  ? t("devices.ck1Ghost")
+                  : t("devices.ck1Off")}
+            </span>
+          </div>
+
+          {/* Everything below is ADVICE, not a failed check: LanBeam cannot see
+              the peer's Wi-Fi, the router's isolation setting or the OS firewall.
+              Rendering them as hollow circles alongside the real ✓ made the panel
+              read "1 of 4 passed, 3 are broken" — so they get their own labelled
+              section and neutral bullets instead. Never dress an unknowable up as
+              a failed check. */}
+          <div
+            style={{
+              padding: "7px 16px 3px",
+              borderTop: "1px solid var(--border)",
+              fontSize: 10.5,
+              color: "var(--muted)",
+            }}
+          >
+            {t("devices.ckManual")}
+          </div>
+          {[t("devices.ck2"), t("devices.ck3"), t("devices.ck4")].map(
+            (text, i, arr) => (
+              <div
+                key={text}
+                style={{
+                  display: "flex",
+                  alignItems: "baseline",
+                  gap: 9,
+                  padding: i === arr.length - 1 ? "5px 16px 11px" : "5px 16px",
+                  fontSize: 11.5,
+                  color: "var(--muted2)",
+                }}
+              >
+                <span style={{ color: "var(--muted)", flex: "none" }}>·</span>
+                <span>{text}</span>
+              </div>
+            ),
+          )}
           <div
             style={{
               display: "flex",

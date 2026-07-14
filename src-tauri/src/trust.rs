@@ -16,7 +16,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
@@ -353,36 +353,14 @@ pub fn emit_updated<R: Runtime>(app: &AppHandle<R>, list: Vec<TrustedPeerDto>) {
     let _ = app.emit("trust_updated", list);
 }
 
-/// Add (or refresh) a trusted peer, then persist + emit `trust_updated` — the
-/// one grant body shared by the `set_trusted` command and the pairing/join
-/// result (M7.1), reachable from either an [`AppState`](crate::state::AppState)
-/// or a `TransportCtx`. Same shape both sites always used (M4.6): snapshot the
-/// store UNDER the write guard, then do the file I/O + emit AFTER it drops, so
-/// the trust lock never waits on a disk. A poisoned lock is skipped — the grant
-/// still succeeded on the wire, just without the local record.
-pub fn grant<R: Runtime>(
-    app: &AppHandle<R>,
-    trusted: &RwLock<TrustStore>,
-    device_id: &str,
-    name: &str,
-    auto_accept: bool,
-) {
-    let (snapshot, list) = {
-        let Ok(mut store) = trusted.write() else {
-            return;
-        };
-        store.set(
-            device_id.to_string(),
-            name.to_string(),
-            auto_accept,
-            None,
-            None,
-        );
-        (store.snapshot(), store.list())
-    };
-    persist_async(snapshot);
-    emit_updated(app, list);
-}
+// NOTE: there is deliberately no `grant()` helper here any more.
+//
+// It existed so the pairing handshake could trust a peer on its own, and that is
+// exactly the thing that must not be easy: a handshake proves a code was right,
+// not that the device on the far end is the one you meant. Trust is now recorded
+// through ONE door — the `set_trusted` command — which the UI opens only after a
+// human has compared the SAS on both screens. Re-adding a backend-side grant
+// would quietly restore a second, unconfirmed path into the trust store.
 
 /// Trim + clamp a display name to [`MAX_NAME_CHARS`]. `pub(crate)` so the
 /// transfer trust boundary can bound a peer's self-declared `DeviceInfo` name

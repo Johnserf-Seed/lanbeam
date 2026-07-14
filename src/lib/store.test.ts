@@ -10,6 +10,7 @@ import type {
 } from "../bridge/api";
 import {
   displayIp,
+  histWindowMs,
   inboxFromText,
   inboxFromTransfer,
   resolvedTheme,
@@ -598,24 +599,35 @@ describe("useTransfers persistence (partialize — terminal rows only)", () => {
 
 // ── useTrust ─────────────────────────────────────────────────────────────────
 describe("useTrust.setTrust", () => {
-  it("creates a trusted record with autoAccept defaulted off", () => {
+  it("creates a trusted record with autoAccept defaulted ON", () => {
     vi.useFakeTimers();
     vi.setSystemTime(2000);
+    // Trusting a device also enables auto-accept — "these are my devices,
+    // stop nagging me" (the drag-into-circle promise).
     useTrust.getState().setTrust({ deviceId: "d1", name: "Alice" }, true);
     const r = useTrust.getState().records.d1;
     expect(r).toMatchObject({
       deviceId: "d1",
       name: "Alice",
       trusted: true,
-      autoAccept: false,
+      autoAccept: true,
       addedAt: 2000,
     });
   });
 
+  it("re-trusting an already-trusted device preserves an explicit auto-off", () => {
+    const trust = useTrust.getState();
+    trust.setTrust({ deviceId: "d1", name: "A" }, true); // auto defaults on
+    trust.toggleAuto("d1"); // user turns it OFF for this device
+    expect(useTrust.getState().records.d1.autoAccept).toBe(false);
+    // Re-affirming trust (e.g. a re-drag) must NOT clobber that choice back on.
+    useTrust.getState().setTrust({ deviceId: "d1", name: "A" }, true);
+    expect(useTrust.getState().records.d1.autoAccept).toBe(false);
+  });
+
   it("untrusting keeps the memo but clears trusted + autoAccept", () => {
     useTrust.getState().setTrust({ deviceId: "d1", name: "Alice" }, true);
-    useTrust.getState().toggleAuto("d1"); // autoAccept → true
-    expect(useTrust.getState().records.d1.autoAccept).toBe(true);
+    expect(useTrust.getState().records.d1.autoAccept).toBe(true); // fresh trust → on
     useTrust.getState().setTrust({ deviceId: "d1", name: "Alice" }, false);
     const r = useTrust.getState().records.d1;
     expect(r.trusted).toBe(false);
@@ -627,10 +639,11 @@ describe("useTrust.setTrust", () => {
 describe("useTrust.toggleAuto", () => {
   it("flips autoAccept on a known record and no-ops otherwise", () => {
     useTrust.getState().setTrust({ deviceId: "d1", name: "A" }, true);
-    useTrust.getState().toggleAuto("d1");
-    expect(useTrust.getState().records.d1.autoAccept).toBe(true);
+    expect(useTrust.getState().records.d1.autoAccept).toBe(true); // trusting → on
     useTrust.getState().toggleAuto("d1");
     expect(useTrust.getState().records.d1.autoAccept).toBe(false);
+    useTrust.getState().toggleAuto("d1");
+    expect(useTrust.getState().records.d1.autoAccept).toBe(true);
     const before = useTrust.getState().records;
     useTrust.getState().toggleAuto("ghost");
     expect(useTrust.getState().records).toBe(before);
@@ -927,5 +940,183 @@ describe("useOverlays.setConflict + misc setters", () => {
     useOverlays.getState().setDrag(false);
     expect(useOverlays.getState().dragOver).toBe(false);
     expect(useOverlays.getState().dragDevice).toBeNull();
+  });
+});
+
+describe("历史记录保留 (histKeep)", () => {
+  const DAY = 24 * 3600_000;
+
+  beforeEach(() => {
+    useTransfers.setState({ transfers: {} });
+    usePrefs.getState().set({ histKeep: "30d" });
+  });
+
+  it("maps each option to a window — and 「不保留」 really is zero", () => {
+    expect(histWindowMs("none")).toBe(0);
+    expect(histWindowMs("7d")).toBe(7 * DAY);
+    expect(histWindowMs("30d")).toBe(30 * DAY);
+    expect(histWindowMs("forever")).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it("drops rows that have outlived the window, keeps the ones inside it", () => {
+    const now = Date.now();
+    useTransfers.setState({
+      transfers: {
+        old: {
+          sessionId: "old",
+          status: "done",
+          doneAt: now - 40 * DAY,
+        } as never,
+        recent: {
+          sessionId: "recent",
+          status: "done",
+          doneAt: now - 2 * DAY,
+        } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "30d" });
+    useTransfers.getState().pruneHistory();
+
+    const left = useTransfers.getState().transfers;
+    expect(left.old).toBeUndefined();
+    expect(left.recent).toBeDefined();
+  });
+
+  it("never prunes a transfer that is still running", () => {
+    // An in-flight row has no doneAt. Reading that as "epoch 0, ancient" and
+    // deleting it would drop the transfer the user is watching right now.
+    useTransfers.setState({
+      transfers: {
+        live: { sessionId: "live", status: "active" } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "7d" });
+    useTransfers.getState().pruneHistory();
+    expect(useTransfers.getState().transfers.live).toBeDefined();
+  });
+
+  it("「不保留」 stops persistence without wiping the list you are looking at", () => {
+    // "Don't KEEP them" is not "delete the ones on screen". A transfer that just
+    // finished must stay visible for the rest of the session.
+    useTransfers.setState({
+      transfers: {
+        justNow: {
+          sessionId: "justNow",
+          status: "done",
+          doneAt: Date.now(),
+        } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "none" });
+    useTransfers.getState().pruneHistory();
+    expect(useTransfers.getState().transfers.justNow).toBeDefined();
+  });
+
+  it("「永久保留」 keeps even an ancient row", () => {
+    useTransfers.setState({
+      transfers: {
+        ancient: {
+          sessionId: "ancient",
+          status: "done",
+          doneAt: 1,
+        } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "forever" });
+    useTransfers.getState().pruneHistory();
+    expect(useTransfers.getState().transfers.ancient).toBeDefined();
+  });
+});
+
+describe("忘记设备 ≠ 让设备消失", () => {
+  const dev = (deviceId: string, name: string): DiscoveredDevice =>
+    ({ deviceId, name, address: "192.168.1.9" }) as DiscoveredDevice;
+
+  it("a forgotten device that is STILL on the LAN stays listed — as a stranger", () => {
+    // The trust page is a map of your network, not a list of your trust records.
+    // Dropping the record does not un-announce the device: discovery keeps seeing
+    // it, so it comes back untrusted and outside the ring. This is the answer to
+    // "I removed it, why is it still there" — and the copy now says so.
+    const list = trustList([dev("nas", "NAS")], {});
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({
+      deviceId: "nas",
+      trusted: false,
+      online: true,
+    });
+  });
+
+  it("a forgotten device that is NOT on the LAN really does disappear", () => {
+    // With no record and no announcement, there is nothing left to draw.
+    expect(trustList([], {})).toHaveLength(0);
+  });
+
+  it("un-trusting keeps the device (and its memo); it is not a removal", () => {
+    const records: Record<string, TrustRecord> = {
+      nas: {
+        deviceId: "nas",
+        name: "我的 NAS",
+        trusted: false,
+        autoAccept: false,
+        addedAt: 1,
+        lastSeen: 1,
+      },
+    };
+    const list = trustList([dev("nas", "NAS")], records);
+    expect(list).toHaveLength(1);
+    // The custom name survives — that is exactly what "forget" would clear.
+    expect(list[0]).toMatchObject({ name: "我的 NAS", trusted: false });
+  });
+});
+
+describe("指纹变化告警:名字必须真的说明问题", () => {
+  const dev = (deviceId: string, name: string): DiscoveredDevice =>
+    ({ deviceId, name, address: "1.1.1.1", port: 1 }) as DiscoveredDevice;
+  const rec = (deviceId: string, name: string): TrustRecord => ({
+    deviceId,
+    name,
+    trusted: true,
+    autoAccept: true,
+    addedAt: 1,
+    lastSeen: 1,
+  });
+
+  it("does NOT cry wolf at two devices that merely share a name", () => {
+    // The default device name is the machine's hostname, falling back to
+    // "LanBeam device" — so every install nobody renamed answers to the same
+    // thing. Flagging 「指纹已变化」 on that is an impersonation alarm raised
+    // because two people didn't rename their laptops.
+    const out = trustList([dev("live", "LanBeam device")], {
+      old: rec("old", "LanBeam device"),
+      live: rec("live", "LanBeam device"), // already known in its own right
+    });
+    const offline = out.find((d) => !d.online);
+    expect(offline?.fpChanged).toBeUndefined();
+  });
+
+  it("does NOT flag a live device you already know in its own right", () => {
+    // A device you have a record for is not impersonating anybody.
+    const out = trustList([dev("b", "Studio")], {
+      a: rec("a", "Studio"),
+      b: rec("b", "Studio"),
+    });
+    expect(out.find((d) => d.deviceId === "a")?.fpChanged).toBeUndefined();
+  });
+
+  it("does NOT flag when several live devices wear the name", () => {
+    // If three machines answer to it, the name is evidence of nothing.
+    const out = trustList([dev("x", "Shared"), dev("y", "Shared")], {
+      old: rec("old", "Shared"),
+    });
+    expect(out.find((d) => d.deviceId === "old")?.fpChanged).toBeUndefined();
+  });
+
+  it("DOES flag the one case it is for: a single unknown device wearing a remembered name", () => {
+    const out = trustList([dev("newkey", "书房 · MacBook")], {
+      oldkey: rec("oldkey", "书房 · MacBook"),
+    });
+    expect(out.find((d) => d.deviceId === "oldkey")?.fpChanged).toEqual({
+      newDeviceId: "newkey",
+    });
   });
 });

@@ -3,15 +3,23 @@ import { useTranslation } from "react-i18next";
 import i18n from "../i18n";
 import * as api from "../bridge/api";
 import type { PairJoinedEvent } from "../bridge/api";
-import { showToast, useData, useOverlays } from "../lib/store";
+import { showToast, useData, useOverlays, useTrust } from "../lib/store";
 import { copyText, errText } from "../lib/sendops";
+import { fmtSas } from "../lib/format";
 import Qr from "./Qr";
 import { ModalHead } from "./ui";
 
 /** 配对新设备 — host shows a real 6-digit code (start_pairing) + a scannable
- *  payload and waits for pair_joined to swap to the success state. A compact
- *  joiner section (a deliberate addition beyond the host-only mock) lets this
- *  device redeem another's code via join_by_code. */
+ *  payload; a compact joiner section redeems another device's code.
+ *
+ *  BOTH roles end at the same place: the SAS compare step. Redeeming a code and
+ *  trusting a device are two different decisions, and only the second one needs
+ *  a human — the SAS is the sole defence against a machine-in-the-middle, and a
+ *  code nobody read is not a check. So neither `join_by_code` nor the host's
+ *  pairing handler grants any trust; it is recorded HERE, through the same
+ *  `useTrust.setTrust` path the trust circle uses (which is what also turns on
+ *  auto-accept), and only once the user says the two screens agree. Dismissing
+ *  the compare step trusts nothing. */
 export default function PairModal() {
   const { t } = useTranslation();
   const pairOpen = useOverlays((s) => s.pairOpen);
@@ -20,10 +28,14 @@ export default function PairModal() {
   // Host side: the invitation this device is showing.
   const [code, setCode] = useState("");
   const [qr, setQr] = useState("");
-  // Success state, set by the pair_joined event when a device redeems our code.
-  const [joined, setJoined] = useState<{ name: string; sas: string } | null>(
-    null,
-  );
+  // The compare step. Reached from BOTH sides — the host via `pair_joined`, the
+  // joiner via join_by_code's return — and carrying the same handshake-derived
+  // SAS, which is the point: two screens, one number.
+  const [compare, setCompare] = useState<{
+    deviceId: string;
+    name: string;
+    sas: string;
+  } | null>(null);
   // Joiner side: redeem another device's code.
   const [joinAddr, setJoinAddr] = useState("");
   const [joinCode, setJoinCode] = useState("");
@@ -41,7 +53,7 @@ export default function PairModal() {
     // code/QR a scanner could redeem before startPairing() returns a fresh one.
     setCode("");
     setQr("");
-    setJoined(null);
+    setCompare(null);
     // A deep link may have staged a lanbeam:// invitation. Consume it once to
     // pre-fill the join field (so a later manual reopen starts clean) and cue
     // the user to review + confirm — never auto-join an untrusted link.
@@ -62,29 +74,62 @@ export default function PairModal() {
           setQr(inv.qr);
         }
       })
-      .catch(() => {});
+      // Don't leave a blank code and a blinking "waiting for a device…" behind a
+      // swallowed error — there is nothing to wait for.
+      .catch((e) => {
+        if (live) showToast(t("pair.codeFailed", { err: errText(e) }));
+      });
     const off = api.onEvent<PairJoinedEvent>("pair_joined", (p) => {
-      setJoined({ name: p.name, sas: p.sas });
+      setCompare({ deviceId: p.deviceId, name: p.name, sas: p.sas });
     });
     return () => {
       live = false;
       off();
     };
-  }, [pairOpen]);
+  }, [pairOpen, t]);
 
   if (!pairOpen) return null;
 
-  // Closing invalidates the active code so a stale invite can't be redeemed.
-  const close = () => {
+  /** Tear down without a verdict. Invalidates the active code so a stale invite
+   *  can't be redeemed later. */
+  const dismiss = () => {
     void api.cancelPairing();
     setPair(false);
   };
 
+  // Walking away from the compare step is a "no" — nothing was trusted. Say so,
+  // or the user leaves believing they paired.
+  const close = () => {
+    if (compare) showToast(t("pair.unconfirmedToast"));
+    dismiss();
+  };
+
+  /** The two screens agree → record the trust, through the SAME path the trust
+   *  circle uses (so a paired device is trusted AND auto-accepting, exactly like
+   *  one dragged into the circle — there is no second, divergent notion of
+   *  trust for pairing to drift away from). */
+  const acceptPeer = () => {
+    if (!compare) return;
+    useTrust
+      .getState()
+      .setTrust({ deviceId: compare.deviceId, name: compare.name }, true);
+    showToast(t("pair.trustedToast", { name: compare.name }));
+    dismiss();
+  };
+
+  const rejectPeer = () => {
+    showToast(t("pair.mismatchToast"), undefined, 8000);
+    dismiss();
+  };
+
   const regen = () => {
-    void api.startPairing().then((inv) => {
-      setCode(inv.code);
-      setQr(inv.qr);
-    });
+    void api
+      .startPairing()
+      .then((inv) => {
+        setCode(inv.code);
+        setQr(inv.qr);
+      })
+      .catch((e) => showToast(t("pair.codeFailed", { err: errText(e) })));
   };
 
   const doJoin = async () => {
@@ -101,16 +146,17 @@ export default function PairModal() {
     setJoining(true);
     try {
       const r = await api.joinByCode(addr, joinCode.trim());
-      // join_by_code records the just-paired peer in the manual table; discovery
+      // join_by_code records the just-redeemed peer in the manual table; discovery
       // may never announce it (a different subnet / discovery off — the exact
       // case code/IP pairing exists for), so it surfaces through the merged
       // list_discovered_devices, not a discovery event. Re-query it now so the
       // peer shows in the radar / SendModal / QuickTextModal immediately instead
       // of waiting for the next discovery tick. Mirrors DevicesPage.tryDirect.
+      // It shows up UNTRUSTED — being reachable and being trusted are separate,
+      // and the second one is still one SAS compare away.
       const list = await api.listDiscoveredDevices();
       useData.getState().setDevices(list);
-      showToast(t("pair.joinedToast", { name: r.name }));
-      close();
+      setCompare({ deviceId: r.deviceId, name: r.name, sas: r.sas });
     } catch (e) {
       showToast(t("pair.joinFailed", { err: errText(e) }));
       setJoining(false);
@@ -146,37 +192,22 @@ export default function PairModal() {
           onClose={close}
         />
 
-        {joined ? (
-          /* ── success: a device redeemed our code ─────────────────────── */
+        {compare ? (
+          /* ── compare: the code was redeemed, nothing is trusted yet ───── */
           <div
             style={{
               display: "flex",
               flexDirection: "column",
               alignItems: "center",
-              gap: 9,
-              padding: "24px 20px 20px",
+              gap: 8,
+              padding: "20px 20px 18px",
               animation: "lbFade .2s ease",
             }}
           >
             <div
-              style={{
-                width: 44,
-                height: 44,
-                borderRadius: "50%",
-                background: "var(--success-soft)",
-                color: "var(--success)",
-                display: "grid",
-                placeItems: "center",
-                fontSize: 19,
-                fontWeight: 700,
-              }}
-            >
-              ✓
-            </div>
-            <div
               style={{ fontSize: 13.5, fontWeight: 650, color: "var(--ink2)" }}
             >
-              {t("pair.joined", { name: joined.name })}
+              {t("pair.compareTitle", { name: compare.name })}
             </div>
             <div
               style={{
@@ -185,25 +216,53 @@ export default function PairModal() {
                 textAlign: "center",
               }}
             >
-              {t("pair.joinedSub")}
+              {t("pair.compareBody")}
             </div>
             <div
               style={{
                 fontFamily: "var(--mono)",
-                fontSize: 11,
-                color: "var(--muted2)",
+                fontSize: 26,
+                fontWeight: 600,
+                letterSpacing: ".06em",
+                color: "var(--accent-ink)",
+                background: "var(--accent-soft)",
+                borderRadius: 10,
+                padding: "10px 18px",
+                margin: "2px 0",
               }}
             >
-              {t("pair.sas", { sas: joined.sas })}
+              {fmtSas(compare.sas)}
             </div>
-            <button
-              type="button"
-              className="btn primary"
-              style={{ padding: "0 18px", marginTop: 4 }}
-              onClick={close}
+            <div
+              style={{
+                fontSize: 10.5,
+                color: "var(--muted)",
+                textAlign: "center",
+                lineHeight: 1.6,
+              }}
             >
-              {t("pair.done")}
-            </button>
+              {t("pair.compareWarn")}
+            </div>
+            <div
+              style={{ display: "flex", gap: 8, marginTop: 6, width: "100%" }}
+            >
+              <button
+                type="button"
+                className="btn danger"
+                style={{ flex: "none", padding: "0 14px" }}
+                onClick={rejectPeer}
+              >
+                {t("pair.mismatch")}
+              </button>
+              <button
+                type="button"
+                className="btn primary"
+                style={{ flex: 1 }}
+                onClick={acceptPeer}
+              >
+                {t("pair.match")}
+              </button>
+            </div>
           </div>
         ) : (
           <>

@@ -160,7 +160,6 @@ describe("DevicesPage — clicking a device", () => {
     expect(useOverlays.getState().send).toBeNull();
     expect(useOverlays.getState().fpAlert).toEqual({
       deviceId: "oldkey",
-      step: "warn",
     });
   });
 });

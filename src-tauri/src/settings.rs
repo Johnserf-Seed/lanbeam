@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::AppHandle;
 
 use crate::consts::{DEFAULT_HOTKEY, DEFAULT_TCP_PORT};
 
@@ -63,6 +63,24 @@ pub const ORGANIZE_MODES: [&str; 3] = ["none", "device", "date"];
 /// transfer streams at a time, at most eight — beyond which more parallelism
 /// just thrashes the disk/NIC on a LAN without going faster.
 pub const MAX_CONCURRENT_RANGE: (u32, u32) = (1, 8);
+
+/// Inclusive range the `ui_zoom` setter clamps into. The floor is where the app's
+/// 10px mono labels stop being readable; the ceiling is where a 920pt-wide window
+/// (the layout's own minimum) can no longer hold the layout even after the window
+/// minimum scales up with it — past 1.5 the app would be demanding a window most
+/// laptops can't give it.
+pub const UI_ZOOM_RANGE: (f64, f64) = (0.8, 1.5);
+
+/// The layout's minimum in CSS pixels — the same numbers as `tauri.conf.json`'s
+/// `minWidth`/`minHeight`, and they have to stay in step.
+///
+/// WHY they live here at all: a webview zoom SHRINKS the CSS viewport. A 920pt-wide
+/// window at 150% has 613 CSS px of layout space, which is far under what this UI
+/// is built for — so a zoom that ignored the window minimum would let the user
+/// scale the interface straight off the edge of its own window (clipped sidebar,
+/// clipped radar). The window floor scales with the zoom instead; see
+/// `lib::apply_ui_zoom`.
+pub const MIN_LAYOUT_SIZE: (f64, f64) = (920.0, 600.0);
 
 /// Upper bound (in MB/s) the `rate_limit` setter accepts (M6.7). 1 TB/s is
 /// already far beyond any LAN hardware, so the cap only exists to reject absurd
@@ -144,6 +162,10 @@ pub struct Settings {
     /// needs no restart.
     #[serde(default = "default_verify_hash")]
     pub verify_hash: bool,
+    /// Interface scale. 1.0 = the design size; the webview is zoomed to this and
+    /// the window's minimum size scales with it (see `MIN_LAYOUT_SIZE`).
+    #[serde(default = "default_ui_zoom")]
+    pub ui_zoom: f64,
     /// How a received name that collides with an existing file is resolved
     /// (M6.5): `"rename"` (de-dupe), `"overwrite"` (replace), or `"ask"` (prompt
     /// per transfer via the ConflictModal). Read at receive time, so toggling it
@@ -206,6 +228,7 @@ impl Default for Settings {
             hotkey_enabled: default_hotkey_enabled(),
             hotkey: default_hotkey(),
             verify_hash: default_verify_hash(),
+            ui_zoom: default_ui_zoom(),
             conflict: default_conflict(),
             organize: default_organize(),
             max_concurrent: default_max_concurrent(),
@@ -305,6 +328,10 @@ fn default_organize() -> String {
     "none".to_string()
 }
 
+fn default_ui_zoom() -> f64 {
+    1.0
+}
+
 fn default_max_concurrent() -> u32 {
     // Three at once saturates a typical LAN link without thrashing the disk;
     // the user can raise it up to the range ceiling or drop to serial (1).
@@ -338,6 +365,16 @@ pub fn default_strip_exif() -> bool {
 /// hand-edited blob (`max_concurrent: 999`) can never uncap parallelism.
 pub fn clamp_max_concurrent(n: u32) -> u32 {
     n.clamp(MAX_CONCURRENT_RANGE.0, MAX_CONCURRENT_RANGE.1)
+}
+
+/// Clamp a UI scale into the usable range. A NaN — which a hand-edited settings.json
+/// or a bad float could produce — falls back to 1.0 rather than propagating into a
+/// window size, where it would resolve to nothing at all.
+pub fn clamp_ui_zoom(z: f64) -> f64 {
+    if !z.is_finite() {
+        return default_ui_zoom();
+    }
+    z.clamp(UI_ZOOM_RANGE.0, UI_ZOOM_RANGE.1)
 }
 
 /// Whether a `rate_limit` string is one the setter may persist (M6.7):
@@ -491,7 +528,7 @@ pub fn load(app: &AppHandle) -> (Settings, Option<String>) {
     // plugin here keeps the store from re-registering, which would both
     // resurrect the exit-save tear window AND, at shutdown, overwrite an atomic
     // save with the plugin's stale in-memory copy.
-    let path = app.path().app_data_dir().ok().map(|dir| dir.join(&file));
+    let path = Some(crate::paths::data_dir(app).join(&file));
     if let Some(v) = path.as_deref().and_then(read_settings_blob) {
         return parse_or_default(v);
     }
@@ -546,11 +583,7 @@ pub fn save(app: &AppHandle, s: &Settings) {
     // while the user believes it changed. Logging is safe here — save only
     // runs from commands, after the log plugin is registered (the pre-logger
     // constraint applies to `load` alone).
-    let Ok(dir) = app.path().app_data_dir() else {
-        log::warn!("settings save failed: app data dir unavailable");
-        return;
-    };
-    let path = dir.join(store_file());
+    let path = crate::paths::data_dir(app).join(store_file());
     // Serialize the same `{"settings": {...}}` shape the plugin wrote, so `load`
     // (and any older build still on the plugin) reads it back unchanged.
     let json = match serde_json::to_value(s).map(|v| serde_json::json!({ KEY: v })) {
@@ -600,6 +633,27 @@ mod tests {
     /// A blob written by an M1 build (only the 3 original fields) must parse,
     /// keep its stored values, and fill new fields with defaults — upgrading
     /// must never wipe the user's settings.
+    /// The scale is clamped, and a NaN — which a hand-edited settings.json or a bad
+    /// float can produce — falls back to 1.0. It must never reach `set_min_size`: a
+    /// NaN window size resolves to no window at all.
+    #[test]
+    fn ui_zoom_is_clamped_and_nan_falls_back() {
+        let (lo, hi) = UI_ZOOM_RANGE;
+        assert_eq!(clamp_ui_zoom(1.0), 1.0);
+        assert_eq!(clamp_ui_zoom(1.25), 1.25);
+        assert_eq!(clamp_ui_zoom(0.1), lo, "below the floor");
+        assert_eq!(clamp_ui_zoom(9.0), hi, "above the ceiling");
+        assert_eq!(clamp_ui_zoom(f64::NAN), 1.0, "NaN is not a window size");
+        assert_eq!(clamp_ui_zoom(f64::INFINITY), 1.0);
+        assert_eq!(clamp_ui_zoom(f64::NEG_INFINITY), 1.0);
+    }
+
+    /// A fresh install is at the design size.
+    #[test]
+    fn ui_zoom_defaults_to_one() {
+        assert_eq!(Settings::default().ui_zoom, 1.0);
+    }
+
     #[test]
     fn old_blob_yields_defaults_for_new_fields() {
         let old = json!({

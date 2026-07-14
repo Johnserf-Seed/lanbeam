@@ -158,6 +158,10 @@ pub async fn recv_pair_confirm(
 /// The tag the quick-text receiver acks with (`Ack { of }`). One constant so the
 /// receiver's reply and any future matcher can never drift apart.
 const TEXT_ACK: &str = "text";
+/// Coarse reasons a quick text did not reach the user, carried on the ack. Stable
+/// tokens the sender maps to a typed error — never shown raw.
+const TEXT_DROP_UNTRUSTED: &str = "untrusted";
+const TEXT_DROP_THROTTLED: &str = "throttled";
 
 /// Push one quick text to a peer over an already-open session (M7.3). v2-gated —
 /// the `send_text` command checks the negotiated version before calling this, so
@@ -187,7 +191,21 @@ pub async fn send_text(
     })
     .await;
     match acked {
-        // Any `Ack` means the receiver took the text and emitted it — resolve.
+        // An ack that says it did NOT deliver is not a success. This function's
+        // whole contract is "resolves only once the peer confirms it received it"
+        // — and the peer drops a stranger's text (there is no prompt to park it
+        // in). It used to ack that drop anyway, so the sender reported success for
+        // a message that was thrown away on arrival.
+        Ok(Ok(AppMessage::Ack {
+            delivered: Some(false),
+            reason,
+            ..
+        })) => Err(match reason.as_deref() {
+            Some(TEXT_DROP_THROTTLED) => LanBeamError::TextThrottled,
+            _ => LanBeamError::TextRefused,
+        }),
+        // Delivered — or a peer too old to tell us either way, where an ack meant
+        // exactly this.
         Ok(Ok(AppMessage::Ack { .. })) => Ok(()),
         Ok(Ok(other)) => Err(LanBeamError::Protocol(format!(
             "expected text ack, got {}",
@@ -1510,6 +1528,12 @@ struct FileProgress {
     /// on interruption exactly as before M6.4.
     hashed: bool,
     bytes_written: u64,
+    /// Fully written, synced, and (if hashed) digest-matched. Such a file is
+    /// whole, not partial — the error path leaves it on disk instead of deleting
+    /// it because a LATER file in the same batch went bad. (Under `overwrite`
+    /// "whole" still means "whole, in a temp file": that commit is all-or-nothing
+    /// and only happens once the entire transfer succeeds.)
+    done: bool,
 }
 
 /// Accept + receive with the PRE-M6 semantics: every file fresh, de-dupe on
@@ -1701,6 +1725,7 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                 path: path.clone(),
                 hashed,
                 bytes_written: start_offset,
+                done: false,
             });
             let pi = progress.len() - 1;
 
@@ -1815,6 +1840,7 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                 index: i,
                 verified: f.sha256.is_some(),
             });
+            progress[pi].done = true;
             saved.push(path);
         }
         Ok(())
@@ -1875,8 +1901,11 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
         Err(e) => {
             // Best-effort: tell the sender. Then decide each written file's fate
             // (M6.4): keep a hashed partial through an interruption for a later
-            // resume, but delete a non-hashed one — and delete EVERYTHING on a
-            // data-integrity failure (the pre-M6.4 all-or-nothing cleanup). The
+            // resume, delete a non-hashed one, and — on a data-integrity failure —
+            // delete the file whose digest did NOT match while LEAVING its verified
+            // siblings alone. (This comment used to say "delete EVERYTHING on a
+            // data-integrity failure", which was true, and was the bug: one bad
+            // hash took the whole batch with it. See the retain below.) The
             // accumulator is pruned to exactly the files left on disk so the
             // caller persists precisely those.
             let _ = send_control(
@@ -1898,6 +1927,25 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
             .await;
             let keep_resumable = e.keeps_partial();
             progress.retain(|w| {
+                // A file that already finished — written, synced, digest matched —
+                // is FINISHED. A later file in the batch failing its checksum says
+                // nothing about this one (a hash mismatch means corruption in
+                // transit; a peer out to lie would simply have sent a matching
+                // hash). Deleting good, verified data to punish a neighbour is
+                // just data loss, and it used to happen to the whole batch. Leave
+                // it on disk, and drop it from the partial accumulator — it is
+                // whole, not partial.
+                //
+                // `overwrite` is the exception, and only looks like one: there
+                // "finished" means the bytes are in a TEMP file while the real
+                // target still holds the old content. That commit is deliberately
+                // all-or-nothing and only runs once the entire transfer succeeds,
+                // so an uncommitted temp falls through to the normal rule below —
+                // deleted outright, or kept as a resumable partial.
+                let uncommitted_temp = overwrite_renames.iter().any(|(t, _)| *t == w.path);
+                if w.done && !uncommitted_temp {
+                    return false;
+                }
                 let stays = keep_resumable && w.hashed;
                 if !stays {
                     // The file handle unwound with the async block above, so
@@ -2073,6 +2121,41 @@ fn notify_system<R: Runtime>(ctx: &TransportCtx<R>, title: &str, body: &str) {
         log::warn!("system notification failed: {e}");
     }
 }
+
+/// Show the just-received files in the file manager, if the user asked for it
+/// (`auto_open_folder`, read at fire time).
+///
+/// That setting had a switch, a command, a persisted field and its own line in
+/// the diagnostics export — and nothing anywhere that acted on it. Rust read it
+/// only to hand it back to the UI so the switch could render its own state. It
+/// also defaults ON, so every install has been promising this and never doing it.
+#[cfg(desktop)]
+fn reveal_if_asked<R: Runtime>(ctx: &TransportCtx<R>, path: Option<&std::path::Path>) {
+    use tauri::Manager;
+    let enabled = ctx
+        .settings
+        .read()
+        .map(|s| s.auto_open_folder)
+        .unwrap_or(false);
+    if !enabled {
+        return;
+    }
+    let Some(path) = path else { return };
+    // try_state, NOT OpenerExt::opener(): the ext accessor panics when the plugin
+    // is absent, and the integration tests drive the real `handle_incoming` on a
+    // mock app with no plugins — a missing opener must degrade to silence, never
+    // take the session down with it. (Same reason `notify_system` does it.)
+    let Some(opener) = ctx.app.try_state::<tauri_plugin_opener::Opener<R>>() else {
+        return;
+    };
+    if let Err(e) = opener.reveal_item_in_dir(path) {
+        log::warn!("auto-open: reveal {} failed: {e}", path.display());
+    }
+}
+
+/// Mobile stub — see `notify_system`.
+#[cfg(not(desktop))]
+fn reveal_if_asked<R: Runtime>(_ctx: &TransportCtx<R>, _path: Option<&std::path::Path>) {}
 
 /// Mobile stub — the notification plugin is a desktop-only dependency here,
 /// and a no-op keeps every call site free of cfg noise.
@@ -2318,11 +2401,20 @@ pub async fn handle_incoming<R: Runtime>(
         "resuming": resuming,
     });
 
-    let (accept, conflict_choice) = if auto_accepted {
+    // Auto-accept answers the ACCEPT question ("do I want anything from this
+    // device") — it does not answer the COLLISION question ("what do I do with my
+    // existing file"). Those are two settings and two decisions. A user who set
+    // 冲突策略 = 每次询问 asked to be asked, and silently answering "rename" on
+    // their behalf was worst precisely where it is most likely to bite: a trusted
+    // device with auto-accept on is the MAIN path, so under the default settings
+    // (recv_policy "trusted" + conflict "ask") the modal could never appear at all.
+    // So: still no accept prompt, but do stop and ask about the collision.
+    let ask_collision = auto_accepted && conflict_policy == "ask" && !conflicts.is_empty();
+
+    let (accept, conflict_choice) = if auto_accepted && !ask_collision {
         // The prompt machinery is skipped entirely: nothing parked in
         // `pending`, no oneshot, no 120s window. The event still fires so
-        // the UI can surface WHAT was auto-accepted and from whom. No modal
-        // choice is possible here, so collisions fall back to the safe rename.
+        // the UI can surface WHAT was auto-accepted and from whom.
         log::info!("auto-accepting {session_id} from {device_id} (recv_policy \"{policy}\")");
         let _ = ctx.app.emit("incoming_file_request", request_payload);
         (true, None)
@@ -2366,6 +2458,17 @@ pub async fn handle_incoming<R: Runtime>(
 
         let decision = match tokio::time::timeout(Duration::from_secs(120), rx).await {
             Ok(Ok(d)) => d,
+            // Nobody answered. What that MEANS depends on what was asked. An
+            // accept prompt unanswered is a "no" — silence must never become
+            // consent. But an auto-accepted transfer already has its yes; only
+            // the collision choice was outstanding, so throwing the whole
+            // transfer away over an unanswered follow-up would punish the user
+            // for stepping out. Fall back to the safe, non-destructive rename —
+            // the same thing this path did before it learned to ask at all.
+            _ if ask_collision => ReplyDecision {
+                accept: true,
+                conflict: Some(ConflictAction::Rename),
+            },
             _ => ReplyDecision::plain(false),
         };
         // Owner-only cleanup: on the answered path `reply_file_request` already
@@ -2537,6 +2640,8 @@ pub async fn handle_incoming<R: Runtime>(
                 })
                 .collect();
             let file_count = paths.len();
+            // Kept before `paths` moves into the completed log below.
+            let first_saved = paths.first().cloned();
             // Poisoned lock = graceful no-op, not a cascade panic (the invariant
             // every other registry access in this file upholds): a panicked
             // holder of `completed` must degrade to a skipped history entry, not
@@ -2557,15 +2662,31 @@ pub async fn handle_incoming<R: Runtime>(
                 &sender_name,
                 &format!("✓ {} · {}", file_count, human_size(manifest.total_size)),
             );
+            reveal_if_asked(ctx, first_saved.as_deref());
             Ok(())
         }
         Err(e) => {
+            // A failed receive is at least as worth interrupting for as a
+            // successful one — and it used to be the only one that said nothing
+            // at all, so a transfer that ran for ten minutes and then threw its
+            // bytes away did it in total silence. Locale-neutral like the rest
+            // (a cross, a count, a size); the WHY is the in-app toast's job,
+            // where there is an i18n layer to say it in the user's language.
+            notify_system(
+                ctx,
+                &sender_name,
+                &format!(
+                    "✕ {} · {}",
+                    manifest.files.len(),
+                    human_size(manifest.total_size)
+                ),
+            );
             // Record resumable partials (M6.4): `progress` was pruned by
             // `run_receive_core` to the files still on disk (hashed files kept
-            // through an interruption; everything deleted on a data-integrity
-            // failure), so persist exactly those and drop the rest. `set_files`
-            // replaces this manifest's identities, so a corrupt/deleted file's
-            // stale partial is cleared even when nothing new is kept.
+            // through an interruption; a corrupt file deleted, its verified
+            // siblings left alone), so persist exactly those and drop the rest.
+            // `set_files` replaces this manifest's identities, so a corrupt or
+            // deleted file's stale partial is cleared even when nothing is kept.
             let kept: Vec<PartialRecord> = progress
                 .iter()
                 .map(|w| PartialRecord {
@@ -2668,8 +2789,12 @@ async fn handle_pair_request<R: Runtime>(
 
     let my_name = local_device_name(&ctx.settings);
     if matched {
-        // (3a) Mutually trust the joiner under its handshake identity + the
-        // friendly name it introduced itself with (short-id fallback).
+        // (3a) The code was right, so the protocol accepts — but NO trust is
+        // granted here. Accepting a code and trusting a device are two different
+        // decisions, and only the second one needs a human: the SAS below is the
+        // sole defence against a machine-in-the-middle, and a code nobody read is
+        // not a check. `pair_joined` hands the UI the SAS; the UI records trust
+        // (`set_trusted`) once the user confirms it matches the other screen.
         let joiner_name = peer
             .name
             .as_deref()
@@ -2677,7 +2802,6 @@ async fn handle_pair_request<R: Runtime>(
             .filter(|n| !n.is_empty())
             .map(String::from)
             .unwrap_or_else(|| device_id.chars().take(8).collect());
-        trust_peer(ctx, device_id, &joiner_name, false);
         if let Some(ip) = peer_ip {
             if let Ok(mut r) = ctx.pairing.rate.lock() {
                 r.clear(&ip);
@@ -2692,13 +2816,16 @@ async fn handle_pair_request<R: Runtime>(
             },
         )
         .await?;
-        // Surface the joiner + the SAS so the UI can show who paired and offer
-        // the out-of-band code compare (the MITM backstop for TOFU pairing).
+        // Hand the UI who redeemed the code and the SAS to compare. This is the
+        // ONLY route by which a pairing becomes trust on this side — if the user
+        // never confirms, nothing was trusted.
         let _ = ctx.app.emit(
             "pair_joined",
             json!({ "deviceId": device_id, "name": joiner_name, "sas": session.sas() }),
         );
-        log::info!("pairing: {device_id} ({joiner_name:?}) paired");
+        log::info!(
+            "pairing: {device_id} ({joiner_name:?}) redeemed the code; awaiting SAS confirm"
+        );
         Ok(())
     } else {
         // (3b) No trust change. The failure was already recorded at the gate
@@ -2749,15 +2876,6 @@ fn code_matches(expected: &str, got: &str) -> bool {
     diff == 0
 }
 
-/// Add (or refresh) a trusted peer from a pairing exchange (M7.1) and tell the
-/// UI. Same persist-outside-the-guard shape as the `set_trusted` command
-/// (M4.4/M4.6): snapshot under the write guard, then file I/O + emit after it
-/// drops, so the trust lock never waits on a disk. A poisoned lock is skipped —
-/// the pair still succeeded on the wire, just without the local record.
-fn trust_peer<R: Runtime>(ctx: &TransportCtx<R>, device_id: &str, name: &str, auto_accept: bool) {
-    trust::grant(&ctx.app, &ctx.trusted, device_id, name, auto_accept);
-}
-
 // ── quick-text receive side (M7.3) ─────────────────────────────────────
 /// Handle an inbound quick text, gated on `TRANSFER_V2` upstream. Emits
 /// `text_received` for the inbox, optionally mirrors the text to THIS machine's
@@ -2798,7 +2916,7 @@ async fn handle_text_received<R: Runtime>(
             .unwrap_or(true);
         if !admitted {
             log::warn!("quick text from {ip} throttled; dropping");
-            ack_text(session).await;
+            ack_text(session, Some(TEXT_DROP_THROTTLED)).await;
             return Ok(());
         }
     }
@@ -2826,7 +2944,9 @@ async fn handle_text_received<R: Runtime>(
         .is_some_and(|t| t.get(device_id).is_some());
     if !is_trusted && policy != "all" {
         log::info!("quick text from {device_id} dropped (untrusted, recv_policy \"{policy}\")");
-        ack_text(session).await;
+        // Tell the sender it was dropped. Their `send_text` now fails instead of
+        // reporting a delivery that never happened.
+        ack_text(session, Some(TEXT_DROP_UNTRUSTED)).await;
         return Ok(());
     }
 
@@ -2872,7 +2992,7 @@ async fn handle_text_received<R: Runtime>(
     // Ack so the sender's `send_text` resolves; a failed ack write is only
     // logged (best-effort, like the file path's final ack) — the text already
     // reached the UI, so a lost ack must not turn a delivered text into an error.
-    ack_text(session).await;
+    ack_text(session, None).await;
     Ok(())
 }
 
@@ -2880,11 +3000,15 @@ async fn handle_text_received<R: Runtime>(
 /// send one and only LOG a write failure — a text that was delivered (or was
 /// deliberately dropped by the trust/flood gates) must never surface to the peer
 /// as an error, and a dropped text must not hand the sender a delivery oracle.
-async fn ack_text(session: &mut NoiseSession) {
+/// Ack a quick text. `dropped` carries the reason when it did NOT reach the user,
+/// so the sender can fail instead of reporting a delivery that never happened.
+async fn ack_text(session: &mut NoiseSession, dropped: Option<&str>) {
     if let Err(e) = send_control(
         session,
         &AppMessage::Ack {
             of: TEXT_ACK.to_string(),
+            delivered: Some(dropped.is_none()),
+            reason: dropped.map(str::to_string),
         },
     )
     .await
@@ -3633,9 +3757,16 @@ mod tests {
             );
             assert_eq!(peer.name.as_deref(), Some("Sender"));
             // Stand in for `handle_text_received`'s ack so send_text can resolve.
-            send_control(&mut s, &AppMessage::Ack { of: "text".into() })
-                .await
-                .unwrap();
+            send_control(
+                &mut s,
+                &AppMessage::Ack {
+                    of: "text".into(),
+                    delivered: None,
+                    reason: None,
+                },
+            )
+            .await
+            .unwrap();
         });
 
         let stream = TcpStream::connect(addr).await.unwrap();

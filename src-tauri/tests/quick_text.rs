@@ -21,6 +21,7 @@ use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
 use lanbeam_lib::consts::TRANSFER_V2;
+use lanbeam_lib::error::LanBeamError;
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
@@ -165,13 +166,17 @@ async fn loopback_quick_text_emits_text_received_and_acks() {
 }
 
 /// Quick text from an UNTRUSTED sender under the default "trusted" recv_policy is
-/// GATED (M7.3 hardening): the receiver never emits `text_received` (a stranger's
-/// note/link is not surfaced unconditionally, the same way files don't
-/// auto-accept an unknown sender), yet the sender's `send_text` still resolves —
-/// the receiver acks the dropped text rather than hanging the peer or handing it
-/// a trust/policy oracle.
+/// GATED: the receiver never emits `text_received` (a stranger's note/link is not
+/// surfaced unconditionally, the same way files don't auto-accept an unknown
+/// sender) — AND THE SENDER IS TOLD.
+///
+/// This test used to be called `..._is_dropped_but_acked`, and it asserted that
+/// `send_text` "still resolves on the receiver's ack". It was pinning the lie:
+/// the sender saw success for a message that was thrown away on arrival, while
+/// `send_text`'s own contract promises it "resolves only once the peer confirms
+/// it received it". The ack can now say no, and the sender fails.
 #[tokio::test]
-async fn untrusted_text_under_trusted_policy_is_dropped_but_acked() {
+async fn untrusted_text_under_trusted_policy_is_dropped_and_the_sender_is_told() {
     let tmp = std::env::temp_dir().join(format!("lanbeam-qt-drop-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let dl_dir = tmp.join("downloads");
@@ -218,10 +223,14 @@ async fn untrusted_text_under_trusted_policy_is_dropped_but_acked() {
         .unwrap();
     let peer = initiator_hello(&mut sess, "Stranger".into()).await.unwrap();
     assert_eq!(peer.version, TRANSFER_V2);
-    // The send still resolves — the receiver acks even though it drops the text.
-    send_text(&mut sess, "click this sketchy link".into(), Some(false))
+    // The send FAILS: the receiver acked, but the ack said it did not deliver.
+    let err = send_text(&mut sess, "click this sketchy link".into(), Some(false))
         .await
-        .expect("send_text still resolves on the receiver's ack");
+        .expect_err("a text the receiver threw away is not a successful send");
+    assert!(
+        matches!(err, LanBeamError::TextRefused),
+        "the sender learns their text was refused by the receive policy, not that          it arrived — got {err:?}"
+    );
     drop(sess);
 
     responder

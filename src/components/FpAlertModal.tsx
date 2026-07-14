@@ -1,8 +1,5 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import * as api from "../bridge/api";
-import { fmtSas } from "../lib/format";
-import { errText } from "../lib/sendops";
 import {
   showToast,
   trustList,
@@ -44,313 +41,198 @@ function CloseBtn({ onClick }: { onClick: () => void }) {
   );
 }
 
-/** 指纹变化警告 — real feature: a remembered device's name reappeared under a
- *  different key. Offers removing trust or re-verifying the SAS against the
- *  new key and migrating the trust record. */
+/** 指纹变化警告 — a remembered device's name has reappeared under a different key.
+ *
+ *  It reports, and it offers two SAFE ways out. It does not offer to "re-verify
+ *  and restore trust", which is what it used to do:
+ *
+ *  That flow dialled the new key, showed the resulting SAS, and told the user
+ *  「两台设备屏幕应显示一致」. The other device showed NOTHING — `connect_device`
+ *  hands the SAS back to the caller and the far end just swallows a Bye. So the
+ *  number had nothing to be compared against, and pressing 「一致」 migrated trust
+ *  onto the very key the alert existed to make you suspicious of. A code only one
+ *  side can read is not a check; it is a formality that ends in a yes.
+ *
+ *  Trusting a key you have never seen is what PAIRING is for — and pairing now
+ *  shows the same SAS on BOTH screens and needs both people to confirm it. So the
+ *  way back is to pair, like with any new device. That is heavier, and it should
+ *  be: the whole question here is whether the thing on the other end is yours. */
 export default function FpAlertModal() {
   const { t } = useTranslation();
   const fpAlert = useOverlays((s) => s.fpAlert);
   const setFpAlert = useOverlays((s) => s.setFpAlert);
+  const setPair = useOverlays((s) => s.setPair);
   const records = useTrust((s) => s.records);
   const removeTrust = useTrust((s) => s.remove);
-  const migrate = useTrust((s) => s.migrate);
   const devices = useData((s) => s.devices);
-  const [reverifying, setReverifying] = useState(false);
 
   const record = fpAlert ? records[fpAlert.deviceId] : undefined;
-  const imposterId = fpAlert
+  const newDeviceId = fpAlert
     ? trustList(devices, records).find((d) => d.deviceId === fpAlert.deviceId)
         ?.fpChanged?.newDeviceId
     : undefined;
+  const newDevice = devices.find((d) => d.deviceId === newDeviceId);
 
-  // The alert is stale once the record is gone or the new key disappeared.
-  const stale = !!fpAlert && (!record || !imposterId);
+  // The alert is stale once the record is gone or the new key is no longer here.
+  const stale = !!fpAlert && (!record || !newDevice);
   useEffect(() => {
     if (stale) setFpAlert(null);
   }, [stale, setFpAlert]);
 
-  if (!fpAlert || !record || !imposterId) return null;
+  if (!fpAlert || !record || !newDevice) return null;
   const close = () => setFpAlert(null);
   const name = record.name;
 
-  const remove = (toastKey: string) => {
+  /* Delete the remembered device. The key it stood for is not coming back — and
+     if the new one really is that machine, it will earn its own record by
+     pairing. */
+  const forgetOld = () => {
     removeTrust(fpAlert.deviceId);
-    showToast(t(toastKey));
+    showToast(t("fp.removedToast"));
     close();
   };
 
-  const reverify = () => {
-    if (reverifying) return;
-    setReverifying(true);
-    // The handshake has unbounded latency; only act on the result if this warn
-    // alert is still the one on screen — the user may have dismissed it, or a
-    // different device's alert may have replaced it meanwhile.
-    const stillCurrent = () => {
-      const cur = useOverlays.getState().fpAlert;
-      return !!cur && cur.deviceId === fpAlert.deviceId && cur.step === "warn";
-    };
-    api
-      .connectDevice(imposterId)
-      .then((sas) => {
-        if (stillCurrent())
-          setFpAlert({ deviceId: fpAlert.deviceId, step: "verify", sas });
-      })
-      .catch((e) => {
-        if (stillCurrent()) showToast(errText(e));
-      })
-      .finally(() => setReverifying(false));
-  };
-
-  const match = () => {
-    migrate(fpAlert.deviceId, imposterId, name);
-    showToast(t("fp.matchToast"));
+  /* Pair with the new key, like the new device it is. PairModal shows the SAS on
+     both screens and records trust only when a human says they match.
+     `setPair(open, prefill)` in ONE call — the two-arg form exists because
+     `setPair(true)` alone defaults the prefill to null and would wipe it. */
+  const pair = () => {
     close();
+    setPair(true, newDevice.address);
   };
 
   return (
     <div className="scrim" style={{ zIndex: 62 }}>
-      <div className="modal" style={{ width: 404, fontFamily: "var(--font)" }}>
-        {fpAlert.step === "warn" ? (
-          <div style={{ animation: "lbFade .18s ease" }}>
+      <div
+        className="modal"
+        style={{
+          width: 420,
+          fontFamily: "var(--font)",
+          animation: "lbFade .18s ease",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            gap: 11,
+            padding: "18px 20px 0",
+            alignItems: "flex-start",
+          }}
+        >
+          <div
+            style={{
+              width: 30,
+              height: 30,
+              flex: "none",
+              borderRadius: 9,
+              background: "var(--danger-soft)",
+              color: "var(--danger)",
+              display: "grid",
+              placeItems: "center",
+              fontSize: 15,
+              fontWeight: 700,
+            }}
+          >
+            !
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
             <div
-              style={{
-                display: "flex",
-                gap: 11,
-                padding: "18px 20px 0",
-                alignItems: "flex-start",
-              }}
+              style={{ fontSize: 13.5, fontWeight: 650, color: "var(--ink2)" }}
             >
-              <div
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 10,
-                  background: "var(--danger-soft)",
-                  color: "var(--danger)",
-                  display: "grid",
-                  placeItems: "center",
-                  fontSize: 16,
-                  fontWeight: 700,
-                  flex: "none",
-                }}
-              >
-                !
-              </div>
-              <div style={{ flex: 1 }}>
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 650,
-                    color: "var(--ink2)",
-                  }}
-                >
-                  {t("fp.warnTitle", { name })}
-                </div>
-                <div
-                  style={{
-                    fontSize: 11.5,
-                    color: "var(--muted)",
-                    marginTop: 2,
-                  }}
-                >
-                  {t("fp.warnSub")}
-                </div>
-              </div>
-              <CloseBtn onClick={close} />
+              {t("fp.warnTitle", { name })}
             </div>
             <div
-              style={{
-                margin: "14px 20px 0",
-                background: "var(--sidebar)",
-                borderRadius: 10,
-                padding: "11px 13px",
-                display: "flex",
-                flexDirection: "column",
-                gap: 6,
-              }}
+              style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 3 }}
             >
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "baseline",
-                  gap: 10,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 10.5,
-                    color: "var(--muted)",
-                    flex: "none",
-                  }}
-                >
-                  {t("fp.before")}
-                </span>
-                <span
-                  style={{
-                    fontFamily: "var(--mono)",
-                    fontSize: 11,
-                    color: "var(--muted)",
-                    textDecoration: "line-through",
-                  }}
-                >
-                  {fpFull(record.deviceId)}
-                </span>
-              </div>
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "baseline",
-                  gap: 10,
-                }}
-              >
-                <span
-                  style={{
-                    fontSize: 10.5,
-                    color: "var(--danger)",
-                    fontWeight: 600,
-                    flex: "none",
-                  }}
-                >
-                  {t("fp.now")}
-                </span>
-                <span
-                  style={{
-                    fontFamily: "var(--mono)",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: "var(--danger)",
-                  }}
-                >
-                  {fpFull(imposterId)}
-                </span>
-              </div>
-            </div>
-            <div
-              style={{
-                padding: "12px 20px 0",
-                fontSize: 11.5,
-                lineHeight: 1.65,
-                color: "var(--muted2)",
-              }}
-            >
-              {t("fp.explain")}
-            </div>
-            <div style={{ display: "flex", gap: 9, padding: "16px 20px 18px" }}>
-              <button
-                type="button"
-                className="btn danger"
-                style={{ flex: 1, height: 34, borderRadius: 9, fontSize: 12 }}
-                onClick={() => remove("fp.removedToast")}
-              >
-                {t("fp.removeTrust")}
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                style={{ flex: 1.4, height: 34, borderRadius: 9, fontSize: 12 }}
-                disabled={reverifying}
-                onClick={reverify}
-              >
-                {t("fp.reverify")}
-              </button>
+              {t("fp.warnSub")}
             </div>
           </div>
-        ) : (
-          <div style={{ animation: "lbFade .18s ease" }}>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "flex-start",
-                gap: 10,
-                padding: "18px 20px 0",
-              }}
-            >
-              <div style={{ flex: 1 }}>
-                <div
-                  style={{
-                    fontSize: 14,
-                    fontWeight: 650,
-                    color: "var(--ink2)",
-                  }}
-                >
-                  {t("fp.verifyTitle", { name })}
-                </div>
-                <div
-                  style={{
-                    fontSize: 11.5,
-                    color: "var(--muted)",
-                    marginTop: 2,
-                  }}
-                >
-                  {t("fp.verifySub")}
-                </div>
-              </div>
-              <CloseBtn onClick={close} />
+          <CloseBtn onClick={close} />
+        </div>
+
+        {/* The two keys, side by side. This is the whole evidence. */}
+        <div
+          style={{
+            display: "flex",
+            gap: 10,
+            margin: "14px 20px 0",
+            padding: "11px 13px",
+            borderRadius: 10,
+            background: "var(--sidebar)",
+            border: "1px solid var(--border)",
+          }}
+        >
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, color: "var(--muted)" }}>
+              {t("fp.before")}
             </div>
             <div
               style={{
-                margin: "14px 20px 0",
-                background: "var(--accent-soft)",
-                borderRadius: 12,
-                padding: "15px 22px",
-                textAlign: "center",
-              }}
-            >
-              <div
-                style={{
-                  fontSize: 10.5,
-                  color: "var(--muted2)",
-                  letterSpacing: ".04em",
-                }}
-              >
-                {t("fp.sasLabel")}
-              </div>
-              <div
-                style={{
-                  fontFamily: "var(--mono)",
-                  fontSize: 24,
-                  fontWeight: 600,
-                  color: "var(--accent-ink)",
-                  marginTop: 8,
-                  letterSpacing: ".06em",
-                }}
-              >
-                {fmtSas(fpAlert.sas)}
-              </div>
-            </div>
-            <div
-              style={{
-                padding: "10px 20px 0",
                 fontFamily: "var(--mono)",
-                fontSize: 10.5,
-                color: "var(--muted)",
-                textAlign: "center",
+                fontSize: 11,
+                color: "var(--muted2)",
+                marginTop: 3,
+                wordBreak: "break-all",
               }}
             >
-              {t("fp.verifyNote")}
-            </div>
-            <div style={{ display: "flex", gap: 9, padding: "16px 20px 18px" }}>
-              <button
-                type="button"
-                className="btn danger"
-                style={{ flex: 1, height: 34, borderRadius: 9, fontSize: 12 }}
-                onClick={() => remove("fp.mismatchToast")}
-              >
-                {t("fp.mismatch")}
-              </button>
-              <button
-                type="button"
-                className="btn primary"
-                style={{ flex: 1.4, height: 34, borderRadius: 9, fontSize: 12 }}
-                onClick={match}
-              >
-                {t("fp.match")}
-              </button>
+              {fpFull(fpAlert.deviceId)}
             </div>
           </div>
-        )}
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 10, color: "var(--danger)" }}>
+              {t("fp.now")}
+            </div>
+            <div
+              style={{
+                fontFamily: "var(--mono)",
+                fontSize: 11,
+                color: "var(--danger)",
+                marginTop: 3,
+                wordBreak: "break-all",
+              }}
+            >
+              {fpFull(newDevice.deviceId)}
+            </div>
+          </div>
+        </div>
+
+        <div
+          style={{
+            fontSize: 11.5,
+            color: "var(--muted2)",
+            lineHeight: 1.7,
+            padding: "12px 20px 0",
+          }}
+        >
+          {t("fp.explain")}
+        </div>
+
+        <div
+          style={{
+            display: "flex",
+            gap: 8,
+            justifyContent: "flex-end",
+            padding: "14px 20px 16px",
+          }}
+        >
+          <button
+            type="button"
+            className="btn danger"
+            style={{ padding: "0 14px" }}
+            onClick={forgetOld}
+          >
+            {t("fp.forgetOld")}
+          </button>
+          <button
+            type="button"
+            className="btn primary"
+            style={{ padding: "0 16px" }}
+            onClick={pair}
+          >
+            {t("fp.pairAgain")}
+          </button>
+        </div>
+        <div className="modal-foot">{t("fp.foot")}</div>
       </div>
     </div>
   );

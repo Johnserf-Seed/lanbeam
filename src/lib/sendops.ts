@@ -90,6 +90,9 @@ export async function sendTextTracked(
 const ERR_KEYS: Record<string, string> = {
   PeerTooOld: "errors.peerTooOld",
   PeerNotFound: "errors.peerNotFound",
+  SelfPeer: "errors.selfPeer",
+  TextRefused: "errors.textRefused",
+  TextThrottled: "errors.textThrottled",
   Protocol: "errors.protocol",
   Handshake: "errors.handshake",
   IdentityMismatch: "errors.identityMismatch",
@@ -102,7 +105,40 @@ const ERR_KEYS: Record<string, string> = {
   Integrity: "errors.integrity",
   Io: "errors.io",
   Bind: "errors.io",
+  NotFound: "errors.notFound",
 };
+
+/** Whether a caught backend error means "that path is gone" (as opposed to an
+ *  open/IO failure). Callers use it to show an honest message instead of
+ *  blaming a stale record for what may really be a failure to open. */
+export function isNotFound(e: unknown): boolean {
+  return (e as { kind?: string } | null)?.kind === "NotFound";
+}
+
+/** `transfer_error` events carry a coarse `code` (the backend's `ui_code()` — a
+ *  closed set of seven) and an `error` string. Map the CODE; never show the
+ *  string.
+ *
+ *  That string is the backend's English internal diagnostic — "protocol: peer
+ *  closed connection", "io: The system cannot find the path specified. (os error
+ *  3)". error.rs says so in its first line. Falling back to it, which the
+ *  transfer detail pane did for every code it didn't special-case, put raw Rust
+ *  in front of the user and leaked local paths into the UI. Every code has a key
+ *  here; anything unrecognized gets the generic line, never the raw string. */
+const TRANSFER_ERR_KEYS: Record<string, string> = {
+  declined: "errors.rejected",
+  timeout: "errors.timeout",
+  cancelled: "errors.cancelled",
+  peer_too_old: "errors.peerTooOld",
+  integrity: "errors.integrity",
+  io: "errors.io",
+  protocol: "errors.protocol",
+  text_dropped: "errors.textRefused",
+};
+
+export function transferErrText(code: string | undefined): string {
+  return i18n.t((code && TRANSFER_ERR_KEYS[code]) || "errors.generic");
+}
 
 /** Localized, user-facing text for a caught error. Driven by the error's `kind`
  *  (the stable contract); the raw English `message` is deliberately NOT shown.
@@ -114,25 +150,32 @@ export function errText(e: unknown): string {
   return i18n.t(kind && ERR_KEYS[kind] ? ERR_KEYS[kind] : "errors.generic");
 }
 
-/** Open a received file with the system default app. */
+/** Open a received file with the system default app.
+ *
+ *  Routed through the BACKEND (`open_local_path`), NOT the opener plugin's JS
+ *  `openPath`. That plugin command is scope-gated and its scope is a static
+ *  allow-list, while our download folder is user-relocatable to anywhere on
+ *  disk — so the only scope that would actually work is `"**"`, i.e. granting
+ *  the webview "open any file on this machine". The plugin's Rust api does the
+ *  same job without handing over that authority. Rethrows so callers can tell a
+ *  genuinely missing file (`NotFound`) from an open failure. */
 export async function openFile(path: string): Promise<void> {
   if (!api.isTauri) {
     showToast(i18n.t("common.milestoneNote"));
     return;
   }
-  const { openPath } = await import("@tauri-apps/plugin-opener");
-  await openPath(path);
+  await api.openLocalPath(path);
 }
 
 /** Open a directory itself in the system file manager (revealFile would open
- *  its PARENT with the directory merely selected). */
+ *  its PARENT with the directory merely selected). Same backend door as
+ *  [`openFile`]. */
 export async function openDir(path: string): Promise<void> {
   if (!api.isTauri) {
     showToast(i18n.t("common.milestoneNote"));
     return;
   }
-  const { openPath } = await import("@tauri-apps/plugin-opener");
-  await openPath(path);
+  await api.openLocalPath(path);
 }
 
 /** Reveal a received file in the system file manager. */

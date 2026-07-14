@@ -21,6 +21,7 @@ vi.mock("../bridge/api", async () => {
     startShare: vi.fn(actual.startShare),
     stopShare: vi.fn(actual.stopShare),
     updateShare: vi.fn(actual.updateShare),
+    listShares: vi.fn(actual.listShares),
   };
 });
 
@@ -32,7 +33,8 @@ vi.mock("../lib/sendops", async () => {
   return { ...actual, copyText: vi.fn() };
 });
 
-import { startShare, stopShare, updateShare } from "../bridge/api";
+import { listShares, startShare, stopShare, updateShare } from "../bridge/api";
+import type { ShareEntry } from "../bridge/api";
 import { copyText } from "../lib/sendops";
 
 const overlays0 = { ...useOverlays.getState() };
@@ -172,5 +174,54 @@ describe("ShareModal", () => {
     ).toBeInTheDocument();
     expect(startShare).not.toHaveBeenCalled();
     expect(screen.queryByText(i18n.t("share.stop"))).toBeNull();
+  });
+
+  describe("a share you left running", () => {
+    // The bug this whole block exists for: closing the panel does NOT stop the
+    // share (a link you handed someone shouldn't die because you closed the panel
+    // you copied it from) — but it used to do that SILENTLY, and reopening the
+    // panel minted a NEW share instead of picking up the live one. So a forgotten
+    // share went on serving files over HTTP, invisible and unstoppable: the only
+    // 停止分享 button in the app now pointed at a different share.
+    const LIVE: ShareEntry = {
+      token: "livetoken",
+      url: "http://192.168.1.5:51705/s/livetoken",
+      fileCount: 2,
+      totalSize: 4096,
+      expiresAt: Date.now() / 1000 + 600,
+      downloads: 0,
+      maxDownloads: 1,
+    };
+
+    it("says the link is still live when you close the panel", async () => {
+      await renderWithLink();
+
+      fireEvent.click(screen.getByRole("button", { name: "×" }));
+
+      expect(useOverlays.getState().shareOpen).toBe(false);
+      // Not silence. The user closed a box, not a share.
+      expect(useToast.getState().msg).toBe(i18n.t("share.keptToast"));
+      expect(stopShare).not.toHaveBeenCalled();
+    });
+
+    it("picks the running share back up instead of starting another one", async () => {
+      vi.mocked(listShares).mockResolvedValueOnce([LIVE]);
+      // Opened bare (no send-flow selection) — i.e. from the sidebar's live
+      // indicator, which is the only way back to a share you closed on.
+      useOverlays.setState({ send: null, shareOpen: true });
+      renderUI(<ShareModal />);
+
+      await screen.findByText(/192\.168\.1\.5:51705\/s\/livetoken/);
+      // The whole point: it did NOT mint a second share.
+      expect(startShare).not.toHaveBeenCalled();
+      expect(useToast.getState().msg).toBe(i18n.t("share.adoptToast"));
+    });
+
+    it("still starts a NEW share when the send flow hands it files", async () => {
+      // Adopting must not hijack "share THESE files".
+      vi.mocked(listShares).mockResolvedValueOnce([LIVE]);
+      await renderWithLink();
+      expect(startShare).toHaveBeenCalledTimes(1);
+    });
   });
 });

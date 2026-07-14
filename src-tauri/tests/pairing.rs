@@ -68,12 +68,20 @@ fn make_host_ctx<R: tauri::Runtime>(
     }
 }
 
-/// A correct code mutually trusts: the host stores the joiner under its
-/// handshake identity + DeviceInfo name, emits `pair_joined` (with the SAS), and
-/// consumes the one-shot code — while the joiner receives an accept carrying the
-/// host's name and the SAME SAS (channel binding).
+/// A correct code is accepted, consumes the one-shot invitation, and reports the
+/// joiner + the SAS through `pair_joined` — while the joiner receives an accept
+/// carrying the host's name and the SAME SAS (channel binding).
+///
+/// And it trusts NOTHING. That is the point of this test. A right code proves a
+/// code, not a device: the SAS is the only thing standing between this pairing
+/// and a machine-in-the-middle, and it hasn't been read by a human yet. Trust is
+/// recorded later, by the UI, through `set_trusted`, once someone confirms the
+/// two screens show the same digits.
+///
+/// This test used to assert the opposite ("the joiner is now trusted by the
+/// host"). It was pinning a backend that trusted strangers on its own.
 #[tokio::test]
-async fn loopback_pairing_mutually_trusts_and_emits_pair_joined() {
+async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
     let tmp = std::env::temp_dir().join(format!("lanbeam-pair-ok-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     let dl_dir = tmp.join("downloads");
@@ -150,20 +158,13 @@ async fn loopback_pairing_mutually_trusts_and_emits_pair_joined() {
         .unwrap()
         .expect("a successful pair is a clean Ok(())");
 
-    // Host trusts the joiner: stored under its handshake identity + DeviceInfo
-    // name, auto_accept OFF (pairing establishes identity, not a standing grant).
-    {
-        let store = ctx.trusted.read().unwrap();
-        let entry = store
-            .get(&joiner_id)
-            .expect("the joiner is now trusted by the host");
-        assert_eq!(entry.name, "Joiner Device");
-        assert!(
-            !entry.auto_accept,
-            "pairing must not silently grant prompt-free receipt"
-        );
-        assert!(entry.paired_at > 0);
-    }
+    // NOTHING is trusted. The handshake proved the code; it did not prove the
+    // device on the other end of it, and no human has compared the SAS yet.
+    assert!(
+        ctx.trusted.read().unwrap().list().is_empty(),
+        "a redeemed code must not, by itself, put anyone in the trust store — \
+         the SAS compare in the UI is what does that"
+    );
     // The one-shot code was consumed.
     assert!(
         pairing.session.lock().unwrap().is_none(),

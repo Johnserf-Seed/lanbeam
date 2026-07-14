@@ -302,10 +302,17 @@ pub fn stop_share(registry: &ShareRegistry, token: &str) -> bool {
 /// to call on a timer; a still-live share is left untouched. A budget-exhausted
 /// share is kept until it also expires, so its link keeps giving an honest 410
 /// rather than a bare 404.
-pub fn sweep(registry: &ShareRegistry, now: Instant) {
-    if let Ok(mut map) = registry.lock() {
-        map.retain(|_, s| s.active && now.duration_since(s.created) < s.ttl);
-    }
+/// Returns whether anything was actually retired — the caller broadcasts the new
+/// list when so, because a share expiring is a change the UI has to see (its live
+/// indicator has to go away on its own, not on the next time someone happens to
+/// open a modal).
+pub fn sweep(registry: &ShareRegistry, now: Instant) -> bool {
+    let Ok(mut map) = registry.lock() else {
+        return false;
+    };
+    let before = map.len();
+    map.retain(|_, s| s.active && now.duration_since(s.created) < s.ttl);
+    map.len() != before
 }
 
 /// Reconfigure an ACTIVE share's TTL and download cap in place (M8.1b): the
@@ -461,7 +468,14 @@ pub struct ShareServerCtx {
     /// Called once per successful file download so the app can surface it
     /// (toast / history / notification / live count). `None` disables that.
     pub on_download: DownloadHook,
+    /// Called whenever the set of live shares CHANGES on its own — i.e. when the
+    /// sweeper retires an expired one. The commands emit for their own mutations;
+    /// this covers the one nobody is watching. `None` disables that.
+    pub on_change: ChangeHook,
 }
+
+/// Notifies the app that the live-share set changed without anyone asking.
+pub type ChangeHook = Option<Arc<dyn Fn() + Send + Sync>>;
 
 /// Spawn the browser-share HTTP server on the Tauri runtime, plus a periodic
 /// sweeper. Binds `0.0.0.0:0` (see the module LAN-exposure note) and publishes
@@ -490,11 +504,16 @@ pub fn spawn_share_server(ctx: ShareServerCtx) {
         // a desk machine's registry from carrying every share of a long session.
         {
             let reg = ctx.registry.clone();
+            let on_change = ctx.on_change.clone();
             tokio::spawn(async move {
                 let mut ticker = tokio::time::interval(Duration::from_secs(60));
                 loop {
                     ticker.tick().await;
-                    sweep(&reg, Instant::now());
+                    if sweep(&reg, Instant::now()) {
+                        if let Some(hook) = &on_change {
+                            hook();
+                        }
+                    }
                 }
             });
         }
@@ -530,33 +549,87 @@ fn router(registry: ShareRegistry, on_download: DownloadHook) -> Router {
         // The download hook rides an Extension layer so only the download handler
         // pulls it (the landing page never counts a download).
         .layer(Extension(on_download))
+        // Outermost: a request from off the LAN is refused before any handler
+        // sees it — before a token can be probed, a file named, a size leaked.
+        .layer(axum::middleware::from_fn(lan_only))
         .with_state(registry)
 }
 
-/// `GET /s/:token` — the entry point a shared link points at. Validates the
-/// token, then: a single-file share redirects straight to the download; a
-/// multi-file share renders a minimal listing (one download link per index).
-/// This route never counts against the download budget — only fetching a file
-/// does.
-async fn landing(State(reg): State<ShareRegistry>, UrlPath(token): UrlPath<String>) -> Response {
+/// Is this address on a network this machine could plausibly be sharing to?
+///
+/// The listener binds `0.0.0.0` and has to: a share must survive the machine's
+/// LAN address changing under it (DHCP renewal, Wi-Fi hop, VPN up/down), and
+/// pinning the socket to one address would kill it on every such event. So the
+/// LAN boundary is drawn HERE instead — where it can be re-evaluated per request
+/// — rather than at the bind.
+///
+/// The rule is "private networks only", not "my own subnet". Same-subnet would be
+/// tighter and WRONG: LanBeam deliberately supports peers on a different subnet —
+/// that is exactly what IP-direct and code pairing exist for — and a routed
+/// 192.168.1.x ↔ 192.168.2.x office is an ordinary setup. What the README actually
+/// promises is that a share is not reachable from the public internet, and this is
+/// the rule that keeps that promise.
+fn is_lan(ip: std::net::IpAddr) -> bool {
+    fn v4_ok(v4: std::net::Ipv4Addr) -> bool {
+        v4.is_private() || v4.is_loopback() || v4.is_link_local()
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => v4_ok(v4),
+        // The listener is IPv4, so a V6 peer address can only be an IPv4-mapped
+        // one. Unwrap it; refuse anything genuinely IPv6.
+        std::net::IpAddr::V6(v6) => v6.to_ipv4_mapped().is_some_and(v4_ok),
+    }
+}
+
+/// Refuse anything that isn't on a private network. 403 with no body — a prober
+/// off the LAN learns nothing about whether the token was even real.
+async fn lan_only(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if !is_lan(peer.ip()) {
+        log::warn!("share: refused {} — not a private address", peer.ip());
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    next.run(req).await
+}
+
+/// `GET /s/:token` — the entry point a shared link points at. Validates the token
+/// and renders the landing page: the brand, the file list, one download link per
+/// index. This route never counts against the download budget — only fetching a
+/// file does.
+///
+/// A single-file share used to 302 straight to the download, which quietly meant
+/// the landing page was skipped in the most common case there is. That page is not
+/// decoration: an `http://` link makes the browser say "not secure", and the page
+/// is what tells the recipient this is LanBeam and the file is coming off the
+/// machine next to them. Skipping it exactly when it matters most defeated the
+/// point of having it.
+async fn landing(
+    State(reg): State<ShareRegistry>,
+    headers: HeaderMap,
+    UrlPath(token): UrlPath<String>,
+) -> Response {
+    let lang = Lang::from_accept_language(
+        headers
+            .get(header::ACCEPT_LANGUAGE)
+            .and_then(|v| v.to_str().ok()),
+    );
     // Snapshot everything the response needs under the lock, then release it —
     // the render/redirect below touches no share state and never awaits while
     // holding a std lock.
     let listing: Vec<(String, u64)> = {
         let map = match reg.lock() {
             Ok(m) => m,
-            Err(_) => return internal_error(),
+            Err(_) => return internal_error(lang),
         };
         let share = match map.get(&token) {
             Some(s) => s,
-            None => return denied(Denied::NotFound),
+            None => return denied(Denied::NotFound, lang),
         };
         if let Err(d) = share.check(Instant::now()) {
-            return denied(d);
-        }
-        if share.files.len() == 1 {
-            // One file → hand the browser the download directly (302).
-            return redirect_to(&format!("/s/{token}/0"));
+            return denied(d, lang);
         }
         share
             .files
@@ -564,7 +637,7 @@ async fn landing(State(reg): State<ShareRegistry>, UrlPath(token): UrlPath<Strin
             .map(|f| (f.name.clone(), f.size))
             .collect()
     };
-    Html(render_landing(&token, &listing)).into_response()
+    Html(render_landing(&token, &listing, lang)).into_response()
 }
 
 /// `GET /s/:token/:index` — stream one registered file as an attachment (a HEAD
@@ -578,6 +651,7 @@ async fn download(
     State(reg): State<ShareRegistry>,
     Extension(on_download): Extension<DownloadHook>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     method: Method,
     UrlPath((token, index)): UrlPath<(String, u32)>,
 ) -> Response {
@@ -586,23 +660,28 @@ async fn download(
     // pre-flights and `curl -I` all send one — so it must NOT spend a download
     // slot or open the file; it only advertises the headers a GET would carry.
     let is_head = method == Method::HEAD;
+    let lang = Lang::from_accept_language(
+        headers
+            .get(header::ACCEPT_LANGUAGE)
+            .and_then(|v| v.to_str().ok()),
+    );
 
     let (path, name, size, ev) = {
         let mut map = match reg.lock() {
             Ok(m) => m,
-            Err(_) => return internal_error(),
+            Err(_) => return internal_error(lang),
         };
         let share = match map.get_mut(&token) {
             Some(s) => s,
-            None => return denied(Denied::NotFound),
+            None => return denied(Denied::NotFound, lang),
         };
         if let Err(d) = share.check(Instant::now()) {
-            return denied(d);
+            return denied(d, lang);
         }
         let (path, name, size) = match share.files.get(index as usize) {
             Some(f) => (f.path.clone(), f.name.clone(), f.size),
             // A valid token but no such file index — a fabricated or stale link.
-            None => return denied(Denied::NotFound),
+            None => return denied(Denied::NotFound, lang),
         };
         // Reserve the slot atomically with the checks above — but only for a
         // real GET. A HEAD delivers no bytes, so it reserves nothing. The event
@@ -662,7 +741,7 @@ async fn download(
             // report it as missing rather than leaking the OS error.
             refund(&reg, &token);
             log::warn!("share file {} unavailable: {e}", path.display());
-            denied(Denied::NotFound)
+            denied(Denied::NotFound, lang)
         }
     }
 }
@@ -684,38 +763,22 @@ fn apply_file_headers(h: &mut HeaderMap, len: u64, name: &str) {
     }
 }
 
-/// A 302 redirect to `location` — a bare, browser-followed hop (used to send a
-/// single-file share straight to its download).
-fn redirect_to(location: &str) -> Response {
-    let mut resp = Response::new(Body::empty());
-    *resp.status_mut() = StatusCode::FOUND;
-    if let Ok(v) = HeaderValue::from_str(location) {
-        resp.headers_mut().insert(header::LOCATION, v);
-    }
-    resp
-}
-
 /// The tiny HTML error page for a refused request, with the right status.
-fn denied(d: Denied) -> Response {
+/// Localized to the receiver's `Accept-Language` (see [`Lang`]).
+fn denied(d: Denied, lang: Lang) -> Response {
     let (status, msg) = match d {
-        Denied::NotFound => (
-            StatusCode::NOT_FOUND,
-            "This share link is invalid or the file no longer exists.",
-        ),
-        Denied::Gone => (
-            StatusCode::GONE,
-            "This share is no longer available — it was stopped, expired, or hit its download limit.",
-        ),
+        Denied::NotFound => (StatusCode::NOT_FOUND, lang.not_found()),
+        Denied::Gone => (StatusCode::GONE, lang.gone()),
     };
-    (status, Html(message_page(msg))).into_response()
+    (status, Html(message_page(msg, lang))).into_response()
 }
 
 /// A poisoned lock (a panicked holder) — surface a 500 rather than unwrap-panic
 /// the server task.
-fn internal_error() -> Response {
+fn internal_error(lang: Lang) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Html(message_page("Something went wrong serving this share.")),
+        Html(message_page(lang.error(), lang)),
     )
         .into_response()
 }
@@ -771,62 +834,167 @@ fn rfc5987_encode(name: &str) -> String {
     out
 }
 
-/// Render the multi-file landing page: honest LanBeam branding, one download
-/// link per file (by index), each with its human size. Self-contained — inline
-/// CSS only, no external assets — and every file name is HTML-escaped.
-fn render_landing(token: &str, files: &[(String, u64)]) -> String {
+/// The page language for a served share. The backend has no i18n layer, so the
+/// handful of receiver-facing strings live here, keyed by the browser's
+/// `Accept-Language` — the page renders in the RECEIVER's language (a phone on
+/// the same LAN is typically the sender's locale, but an English guest sees
+/// English). Only zh/en are offered; anything else falls back to English.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Lang {
+    En,
+    Zh,
+}
+
+impl Lang {
+    /// Pick from `Accept-Language`. The first range decides it — a leading `zh`
+    /// (zh, zh-CN, zh-Hans…) → Chinese; everything else → English.
+    fn from_accept_language(header: Option<&str>) -> Lang {
+        let first = header
+            .unwrap_or("")
+            .split(',')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        if first.starts_with("zh") {
+            Lang::Zh
+        } else {
+            Lang::En
+        }
+    }
+
+    /// The `<html lang>` value for the served document.
+    fn html_lang(self) -> &'static str {
+        match self {
+            Lang::Zh => "zh",
+            Lang::En => "en",
+        }
+    }
+
+    /// Brand subtitle under the LanBeam wordmark.
+    fn tagline(self) -> &'static str {
+        match self {
+            Lang::Zh => "通过局域网分享",
+            Lang::En => "Shared over your local network",
+        }
+    }
+
+    /// The reassurance footer below the card.
+    fn footer(self) -> &'static str {
+        match self {
+            Lang::Zh => "由发送方设备通过局域网直接提供 — 无账号 · 无云端 · 无第三方服务器。",
+            Lang::En => "Served directly from the sender's device over your local network — no account, no cloud, no third-party server.",
+        }
+    }
+
+    /// The listing lead line, with the file count.
+    fn lead(self, n: usize) -> String {
+        match self {
+            Lang::Zh => format!("向你分享了 {n} 个文件 — 点按下载。"),
+            Lang::En => {
+                let noun = if n == 1 { "file" } else { "files" };
+                format!("{n} {noun} shared with you — tap to download.")
+            }
+        }
+    }
+
+    /// Message for an unknown/invalid token or a vanished file (404).
+    fn not_found(self) -> &'static str {
+        match self {
+            Lang::Zh => "分享链接无效，或文件已不存在。",
+            Lang::En => "This share link is invalid or the file no longer exists.",
+        }
+    }
+
+    /// Message for a stopped / expired / budget-spent share (410).
+    fn gone(self) -> &'static str {
+        match self {
+            Lang::Zh => "该分享已不可用 — 已停止、已过期，或已达下载上限。",
+            Lang::En => {
+                "This share is no longer available — it was stopped, expired, or hit its download limit."
+            }
+        }
+    }
+
+    /// Message for an internal server error (500).
+    fn error(self) -> &'static str {
+        match self {
+            Lang::Zh => "提供此分享时出错。",
+            Lang::En => "Something went wrong serving this share.",
+        }
+    }
+}
+
+/// A file's short type badge — its uppercase extension (≤4 chars) or "FILE".
+/// Mirrors the frontend `extOf`: a leading-dot name counts as having none.
+fn ext_label(name: &str) -> String {
+    match name.rfind('.').filter(|&d| d > 0) {
+        // `d + 1 < len` rejects a trailing dot ("a." → no extension).
+        Some(d) if d + 1 < name.len() => name[d + 1..].to_uppercase().chars().take(4).collect(),
+        _ => "FILE".into(),
+    }
+}
+
+/// The LanBeam brand mark — the radar/beacon squircle from the brand kit
+/// (`Lanbeam工具logo设计/export/icon/app-icon.svg`), inlined so the page pulls
+/// nothing from the network. Fixed brand colors (not theme tokens) so the white
+/// beacon reads on both the light and dark card.
+const BRAND_MARK: &str = r##"<svg class="mark" viewBox="0 0 96 96" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs><linearGradient id="lb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#35ABC9"/><stop offset="1" stop-color="#1F7A96"/></linearGradient></defs><rect x="2" y="2" width="92" height="92" rx="21" fill="url(#lb)"/><g transform="translate(48 48) scale(.64) translate(-48 -48)"><circle cx="26" cy="70" r="9.5" fill="#fff"/><path d="M26 46A24 24 0 0 1 50 70" stroke="#fff" stroke-width="10" stroke-linecap="round"/><path d="M26 30A40 40 0 0 1 66 70" stroke="#fff" stroke-width="10" stroke-linecap="round" opacity=".58"/><path d="M26 14A56 56 0 0 1 82 70" stroke="#fff" stroke-width="10" stroke-linecap="round" opacity=".3"/></g></svg>"##;
+
+/// The download glyph shown at the right of each file row.
+const DL_ICON: &str = r##"<svg class="dl" width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3v11m0 0-4-4m4 4 4-4M5 21h14" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>"##;
+
+/// The glyph on the "share unavailable" page — a muted circle-slash.
+const UNAVAILABLE_GLYPH: &str = r##"<svg class="glyph" viewBox="0 0 52 52" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><circle cx="26" cy="26" r="19" stroke="currentColor" stroke-width="2.4"/><path d="M14 14 38 38" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>"##;
+
+/// The self-contained stylesheet (a const, so its `{}` need no format escaping).
+const SHARE_CSS: &str = r##"*{box-sizing:border-box}:root{--bg:#faf9f6;--card:#fff;--row:#faf9f6;--ink:#33373e;--muted:#6f7378;--faint:#9a9da3;--border:rgba(61,65,73,.10);--line:rgba(61,65,73,.07);--accent:#4b8ba3;--accent-ink:#3c6e82;--accent-soft:rgba(75,139,163,.11);--shadow:0 20px 60px rgba(35,40,48,.13)}@media(prefers-color-scheme:dark){:root{--bg:#10151d;--card:#171e28;--row:#10151d;--ink:#e2eaf1;--muted:#8b98a5;--faint:#66727f;--border:rgba(255,255,255,.09);--line:rgba(255,255,255,.06);--accent:#7fd4d4;--accent-ink:#93dede;--accent-soft:rgba(127,212,212,.12);--shadow:0 20px 60px rgba(0,0,0,.45)}}body{margin:0;min-height:100vh;line-height:1.5;color:var(--ink);font-family:system-ui,-apple-system,'Segoe UI',Roboto,'PingFang SC','Microsoft YaHei',sans-serif;background:radial-gradient(130% 90% at 50% -20%,var(--accent-soft),transparent 55%),var(--bg);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:15px;padding:28px 18px;-webkit-font-smoothing:antialiased}.card{width:100%;max-width:430px;background:var(--card);border:1px solid var(--border);border-radius:20px;box-shadow:var(--shadow);padding:26px 24px 22px;animation:rise .45s cubic-bezier(.2,.7,.2,1)}@keyframes rise{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}.brand{display:flex;align-items:center;gap:12px;margin-bottom:18px}.mark{width:40px;height:40px;flex:none;filter:drop-shadow(0 5px 14px rgba(31,122,150,.35))}.brand h1{font-size:19px;font-weight:700;letter-spacing:-.01em;margin:0}.tag{font-size:11.5px;color:var(--faint);margin:2px 0 0}.lead{font-size:13.5px;color:var(--muted);margin:0 0 15px}ul.files{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}ul.files a{display:flex;align-items:center;gap:12px;text-decoration:none;color:var(--ink);padding:11px 13px;border:1px solid var(--line);border-radius:13px;background:var(--row);transition:border-color .15s,transform .15s,box-shadow .15s}ul.files a:hover,ul.files a:focus-visible{border-color:var(--accent);transform:translateY(-1px);box-shadow:0 8px 22px rgba(75,139,163,.16);outline:none}.chip{width:38px;height:38px;flex:none;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:9.5px;font-weight:700;letter-spacing:.02em;background:var(--accent-soft);color:var(--accent-ink)}.meta{flex:1;min-width:0}.name{font-size:13px;font-weight:600;word-break:break-word}.size{font-size:11px;color:var(--faint);margin-top:1px}.dl{flex:none;color:var(--accent);opacity:.65;transition:opacity .15s}ul.files a:hover .dl{opacity:1}.state{display:flex;flex-direction:column;align-items:center;text-align:center;padding:10px 0 6px;color:var(--faint)}.glyph{width:50px;height:50px;margin-bottom:13px}.state .msg{font-size:14px;color:var(--muted);line-height:1.55;max-width:32ch;margin:0}.foot{font-size:11px;color:var(--faint);text-align:center;max-width:380px;line-height:1.6;margin:0;padding:0 14px}"##;
+
+/// Render the multi-file landing page: LanBeam branding, one download card per
+/// file (by index) with its type badge + human size. Self-contained — inline CSS
+/// only, no external assets — and every file name is HTML-escaped.
+fn render_landing(token: &str, files: &[(String, u64)], lang: Lang) -> String {
     let mut items = String::new();
     for (i, (name, size)) in files.iter().enumerate() {
         // The href is built only from the validated token (base64url) and a
-        // numeric index — both intrinsically URL-safe.
+        // numeric index — both intrinsically URL-safe; the name is escaped.
         items.push_str(&format!(
-            "<li><a href=\"/s/{token}/{i}\">{}</a><span class=\"sz\">{}</span></li>\n",
-            html_escape(name),
-            human_size(*size),
+            r##"<li><a href="/s/{token}/{i}" download><span class="chip">{ext}</span><span class="meta"><span class="name">{nm}</span><span class="size">{sz}</span></span>{DL_ICON}</a></li>"##,
+            ext = ext_label(name),
+            nm = html_escape(name),
+            sz = human_size(*size),
         ));
     }
-    let count = files.len();
-    let noun = if count == 1 { "file" } else { "files" };
-    page_shell(&format!(
-        "<h1>LanBeam</h1>\
-         <p class=\"lead\">{count} {noun} shared with you.</p>\
-         <ul class=\"files\">{items}</ul>\
-         <p class=\"foot\">Served directly from the sender's device over your local network — no account, no cloud, no third-party server.</p>"
-    ))
+    page_shell(
+        &format!(
+            r##"<div class="brand">{BRAND_MARK}<div><h1>LanBeam</h1><div class="tag">{tag}</div></div></div><p class="lead">{lead}</p><ul class="files">{items}</ul>"##,
+            tag = lang.tagline(),
+            lead = lang.lead(files.len()),
+        ),
+        lang,
+    )
 }
 
-/// A one-line message page (errors, refusals) in the same shell as the listing.
-fn message_page(msg: &str) -> String {
-    page_shell(&format!(
-        "<h1>LanBeam</h1><p class=\"lead\">{}</p>",
-        html_escape(msg)
-    ))
+/// A message page (errors, refusals) — the brand header plus a centered glyph +
+/// message, in the same shell as the listing. `msg` is already localized.
+fn message_page(msg: &str, lang: Lang) -> String {
+    page_shell(
+        &format!(
+            r##"<div class="brand">{BRAND_MARK}<div><h1>LanBeam</h1><div class="tag">{tag}</div></div></div><div class="state">{UNAVAILABLE_GLYPH}<p class="msg">{esc}</p></div>"##,
+            tag = lang.tagline(),
+            esc = html_escape(msg),
+        ),
+        lang,
+    )
 }
 
-/// The shared HTML document shell: inline styles, no external assets, so the
-/// page renders identically with no network access beyond this response.
-fn page_shell(body: &str) -> String {
+/// The shared HTML document shell: inline styles + mark, no external assets, so
+/// the page renders identically with no network access beyond this response.
+fn page_shell(body: &str, lang: Lang) -> String {
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
-         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
-         <title>LanBeam</title><style>\
-         body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;\
-         max-width:34rem;margin:3rem auto;padding:0 1.25rem;color:#1a1a1a;\
-         background:#fafafa;line-height:1.5}}\
-         h1{{font-size:1.4rem;margin:0 0 .25rem}}\
-         .lead{{color:#444;margin:.25rem 0 1.5rem}}\
-         ul.files{{list-style:none;padding:0;margin:0}}\
-         ul.files li{{display:flex;justify-content:space-between;align-items:center;\
-         gap:1rem;padding:.6rem .8rem;border:1px solid #e3e3e3;border-radius:.5rem;\
-         margin-bottom:.5rem;background:#fff}}\
-         ul.files a{{color:#2563eb;text-decoration:none;word-break:break-all}}\
-         ul.files a:hover{{text-decoration:underline}}\
-         .sz{{color:#777;font-size:.85rem;white-space:nowrap}}\
-         .foot{{color:#999;font-size:.8rem;margin-top:2rem}}\
-         @media(prefers-color-scheme:dark){{body{{background:#111;color:#eee}}\
-         .lead{{color:#bbb}}ul.files li{{background:#1b1b1b;border-color:#333}}\
-         ul.files a{{color:#6ea8fe}}.sz{{color:#888}}.foot{{color:#666}}}}\
-         </style></head><body>{body}</body></html>"
+        r##"<!doctype html><html lang="{lang_attr}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light dark"><title>LanBeam</title><style>{SHARE_CSS}</style></head><body><main class="card">{body}</main><p class="foot">{footer}</p></body></html>"##,
+        lang_attr = lang.html_lang(),
+        footer = lang.footer(),
     )
 }
 
@@ -1162,9 +1330,15 @@ mod tests {
         assert!(!ev.peer_ip.is_empty(), "a loopback fetch carries a peer IP");
     }
 
-    /// A single-file share's landing route 302-redirects straight to the file.
+    /// A single-file share renders the LANDING PAGE, like every other share.
+    ///
+    /// It used to 302 straight to the download — which meant the branded page was
+    /// skipped in the most common case there is. That page is not decoration: an
+    /// `http://` link makes the browser say "not secure", and the page is what
+    /// tells the recipient this is LanBeam and the file is coming off the machine
+    /// next to them. This test used to assert the redirect.
     #[tokio::test]
-    async fn single_file_landing_redirects_to_index_zero() {
+    async fn single_file_share_still_shows_the_landing_page() {
         let reg = new_registry();
         let f = temp_file("only.bin", b"solo");
         let token = create_share(
@@ -1176,15 +1350,38 @@ mod tests {
         .unwrap();
         let addr = serve(reg).await;
 
-        let (status, head, _) = http_get(addr, &format!("/s/{token}")).await;
-        assert_eq!(status, 302, "single file redirects");
-        // The header name is emitted lowercase; the token keeps its case, so
-        // match against the raw head (don't lowercase — that would mangle the
-        // mixed-case base64url token).
+        let (status, _, body) = http_get(addr, &format!("/s/{token}")).await;
+        assert_eq!(status, 200, "one file still gets the page, not a redirect");
+        let html = String::from_utf8_lossy(&body);
+        assert!(html.contains("only.bin"), "names the file: {html}");
         assert!(
-            head.contains(&format!("location: /s/{token}/0")),
-            "redirects to index 0: {head}"
+            html.contains(&format!("/s/{token}/0")),
+            "and links to its download"
         );
+    }
+
+    /// The share server binds 0.0.0.0 — it must, or a DHCP renewal would kill
+    /// every live share — so "LAN only" is enforced per REQUEST, not at the bind.
+    /// A public source address never reaches a handler.
+    #[test]
+    fn lan_only_admits_private_networks_and_refuses_the_internet() {
+        let ip = |s: &str| s.parse::<std::net::IpAddr>().unwrap();
+        // The networks a share is for.
+        assert!(is_lan(ip("192.168.1.42")));
+        assert!(is_lan(ip("10.1.2.3")));
+        assert!(is_lan(ip("172.16.0.9")));
+        assert!(
+            is_lan(ip("169.254.7.7")),
+            "link-local (no DHCP) is still a LAN"
+        );
+        assert!(is_lan(ip("127.0.0.1")), "same box");
+        assert!(is_lan(ip("::ffff:192.168.1.42")), "IPv4-mapped");
+
+        // The internet.
+        assert!(!is_lan(ip("8.8.8.8")));
+        assert!(!is_lan(ip("1.1.1.1")));
+        assert!(!is_lan(ip("172.32.0.1")), "just outside 172.16/12");
+        assert!(!is_lan(ip("2001:4860:4860::8888")), "genuinely IPv6");
     }
 
     /// The multi-file landing page lists EXACTLY the shared files (one link per
@@ -1646,6 +1843,91 @@ mod tests {
         assert!(cd.contains("na%C3%AFve"), "utf-8 percent-encoded: {cd}");
     }
 
+    #[test]
+    fn ext_label_is_short_uppercase_or_file() {
+        assert_eq!(ext_label("report.pdf"), "PDF");
+        assert_eq!(ext_label("photo.JPEG"), "JPEG"); // already uppercase, 4 chars
+        assert_eq!(ext_label("clip.mov"), "MOV");
+        assert_eq!(ext_label("archive.tar.gz"), "GZ"); // last segment only
+        assert_eq!(ext_label("data.sqlite3"), "SQLI"); // clamped to 4 chars
+        assert_eq!(ext_label("Makefile"), "FILE"); // no dot
+        assert_eq!(ext_label(".gitignore"), "FILE"); // leading dot → no extension
+        assert_eq!(ext_label("trailing."), "FILE"); // trailing dot → no extension
+    }
+
+    #[test]
+    fn landing_page_carries_brand_and_download_affordance() {
+        let html = render_landing(
+            "tok",
+            &[("plan.pdf".into(), 2048), ("clip.mp4".into(), 4096)],
+            Lang::En,
+        );
+        // Branded shell + the beam mark + the reassurance footer.
+        assert!(
+            html.contains("class=\"card\""),
+            "wrapped in the branded card"
+        );
+        assert!(
+            html.contains("<svg class=\"mark\""),
+            "carries the LanBeam mark"
+        );
+        assert!(
+            html.contains("no account, no cloud"),
+            "trust footer present"
+        );
+        // Per-file: a type badge + a download link + the download glyph.
+        assert!(
+            html.contains(">PDF<") && html.contains(">MP4<"),
+            "type badges"
+        );
+        assert!(html.contains("class=\"dl\""), "download glyph per row");
+        assert!(html.contains("href=\"/s/tok/0\""), "download link by index");
+    }
+
+    #[test]
+    fn message_page_is_branded_with_a_glyph() {
+        let html = message_page("This share is no longer available.", Lang::En);
+        assert!(html.contains("<svg class=\"mark\""), "brand mark");
+        assert!(html.contains("class=\"glyph\""), "an unavailable glyph");
+        assert!(
+            html.contains("This share is no longer available."),
+            "the message text"
+        );
+    }
+
+    #[test]
+    fn accept_language_selects_zh_else_falls_back_to_en() {
+        use Lang::{En, Zh};
+        assert_eq!(
+            Lang::from_accept_language(Some("zh-CN,zh;q=0.9,en;q=0.8")),
+            Zh
+        );
+        assert_eq!(Lang::from_accept_language(Some("zh")), Zh);
+        assert_eq!(Lang::from_accept_language(Some("ZH-hans")), Zh); // case-insensitive
+        assert_eq!(Lang::from_accept_language(Some("en-US,en;q=0.9")), En);
+        assert_eq!(Lang::from_accept_language(Some("fr-FR")), En); // unsupported → en
+        assert_eq!(Lang::from_accept_language(Some("")), En);
+        assert_eq!(Lang::from_accept_language(None), En);
+    }
+
+    #[test]
+    fn pages_localize_to_chinese() {
+        let landing = render_landing("tok", &[("照片.jpg".into(), 1024)], Lang::Zh);
+        assert!(landing.contains("<html lang=\"zh\""), "html lang is zh");
+        assert!(landing.contains("向你分享了 1 个文件"), "localized lead");
+        assert!(landing.contains("通过局域网分享"), "localized tagline");
+        assert!(landing.contains("无账号 · 无云端"), "localized footer");
+        // Structure (mark + per-file download link) is language-independent.
+        assert!(
+            landing.contains("<svg class=\"mark\"") && landing.contains("href=\"/s/tok/0\""),
+            "structure unchanged by language"
+        );
+
+        let gone = message_page(Lang::Zh.gone(), Lang::Zh);
+        assert!(gone.contains("该分享已不可用"), "localized gone message");
+        assert!(gone.contains("class=\"glyph\""), "same styled state");
+    }
+
     /// A name that leaves no printable ASCII (only whitespace survives) falls the
     /// `filename=` back to the literal `download`, never an empty token, while the
     /// extended `filename*` still percent-encodes the original bytes.
@@ -1667,12 +1949,12 @@ mod tests {
     #[test]
     fn denied_maps_variants_to_status() {
         assert_eq!(
-            denied(Denied::NotFound).status(),
+            denied(Denied::NotFound, Lang::En).status(),
             StatusCode::NOT_FOUND,
             "NotFound → 404"
         );
         assert_eq!(
-            denied(Denied::Gone).status(),
+            denied(Denied::Gone, Lang::En).status(),
             StatusCode::GONE,
             "Gone → 410"
         );

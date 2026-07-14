@@ -67,6 +67,7 @@ function makeSettings(over: Partial<Settings> = {}): Settings {
     organize: "device",
     maxConcurrent: 3,
     rateLimit: "unlimited",
+    uiZoom: 1,
     clipShare: false,
     stripExif: true,
     ...over,

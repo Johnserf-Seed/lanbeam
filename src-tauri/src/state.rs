@@ -739,12 +739,12 @@ pub struct AppState {
     /// [`crate::share`].
     pub share_port: Arc<AtomicU16>,
     /// A `lanbeam://pair` link this process was LAUNCHED by (cold-start deep
-    /// link), stashed because `setup()` emits the `pair_link` event before the
+    /// link), stashed because `setup()` emits the `deep_link` event before the
     /// webview can listen and Tauri events have no replay. The webview pulls it
-    /// once on mount via `take_pending_pair_link`; a link that arrives while the
-    /// app is already running rides the `pair_link` event instead. `None` once
+    /// once on mount via `take_pending_deep_link`; a link that arrives while the
+    /// app is already running rides the `deep_link` event instead. `None` once
     /// taken, or when the app was launched normally.
-    pub pending_pair_link: Arc<Mutex<Option<String>>>,
+    pub pending_deep_link: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg(test)]

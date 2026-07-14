@@ -31,8 +31,9 @@ pub fn list_discovered_devices(state: State<'_, AppState>) -> Vec<DiscoveredDevi
 /// `devices_updated` emit `connect_by_addr` fires.
 fn list_devices_snapshot(state: &AppState) -> Vec<DiscoveredDevice> {
     let discovered = discovery::snapshot(&state.peers);
+    let my_id = state.identity.device_id();
     match state.manual_peers.lock() {
-        Ok(manual) => merge_devices(discovered, &manual),
+        Ok(manual) => merge_devices(discovered, &manual, &my_id),
         // Poisoned lock: show discovery alone rather than panic the command.
         Err(_) => discovered,
     }
@@ -44,21 +45,33 @@ fn list_devices_snapshot(state: &AppState) -> Vec<DiscoveredDevice> {
 /// list keeps a stable, case-insensitive-by-name order. `pub(crate)` so the
 /// discovery loop's `devices_updated` emit builds the SAME payload this and
 /// `list_discovered_devices` return — one source of truth for the device list.
+///
+/// THIS DEVICE is never in the result. Discovery already drops its own announces
+/// (`apply_packet`), but the manual table had no such rule, so dialing your own
+/// address filed you as your own peer — and because discovery can't un-announce
+/// what it never announced, that entry could not be expired, only deleted, and
+/// nothing could delete it. Filtering here makes an already-poisoned table heal
+/// itself on the next list.
 pub(crate) fn merge_devices(
     mut discovered: Vec<DiscoveredDevice>,
     manual: &HashMap<String, ManualPeer>,
+    my_id: &str,
 ) -> Vec<DiscoveredDevice> {
+    discovered.retain(|d| d.device_id != my_id);
     if manual.is_empty() {
         return discovered;
     }
     let seen: HashSet<String> = discovered.iter().map(|d| d.device_id.clone()).collect();
     for (id, mp) in manual {
-        if !seen.contains(id) {
+        if id != my_id && !seen.contains(id) {
             discovered.push(DiscoveredDevice {
                 device_id: id.clone(),
                 name: mp.name.clone(),
                 address: mp.addr.to_string(),
                 port: mp.port,
+                // Only in the list because someone typed its address — so it is
+                // the one kind of peer that CAN be deleted for good.
+                manual: true,
             });
         }
     }
@@ -162,22 +175,6 @@ pub async fn connect_device(
     Ok(sas)
 }
 
-/// Loopback self-test: open a Noise channel to our own listener and return the SAS.
-/// Proves the encrypted handshake AND the opening dialogue end-to-end on a
-/// single machine — same Hello → Bye round-trip as `connect_device` (M4.3),
-/// so the responder logs no protocol warning.
-#[tauri::command]
-pub async fn self_test_secure_channel(state: State<'_, AppState>) -> Result<String, LanBeamError> {
-    let port = state.tcp_port.load(Ordering::Relaxed);
-    let expected = state.identity.public;
-    let local_private = *state.identity.private_bytes();
-    let mut sess = transport::connect(Ipv4Addr::LOCALHOST, port, &local_private, expected).await?;
-    let sas = sess.sas().to_string();
-    transfer::initiator_hello(&mut sess, transfer::local_device_name(&state.settings)).await?;
-    transfer::send_bye(&mut sess).await?;
-    Ok(sas)
-}
-
 // ── pairing + IP direct connect (M7.1/7.2) ─────────────────────────────
 
 /// A fresh pairing invitation: the 6-digit code plus a QR/deep-link payload
@@ -244,24 +241,28 @@ pub fn cancel_pairing(state: State<'_, AppState>) {
 /// deep link), or `null` if it was launched normally. Returns the link once and
 /// clears it, so a later reload starts clean. The webview calls this on mount to
 /// open the pairing form for a link that arrived before it could listen; a link
-/// that arrives while the app is already running comes through the `pair_link`
+/// that arrives while the app is already running comes through the `deep_link`
 /// event instead.
 #[tauri::command]
-pub fn take_pending_pair_link(state: State<'_, AppState>) -> Option<String> {
+pub fn take_pending_deep_link(state: State<'_, AppState>) -> Option<String> {
     state
-        .pending_pair_link
+        .pending_deep_link
         .lock()
         .ok()
         .and_then(|mut slot| slot.take())
 }
 
-/// Join a device that is showing a pairing code. Pass its address (`ip:port`, or
-/// the scanned `lanbeam://pair…` link) and the 6-digit code. On success both
-/// devices trust each other and this returns the peer's Device ID, name, and the
-/// SAS to compare out loud; a wrong or expired code returns an error.
+/// Redeem a device that is showing a pairing code. Pass its address (`ip:port`,
+/// or the scanned `lanbeam://pair…` link) and the 6-digit code; returns the
+/// peer's Device ID, name, and the SAS. A wrong or expired code errors.
+///
+/// This GRANTS NO TRUST, by design. The SAS is the only thing standing between a
+/// pairing and a machine-in-the-middle, and a code nobody read is not a check —
+/// so trust is the caller's to record with `set_trusted`, and only after a human
+/// has compared this SAS against the one on the other device's screen. Both ends
+/// derive the same SAS from the handshake and both must confirm it independently.
 #[tauri::command]
 pub async fn join_by_code(
-    app: AppHandle,
     state: State<'_, AppState>,
     addr: String,
     code: String,
@@ -279,6 +280,11 @@ pub async fn join_by_code(
     let mut sess = transport::connect_unpinned(target.ip, target.port, &local_private).await?;
     let sas = sess.sas().to_string();
     let device_id = URL_SAFE_NO_PAD.encode(sess.remote_static());
+    // Pairing with yourself is not a pairing. Bail before the manual table (below)
+    // files this machine as its own peer — an entry discovery can never expire.
+    if device_id == state.identity.device_id() {
+        return Err(LanBeamError::SelfPeer);
+    }
     let my_name = transfer::local_device_name(&state.settings);
     let peer = transfer::initiator_hello(&mut sess, my_name).await?;
     // Pairing is a v2 capability: a peer that only speaks v1 cannot redeem a code.
@@ -298,10 +304,10 @@ pub async fn join_by_code(
     } else {
         peer_name
     };
-    // Mutually trust: store the peer we just paired with (auto_accept off — the
-    // host stores us the same way).
-    add_trust(&app, &state, &device_id, &name, false);
-    // Remember the dial target too, exactly as `connect_by_addr` does. Pairing by
+    // NO trust is granted here — the UI records it once the human has compared
+    // the SAS below. See this command's doc comment.
+    //
+    // Remember the dial target though, exactly as `connect_by_addr` does. Pairing by
     // code/IP is the case where discovery CANNOT see the peer (a different subnet,
     // or discovery off), so without this the just-trusted device would be absent
     // from `list_discovered_devices` and `resolve_peer` — a trusted peer no later
@@ -343,6 +349,11 @@ pub async fn connect_by_addr(
     let mut sess = transport::connect_unpinned(target.ip, target.port, &local_private).await?;
     let sas = sess.sas().to_string();
     let device_id = URL_SAFE_NO_PAD.encode(sess.remote_static());
+    // Adding yourself is not adding a device. Bail before the manual table (below)
+    // files this machine as its own peer — an entry discovery can never expire.
+    if device_id == state.identity.device_id() {
+        return Err(LanBeamError::SelfPeer);
+    }
     let my_name = transfer::local_device_name(&state.settings);
     let peer = transfer::initiator_hello(&mut sess, my_name).await?;
     // Bow out cleanly (like connect_device): the responder swallows the Bye.
@@ -564,13 +575,6 @@ fn pick_code(entered: String, from_link: Option<String>) -> String {
     } else {
         from_link.unwrap_or_default()
     }
-}
-
-/// Add (or refresh) a trusted peer + persist + emit `trust_updated` — the shared
-/// body of the `set_trusted` command applied to a pairing/join result (M7.1),
-/// with the same snapshot-under-guard / I/O-after-drop shape (M4.6).
-fn add_trust(app: &AppHandle, state: &AppState, device_id: &str, name: &str, auto_accept: bool) {
-    trust::grant(app, &state.trusted, device_id, name, auto_accept);
 }
 
 // ── quick text (M7.3) ──────────────────────────────────────────────────
@@ -825,6 +829,51 @@ pub fn reply_file_request(
     }
 }
 
+/// One interrupted file still on disk, waiting to be resumed or discarded.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialDto {
+    pub device_id: String,
+    /// The file's name as it appears in the download folder.
+    pub name: String,
+    /// Bytes already on disk.
+    pub written: u64,
+    /// What the whole file will be.
+    pub size: u64,
+}
+
+/// Every interrupted receive still holding bytes on disk.
+///
+/// This exists because a half-written file is INVISIBLE. It is saved under its
+/// FINAL name — `holiday.mp4`, 1.2 GB of a 4 GB file — so the download folder
+/// shows something that looks perfectly normal and plays for thirty seconds. The
+/// backend has known about these all along (it is what makes resume work) and
+/// `discard_partials` could already clean them up; nothing ever asked it what it
+/// was holding, so the UI could neither show them nor offer to.
+#[tauri::command]
+pub fn list_partials(state: State<'_, AppState>) -> Vec<PartialDto> {
+    let Ok(store) = state.partials.read() else {
+        return Vec::new();
+    };
+    store
+        .entries()
+        .into_iter()
+        .map(|(device_id, rec)| PartialDto {
+            device_id,
+            // `disk_rel` is where the bytes actually are (organize-by-date/device
+            // folds a prefix in); its leaf is what the user sees in the folder.
+            name: rec
+                .disk_rel
+                .rsplit('/')
+                .next()
+                .unwrap_or(&rec.rel)
+                .to_string(),
+            written: rec.bytes_written,
+            size: rec.size,
+        })
+        .collect()
+}
+
 /// Discard the persisted resume state for a peer (M6.4): forget every partial
 /// LanBeam kept for `device_id` and delete the half-written files from disk.
 /// The counterpart to letting an interrupted transfer resume — the user chooses
@@ -894,6 +943,32 @@ pub fn get_download_dir(state: State<'_, AppState>) -> String {
         .unwrap_or_default()
 }
 
+/// Open a path (a received file, or the download folder) with the OS default
+/// handler.
+///
+/// WHY A COMMAND, not the opener plugin's JS `openPath`: that command is
+/// SCOPE-GATED, and its scope is a static allow-list. Our download folder is
+/// user-configurable to anywhere on disk, so the only static scope that would
+/// actually work is `"**"` — i.e. handing the webview a blanket "open any file
+/// on this machine" capability. The plugin's RUST api takes the same action
+/// without granting that authority to the frontend, so the capability stays
+/// narrow (reveal-only) and this stays the one audited door.
+///
+/// Existence is checked FIRST so a vanished file reports `NotFound` — the UI
+/// then says "that file is gone" instead of blaming a stale record for what
+/// might really be an open failure.
+#[tauri::command]
+pub fn open_local_path(app: AppHandle, path: String) -> Result<(), LanBeamError> {
+    use tauri_plugin_opener::OpenerExt;
+    let p = std::path::Path::new(&path);
+    if !p.exists() {
+        return Err(LanBeamError::NotFound(path));
+    }
+    app.opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| LanBeamError::Io(format!("open {path}: {e}")))
+}
+
 /// Absolute paths saved by a completed inbound transfer (for reveal/open in the UI).
 #[tauri::command]
 pub fn reveal_received(state: State<'_, AppState>, session_id: String) -> Vec<String> {
@@ -927,7 +1002,7 @@ pub struct ShareUpdated {
 }
 
 /// One live browser share as the shares list shows it.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct ShareEntry {
     pub token: String,
     pub url: String,
@@ -951,12 +1026,15 @@ pub struct ShareEntry {
 /// download limit, or you stop it.
 #[tauri::command]
 pub fn start_share(
+    app: AppHandle,
     state: State<'_, AppState>,
     paths: Vec<String>,
     ttl_secs: u64,
     max_downloads: Option<u32>,
 ) -> Result<ShareStarted, LanBeamError> {
-    do_start_share(&state, paths, ttl_secs, max_downloads)
+    let started = do_start_share(&state, paths, ttl_secs, max_downloads)?;
+    emit_shares(&app, &state);
+    Ok(started)
 }
 
 /// Change a live share's lifetime and download limit — the ShareModal's duration
@@ -966,19 +1044,26 @@ pub fn start_share(
 /// stopped.
 #[tauri::command]
 pub fn update_share(
+    app: AppHandle,
     state: State<'_, AppState>,
     token: String,
     ttl_secs: u64,
     max_downloads: Option<u32>,
 ) -> Option<ShareUpdated> {
-    do_update_share(&state, &token, ttl_secs, max_downloads)
+    let updated = do_update_share(&state, &token, ttl_secs, max_downloads);
+    if updated.is_some() {
+        emit_shares(&app, &state);
+    }
+    updated
 }
 
 /// Stop a browser share now: its link stops working immediately. Safe to call
 /// with an unknown token.
 #[tauri::command]
-pub fn stop_share(state: State<'_, AppState>, token: String) {
-    share::stop_share(&state.shares, &token);
+pub fn stop_share(app: AppHandle, state: State<'_, AppState>, token: String) {
+    if share::stop_share(&state.shares, &token) {
+        emit_shares(&app, &state);
+    }
 }
 
 /// The browser shares that are currently live — each with its link, file count,
@@ -986,6 +1071,23 @@ pub fn stop_share(state: State<'_, AppState>, token: String) {
 #[tauri::command]
 pub fn list_shares(state: State<'_, AppState>) -> Vec<ShareEntry> {
     list_shares_dto(&state)
+}
+
+/// Broadcast the live-share list to the UI.
+///
+/// A live share is FILES BEING SERVED over HTTP on the LAN. The only place that
+/// fact ever appeared was inside the modal that created it — and closing that
+/// modal does not stop the share (deliberately: a link you handed someone should
+/// survive you closing the panel you copied it from). So a share you'd forgotten
+/// went on serving, invisibly, and unstoppably: reopening the modal minted a NEW
+/// share rather than adopting the live one, so the only 停止分享 button in the app
+/// could never reach it again.
+///
+/// Emitted on every mutation (start / update / stop) and by the sweeper when a
+/// share expires on its own — the UI's indicator has to disappear by itself, not
+/// the next time somebody happens to open a modal.
+pub(crate) fn emit_shares(app: &AppHandle, state: &AppState) {
+    let _ = app.emit("shares_updated", list_shares_dto(state));
 }
 
 /// Core of [`start_share`], split off so it takes `&AppState` and is unit-testable
@@ -1135,6 +1237,15 @@ pub fn set_trusted(
     if transport::decode_device_id(&device_id).is_none() {
         return;
     }
+    // Never trust yourself. Not a philosophical position — a self-record shows up
+    // in your own trust circle as a peer you trust and can never reach (discovery
+    // drops its own announces, so it is permanently "offline"), and it grants
+    // nothing: you do not need permission to receive from yourself. Startup evicts
+    // any that an older build let in.
+    if device_id == state.identity.device_id() {
+        log::debug!("trust: refusing a self-record");
+        return;
+    }
     // Mutate + snapshot under the write guard; the file write and the emit
     // happen AFTER it drops, so a slow disk (AV scan, sleeping HDD) never
     // stalls readers — or this main-thread command — on the trust lock (M4.6).
@@ -1147,6 +1258,46 @@ pub fn set_trusted(
     };
     trust::persist_async(snapshot);
     trust::emit_updated(&app, list);
+}
+
+/// Delete a device: drop BOTH its trust record and the manually-added address
+/// that keeps it in the device list. Emits `trust_updated` and `devices_updated`
+/// for whatever actually changed.
+///
+/// A device that is still announcing itself on the LAN will come back — as a
+/// stranger. This erases LanBeam's memory of the device, not the machine.
+///
+/// Untrusting (`remove_trusted`) is deliberately NOT this: a device you stop
+/// trusting is still one you want to be able to reach. Deleting is the stronger
+/// act, and until now it did not exist. `remove_trusted` was all the UI had, so
+/// "delete" cleared the trust row while the peer sat untouched in the manual
+/// address table — reappearing on the very next list, with nothing anywhere able
+/// to take it out. (Dial your own address once and it was permanent: your own id
+/// can't be discovered away, because discovery drops its own announces.)
+#[tauri::command]
+pub fn forget_device(app: AppHandle, state: State<'_, AppState>, device_id: String) {
+    // Trust row: same shape as `remove_trusted` — snapshot under the guard, then
+    // I/O + emit after it drops.
+    let trust_change = match state.trusted.write() {
+        // A pattern guard can't mutate, so the remove has to happen in the body.
+        Ok(mut store) => store
+            .remove(&device_id)
+            .then(|| (store.snapshot(), store.list())),
+        Err(_) => None,
+    };
+    if let Some((snapshot, list)) = trust_change {
+        trust::persist_async(snapshot);
+        trust::emit_updated(&app, list);
+    }
+    // Manual address. This is the half that was missing.
+    let dropped = state
+        .manual_peers
+        .lock()
+        .map(|mut m| m.remove(&device_id).is_some())
+        .unwrap_or(false);
+    if dropped {
+        let _ = app.emit("devices_updated", list_devices_snapshot(&state));
+    }
 }
 
 /// Remove a peer from the trust store. Persists + emits `trust_updated` only
@@ -1187,10 +1338,7 @@ const DIAG_LOG_TAIL_MAX: u64 = 500 * 1024;
 /// The app's log directory, created if missing.
 #[tauri::command]
 pub fn get_log_dir(app: AppHandle) -> Result<String, LanBeamError> {
-    let dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| LanBeamError::Io(e.to_string()))?;
+    let dir = crate::paths::log_dir(&app);
     std::fs::create_dir_all(&dir)?;
     Ok(dir.display().to_string())
 }
@@ -1208,10 +1356,7 @@ pub fn export_diagnostics(
 ) -> Result<String, LanBeamError> {
     use std::fmt::Write as _;
 
-    let dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| LanBeamError::Io(e.to_string()))?;
+    let dir = crate::paths::log_dir(&app);
     std::fs::create_dir_all(&dir)?;
 
     let unix_secs = std::time::SystemTime::now()
@@ -1461,6 +1606,7 @@ pub struct SettingsDto {
     /// camelCase; defaults 3, range 1..=8.
     #[serde(rename = "maxConcurrent")]
     pub max_concurrent: u32,
+    pub ui_zoom: f64,
     /// Per-transfer throughput cap (M6.7): `"unlimited"` or MB/s. Additive
     /// camelCase; defaults `"unlimited"`.
     #[serde(rename = "rateLimit")]
@@ -1499,6 +1645,7 @@ pub fn get_settings(state: State<'_, AppState>) -> SettingsDto {
         conflict: s.conflict.clone(),
         organize: s.organize.clone(),
         max_concurrent: s.max_concurrent,
+        ui_zoom: s.ui_zoom,
         rate_limit: s.rate_limit.clone(),
         clip_share: s.clip_share,
         strip_exif: s.strip_exif,
@@ -1816,6 +1963,18 @@ pub fn set_organize(app: AppHandle, state: State<'_, AppState>, mode: String) {
 /// the allowed range. Read live at each transfer's gate, so a lower value throttles
 /// only transfers not yet started; those in flight keep going. Applies to the next
 /// launch's default plus every subsequent transfer — no restart.
+/// Set the interface scale (1.0 = the design size). Applies immediately and
+/// persists. Out-of-range values are clamped rather than refused.
+#[tauri::command]
+pub fn set_ui_zoom(app: AppHandle, state: State<'_, AppState>, zoom: f64) {
+    let z = settings::clamp_ui_zoom(zoom);
+    update_settings(&app, &state, |s| s.ui_zoom = z);
+    #[cfg(desktop)]
+    if let Some(win) = app.get_webview_window("main") {
+        crate::apply_ui_zoom(&win, z);
+    }
+}
+
 #[tauri::command]
 pub fn set_max_concurrent(app: AppHandle, state: State<'_, AppState>, max: u32) {
     let clamped = settings::clamp_max_concurrent(max);
@@ -2131,6 +2290,7 @@ mod tests {
             name: "Discovered Name".into(),
             address: "192.168.1.5".into(),
             port: 52637,
+            manual: false,
         }];
         let mut manual = HashMap::new();
         // Same id as a discovery entry → must NOT duplicate; discovery wins.
@@ -2154,7 +2314,7 @@ mod tests {
             },
         );
 
-        let merged = merge_devices(discovered, &manual);
+        let merged = merge_devices(discovered, &manual, "me");
         assert_eq!(merged.len(), 2, "one shared (deduped) + one new");
         let shared = merged.iter().find(|d| d.device_id == "shared").unwrap();
         assert_eq!(
@@ -2197,7 +2357,7 @@ mod tests {
             manual_peers: Arc::new(Mutex::new(HashMap::new())),
             shares: crate::share::new_registry(),
             share_port: Arc::new(AtomicU16::new(0)),
-            pending_pair_link: Arc::new(Mutex::new(None)),
+            pending_deep_link: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -2478,6 +2638,82 @@ mod tests {
 
     /// With an empty manual table `merge_devices` returns the discovery snapshot
     /// untouched (the early-return fast path).
+    /// THIS DEVICE never appears in its own device list — from either source.
+    ///
+    /// Dialing your own address used to file you as your own manual peer, and a
+    /// self-entry is uniquely un-removable: discovery drops its own announces, so
+    /// it can never be expired, and the only thing that could clear it (the trust
+    /// row) wasn't where it lived. It sat in the list forever. Deleting it cleared
+    /// the trust row and changed nothing; the device came straight back.
+    #[test]
+    fn merge_devices_never_lists_this_device() {
+        let discovered = vec![DiscoveredDevice {
+            device_id: "me".into(),
+            name: "Me (somehow announced)".into(),
+            address: "192.168.1.5".into(),
+            port: 52637,
+            manual: false,
+        }];
+        let mut manual = HashMap::new();
+        manual.insert(
+            "me".into(),
+            ManualPeer {
+                name: "Me (dialled my own address)".into(),
+                addr: Ipv4Addr::new(127, 0, 0, 1),
+                port: 51704,
+                last_used: Instant::now(),
+            },
+        );
+        manual.insert(
+            "someone-else".into(),
+            ManualPeer {
+                name: "Real Peer".into(),
+                addr: Ipv4Addr::new(10, 0, 0, 2),
+                port: 51704,
+                last_used: Instant::now(),
+            },
+        );
+
+        let merged = merge_devices(discovered, &manual, "me");
+
+        assert!(
+            merged.iter().all(|d| d.device_id != "me"),
+            "this device must never be listed as a peer of itself — an entry              nothing can announce away is an entry nothing can remove"
+        );
+        assert_eq!(merged.len(), 1, "the real peer still comes through");
+        assert_eq!(merged[0].device_id, "someone-else");
+    }
+
+    /// A manual peer is flagged as such, so the UI can tell 「删除设备」 apart from
+    /// 「it will just come back」: nothing announces a manually-typed address, so
+    /// deleting one really does end it.
+    #[test]
+    fn merge_devices_flags_manual_peers() {
+        let discovered = vec![DiscoveredDevice {
+            device_id: "announced".into(),
+            name: "Announced".into(),
+            address: "192.168.1.5".into(),
+            port: 52637,
+            manual: false,
+        }];
+        let mut manual = HashMap::new();
+        manual.insert(
+            "typed-in".into(),
+            ManualPeer {
+                name: "Typed In".into(),
+                addr: Ipv4Addr::new(10, 0, 0, 2),
+                port: 51704,
+                last_used: Instant::now(),
+            },
+        );
+
+        let merged = merge_devices(discovered, &manual, "me");
+
+        let by = |id: &str| merged.iter().find(|d| d.device_id == id).unwrap().manual;
+        assert!(!by("announced"), "it announced itself");
+        assert!(by("typed-in"), "someone typed its address");
+    }
+
     #[test]
     fn merge_devices_with_no_manual_returns_discovery_unchanged() {
         let discovered = vec![DiscoveredDevice {
@@ -2485,8 +2721,9 @@ mod tests {
             name: "Only".into(),
             address: "192.168.1.1".into(),
             port: 52637,
+            manual: false,
         }];
-        let merged = merge_devices(discovered.clone(), &HashMap::new());
+        let merged = merge_devices(discovered.clone(), &HashMap::new(), "me");
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].device_id, "only");
         assert_eq!(merged[0].address, "192.168.1.1");
