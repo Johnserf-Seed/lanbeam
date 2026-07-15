@@ -8,6 +8,7 @@ import * as api from "../bridge/api";
 import type {
   MyIdentity,
   Settings,
+  ShareEntry,
   DiscoveredDevice,
   IncomingRequest,
   NetworkInfo,
@@ -58,7 +59,9 @@ interface PrefsState {
   mdns: boolean;
   concurrent: number;
   rate: string;
-  ssidOnly: string;
+  /** backend-hydrated mirror of Settings.uiZoom — the toggle keeps it for instant
+   *  UI, load() overwrites it from the settings blob */
+  uiZoom: number;
   set: (p: Partial<PrefsState>) => void;
 }
 
@@ -87,7 +90,7 @@ export const usePrefs = create<PrefsState>()(
       mdns: true,
       concurrent: 3,
       rate: "unlimited",
-      ssidOnly: "any",
+      uiZoom: 1,
       set: (p) => set(p),
     }),
     { name: "lanbeam.prefs" },
@@ -194,6 +197,7 @@ export const useData = create<DataState>((set, get) => ({
         organize: settings.organize,
         concurrent: settings.maxConcurrent,
         rate: settings.rateLimit,
+        uiZoom: settings.uiZoom,
         // M7.3: the clipboard-sharing consent is backend-owned too.
         clipShare: settings.clipShare,
         // M9.1: the strip-metadata default is backend-owned; the mirror still
@@ -331,7 +335,6 @@ interface TrustState {
   setPos: (deviceId: string, pos: { x: number; y: number }) => void;
   touch: (deviceId: string, name: string) => void;
   /** trust the new key of a device whose fingerprint changed */
-  migrate: (oldId: string, newId: string, name: string) => void;
   /** adopt the backend list (list_trusted / trust_updated) as the truth */
   hydrate: (list: TrustedPeer[]) => void;
 }
@@ -368,7 +371,15 @@ export const useTrust = create<TrustState>()(
           deviceId: d.deviceId,
           name: prev?.name ?? d.name,
           trusted,
-          autoAccept: trusted ? (prev?.autoAccept ?? false) : false,
+          // Trusting a device also turns on auto-accept by default — "these are
+          // my devices, stop nagging me". A device that was ALREADY trusted keeps
+          // its explicit auto-accept choice (so turning it OFF for one device
+          // sticks); a fresh trust defaults ON. Untrusting always clears it.
+          autoAccept: trusted
+            ? prev?.trusted
+              ? prev.autoAccept
+              : true
+            : false,
           addedAt: prev?.addedAt ?? Date.now(),
           lastSeen: Date.now(),
           pos: prev?.pos,
@@ -386,13 +397,28 @@ export const useTrust = create<TrustState>()(
         set((s) => ({ records: { ...s.records, [id]: next } }));
         if (next.trusted) pushTrust(id, next.name, next.autoAccept);
       },
+      // 删除设备 — the strong one. Clears the trust row AND the manually-added
+      // address (IP-direct / pair-by-code) that keeps the peer in the device
+      // list. `dropTrust` alone was never enough: the trust row went, the manual
+      // address stayed, and the device was back on the very next list with
+      // nothing able to remove it. It also drops the local memo (name, ring
+      // position) — deleting a device means forgetting all of it.
+      //
+      // A device still announcing itself on the LAN of course comes back. That
+      // is discovery, not a failure to delete: this erases LanBeam's memory of
+      // the device, not the machine. The caller says which of the two happened.
       remove: (id) => {
         set((s) => {
           const records = { ...s.records };
           delete records[id];
           return { records, sel: s.sel === id ? null : s.sel };
         });
-        dropTrust(id);
+        // Drop it from the live list too, so it disappears NOW rather than on the
+        // next devices_updated (and, for a manual peer, never comes back).
+        useData.setState((s) => ({
+          devices: s.devices.filter((d) => d.deviceId !== id),
+        }));
+        void api.forgetDevice(id).catch(() => {});
       },
       restore: (rec) => {
         set((s) => ({ records: { ...s.records, [rec.deviceId]: rec } }));
@@ -431,26 +457,6 @@ export const useTrust = create<TrustState>()(
             },
           };
         }),
-      migrate: (oldId, newId, name) => {
-        const old = get().records[oldId];
-        const rec: TrustRecord = {
-          deviceId: newId,
-          name: name || old?.name || "",
-          trusted: true,
-          autoAccept: old?.autoAccept ?? false,
-          addedAt: old?.addedAt ?? Date.now(),
-          lastSeen: Date.now(),
-          pos: old?.pos,
-        };
-        set((s) => {
-          const records = { ...s.records };
-          delete records[oldId];
-          records[newId] = rec;
-          return { records, sel: newId };
-        });
-        dropTrust(oldId);
-        pushTrust(newId, rec.name, rec.autoAccept);
-      },
       hydrate: (list) =>
         set((s) => {
           const records: Record<string, TrustRecord> = {};
@@ -568,10 +574,26 @@ export function trustList(
   }
   for (const r of Object.values(records)) {
     if (liveIds.has(r.deviceId)) continue;
-    // Same display name showed up under a different key → fingerprint change.
-    const imposter = devices.find(
+    // A live device under a different key is wearing this remembered device's
+    // name. That MIGHT be your device with a new key — or it might be nothing at
+    // all, because the name is whatever the peer says it is, and the default one
+    // ("LanBeam device", or the hostname) is shared by every install nobody has
+    // renamed. Shouting 「指纹已变化」 at two machines that simply never got
+    // renamed is crying wolf, and the alarm's whole value is that it is rare.
+    //
+    // So a name only counts as evidence when it is UNAMBIGUOUS:
+    const sameName = devices.filter(
       (d) => d.name === r.name && d.deviceId !== r.deviceId,
     );
+    const imposter =
+      // exactly one live device is wearing it (several ⇒ the name proves nothing)
+      sameName.length === 1 &&
+      // and that device is not one you already know in its own right. A device
+      // you have a record for is not impersonating anybody — it is just another
+      // device that shares a name.
+      !records[sameName[0].deviceId]
+        ? sameName[0]
+        : undefined;
     out.push({
       deviceId: r.deviceId,
       name: r.name,
@@ -624,8 +646,13 @@ export type UITransfer = {
   files?: { name: string; size?: number }[];
   /** outgoing source paths (再次发送) */
   paths?: string[];
-  /** paused via pause_transfer (M6.2). Session-local backpressure — the backend
-   *  emits no state event, so the UI owns this flag and clears it on resume. */
+  /** paused via pause_transfer (M6.2). Session-local backpressure: the UI sets it
+   *  optimistically on click. It is NOT the UI's alone to clear — the backend's
+   *  pause is bounded, and when the park expires it resumes on its own and emits
+   *  `transfer_resumed`, which AppShell listens for. (This comment used to say
+   *  "the backend emits no state event"; it had stopped being true, and nothing
+   *  listened, so a resumed transfer streamed bytes under a row that still read
+   *  「已暂停」 until the user clicked a 继续 button that did nothing.) */
   paused?: boolean;
   /** live per-file state (M6.8) keyed by manifest file index, fed by the
    *  transfer_file_progress / transfer_file_done events. Absent → the detail
@@ -693,6 +720,8 @@ interface TransfersState {
   removeIncoming: (sessionId: string) => void;
   acceptMeta: (r: IncomingRequest, peerName: string) => void;
   removeTransfer: (sessionId: string) => void;
+  /** Drop finished rows that have outlived 历史记录保留. */
+  pruneHistory: () => void;
 }
 
 // Monotonic counter for quick-text record ids. Combined with a timestamp and a
@@ -703,6 +732,28 @@ let textRecordSeq = 0;
 
 /** Persisted shape of useTransfers (see partialize below): terminal rows only. */
 type PersistedTransfers = { transfers: Record<string, UITransfer> };
+
+/** How long a finished transfer stays in 历史, per 设置 → 历史记录保留.
+ *
+ *  This setting had a dropdown, a persisted value, a description promising
+ *  「超期的传输记录自动清除」 — and not one reader anywhere in the codebase. The
+ *  only trimming that ever happened was a 200-row cap, which is a count, not a
+ *  time; picking 「不保留」 still wrote every row to disk.
+ *
+ *  `none` → nothing survives a restart (the live list is untouched — you still
+ *  watch this session's transfers finish). `forever` → no expiry. */
+export function histWindowMs(keep: string): number {
+  switch (keep) {
+    case "none":
+      return 0;
+    case "7d":
+      return 7 * 24 * 3600_000;
+    case "30d":
+      return 30 * 24 * 3600_000;
+    default:
+      return Number.POSITIVE_INFINITY;
+  }
+}
 
 /** A localStorage-backed persist storage that skips the write when the
  *  partialized (terminal-only) snapshot is unchanged. The backend throttles
@@ -985,6 +1036,25 @@ export const useTransfers = create<TransfersState>()(
           delete transfers[sessionId];
           return { transfers };
         }),
+      // partialize only trims on the next WRITE, so without this an expired row
+      // lingers in the live list until something else happens to persist. Run at
+      // startup and whenever 历史记录保留 changes. 「不保留」 is deliberately a
+      // no-op here — it means "don't KEEP them", not "delete the ones you are
+      // watching right now".
+      pruneHistory: () => {
+        const win = histWindowMs(usePrefs.getState().histKeep);
+        if (win === 0 || !Number.isFinite(win)) return;
+        const cutoff = Date.now() - win;
+        set((s) => {
+          const kept = Object.entries(s.transfers).filter(
+            ([, t]) =>
+              (t.status !== "done" && t.status !== "error") ||
+              (t.doneAt ?? 0) >= cutoff,
+          );
+          if (kept.length === Object.keys(s.transfers).length) return s;
+          return { transfers: Object.fromEntries(kept) };
+        });
+      },
     }),
     {
       name: "lanbeam.transfers",
@@ -995,14 +1065,24 @@ export const useTransfers = create<TransfersState>()(
       // Persist only terminal transfers (history survives restarts). "active"
       // AND "queued" are live in-progress states — never persist them, or a
       // restart mid-transfer would resurrect a frozen row that no event clears.
-      partialize: (s) => ({
-        transfers: Object.fromEntries(
-          Object.entries(s.transfers)
-            .filter(([, t]) => t.status === "done" || t.status === "error")
-            .sort((a, b) => (b[1].doneAt ?? 0) - (a[1].doneAt ?? 0))
-            .slice(0, 200),
-        ),
-      }),
+      // Then apply 历史记录保留 (histWindowMs) — the setting that, until now,
+      // nothing read: 「不保留」 wrote every row to disk anyway.
+      partialize: (s) => {
+        const win = histWindowMs(usePrefs.getState().histKeep);
+        // 「不保留」: nothing survives the restart. The live list is untouched —
+        // you still watch this session's transfers finish; they just aren't kept.
+        if (win === 0) return { transfers: {} };
+        const cutoff = Date.now() - win; // -Infinity under 「永久保留」
+        return {
+          transfers: Object.fromEntries(
+            Object.entries(s.transfers)
+              .filter(([, t]) => t.status === "done" || t.status === "error")
+              .filter(([, t]) => (t.doneAt ?? 0) >= cutoff)
+              .sort((a, b) => (b[1].doneAt ?? 0) - (a[1].doneAt ?? 0))
+              .slice(0, 200),
+          ),
+        };
+      },
     },
   ),
 );
@@ -1011,6 +1091,37 @@ export const useTransfers = create<TransfersState>()(
 export function transferList(map: Record<string, UITransfer>): UITransfer[] {
   return Object.values(map).sort((a, b) => b.startedAt - a.startedAt);
 }
+
+/* ── live browser shares ────────────────────────────────────────────────── */
+
+/** The browser shares serving files RIGHT NOW.
+ *
+ *  A live share is files being served over HTTP on your LAN, and until now the
+ *  only place that fact appeared was inside the modal that created it. Closing
+ *  that modal does not stop the share — deliberately, because a link you handed
+ *  someone should survive you closing the panel you copied it from — so a share
+ *  you'd forgotten went on serving, invisible AND unstoppable: reopening the modal
+ *  minted a NEW share rather than adopting the live one, so the only 停止分享
+ *  button in the app could never reach the old one again.
+ *
+ *  Backend-owned and event-fed (`shares_updated` fires on start / update / stop,
+ *  on a download that exhausts a budget, and from the sweeper when a share expires
+ *  on its own) — the indicator has to go out by itself, not the next time somebody
+ *  happens to open a modal. */
+interface SharesState {
+  shares: ShareEntry[];
+  setShares: (shares: ShareEntry[]) => void;
+  load: () => Promise<void>;
+}
+
+export const useShares = create<SharesState>((set) => ({
+  shares: [],
+  setShares: (shares) => set({ shares }),
+  load: async () => {
+    const shares = await api.listShares().catch(() => [] as ShareEntry[]);
+    set({ shares });
+  },
+}));
 
 /* ── inbox ──────────────────────────────────────────────────────────────── */
 
@@ -1202,10 +1313,15 @@ export type SendState = {
   startedTrusted: number;
 };
 
+/** The remembered device whose name has reappeared under a different key.
+ *
+ *  It used to carry a `step` and a `sas`, for a "re-verify and restore trust"
+ *  flow. That flow dialled the new key, showed the SAS it produced, and asked the
+ *  user to confirm it matched — while the OTHER device displayed nothing at all.
+ *  There was no second number. Trusting an unknown key is what pairing is for,
+ *  and pairing shows the code on both screens; the alert now sends you there. */
 export type FpAlert = {
   deviceId: string;
-  step: "warn" | "verify";
-  sas?: string;
 };
 
 /** A parked name-collision awaiting the ConflictModal's decision (M6.5). The
@@ -1226,6 +1342,12 @@ interface OverlayState {
    *  modal to pre-fill its join field. Cleared once consumed / on close. */
   pairPrefill: string | null;
   qtOpen: boolean;
+  /** Body staged for quick-text by a `lanbeam://text?t=…` deep link. Cleared
+   *  once consumed / on close. The user still picks a device and sends. */
+  qtPrefill: string | null;
+  /** Address staged for the Devices page's IP-direct field by a
+   *  `lanbeam://connect?a=…` deep link. A PRE-FILL only — it never dials. */
+  connectPrefill: string | null;
   shareOpen: boolean;
   licenseOpen: boolean;
   fpAlert: FpAlert | null;
@@ -1242,7 +1364,8 @@ interface OverlayState {
   setDetail: (id: string | null) => void;
   setPair: (v: boolean, prefill?: string | null) => void;
   setPairPrefill: (v: string | null) => void;
-  setQt: (v: boolean) => void;
+  setQt: (v: boolean, prefill?: string | null) => void;
+  setConnectPrefill: (v: string | null) => void;
   setShare: (v: boolean) => void;
   setLicense: (v: boolean) => void;
   setFpAlert: (v: FpAlert | null) => void;
@@ -1256,6 +1379,8 @@ export const useOverlays = create<OverlayState>((set) => ({
   pairOpen: false,
   pairPrefill: null,
   qtOpen: false,
+  qtPrefill: null,
+  connectPrefill: null,
   shareOpen: false,
   licenseOpen: false,
   fpAlert: null,
@@ -1290,7 +1415,9 @@ export const useOverlays = create<OverlayState>((set) => ({
   setPair: (pairOpen, prefill = null) =>
     set({ pairOpen, pairPrefill: pairOpen ? prefill : null }),
   setPairPrefill: (pairPrefill) => set({ pairPrefill }),
-  setQt: (qtOpen) => set({ qtOpen }),
+  setQt: (qtOpen, prefill = null) =>
+    set({ qtOpen, qtPrefill: qtOpen ? prefill : null }),
+  setConnectPrefill: (connectPrefill) => set({ connectPrefill }),
   setShare: (shareOpen) => set({ shareOpen }),
   setLicense: (licenseOpen) => set({ licenseOpen }),
   setFpAlert: (fpAlert) => set({ fpAlert }),

@@ -8,10 +8,13 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
+import BrandMark from "./BrandMark";
 import {
   useData,
   useInbox,
+  useOverlays,
   usePrefs,
+  useShares,
   useTransfers,
   useTrust,
   displayIp,
@@ -435,6 +438,8 @@ export default function Sidebar() {
   const vis = visibilityOf(settings, ghostUntil);
   const tl = useMemo(() => trustList(devices, records), [devices, records]);
   const trustedCount = tl.filter((d) => d.trusted).length;
+  const liveShares = useShares((s) => s.shares);
+  const setShare = useOverlays((s) => s.setShare);
 
   const deviceName = settings?.deviceName || identity?.name || "";
   const ghostMins = ghostUntil
@@ -544,22 +549,14 @@ export default function Sidebar() {
             padding: "6px 8px 20px",
           }}
         >
+          {/* The real brand mark. The wrapper keeps the drag region (the mark
+              itself is pointer-events:none) so grabbing the logo still moves
+              the window, exactly as the placeholder tile did. */}
           <div
             data-tauri-drag-region=""
-            style={{
-              width: 30,
-              height: 30,
-              borderRadius: 9,
-              background: "var(--accent)",
-              color: "var(--accent-fg)",
-              display: "grid",
-              placeItems: "center",
-              fontSize: 15,
-              fontWeight: 600,
-              flex: "none",
-            }}
+            style={{ flex: "none", lineHeight: 0 }}
           >
-            ⌁
+            <BrandMark size={30} />
           </div>
           <div data-tauri-drag-region="">
             <div
@@ -637,6 +634,72 @@ export default function Sidebar() {
             label={t("nav.settings")}
           />
         </nav>
+
+        {/* A live browser share is FILES BEING SERVED over HTTP on your LAN, right
+            now. Closing the share panel does not stop that — a link you handed
+            someone should survive you closing the panel you copied it from — so
+            this is the thing that has to keep saying it, and to keep offering the
+            way to stop it. Without it, a forgotten share went on serving:
+            invisible, and (since reopening the panel minted a NEW share instead of
+            adopting the live one) unstoppable. */}
+        {liveShares.length > 0 && (
+          // biome-ignore lint/a11y/useSemanticElements: styled panel, not a native button — keyboard-operable via role/tabIndex/onKeyDown
+          <div
+            role="button"
+            tabIndex={0}
+            onClick={() => setShare(true)}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              setShare(true);
+            }}
+            title={t("share.liveHint")}
+            style={{
+              margin: "10px 8px 0",
+              padding: "9px 11px",
+              borderRadius: 10,
+              border: "1px solid var(--accent)",
+              background: "var(--accent-soft)",
+              cursor: "pointer",
+              display: "flex",
+              alignItems: "center",
+              gap: 9,
+            }}
+          >
+            <span
+              style={{
+                width: 8,
+                height: 8,
+                flex: "none",
+                borderRadius: "50%",
+                background: "var(--accent)",
+                animation: "lbBlink 1.6s ease-in-out infinite",
+              }}
+            />
+            <span style={{ flex: 1, minWidth: 0 }}>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 11.5,
+                  fontWeight: 650,
+                  color: "var(--accent-ink)",
+                }}
+              >
+                {t("share.liveTitle", { n: liveShares.length })}
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 10,
+                  color: "var(--muted2)",
+                  marginTop: 1,
+                }}
+              >
+                {t("share.liveSub")}
+              </span>
+            </span>
+          </div>
+        )}
 
         <div
           style={{

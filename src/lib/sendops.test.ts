@@ -12,6 +12,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
   return {
     ...actual,
     isTauri: true,
+    openLocalPath: vi.fn().mockResolvedValue(undefined),
     sendFiles: vi.fn(),
     sendText: vi.fn(),
   };
@@ -34,7 +35,9 @@ import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   errText,
+  isNotFound,
   openDir,
+  openFile,
   readClipboardText,
   revealFile,
   sendTextTracked,
@@ -194,15 +197,39 @@ describe("sendTextTracked", () => {
   });
 });
 
-describe("openDir / revealFile", () => {
-  it("opens a directory via the system opener", async () => {
+describe("openDir / openFile / revealFile", () => {
+  // REGRESSION GUARD. Opening used to go through the opener plugin's JS
+  // `openPath`, which is SCOPE-GATED — and the capability never granted it, so
+  // "open file" / "open download folder" were dead in every build. They now go
+  // through the backend (`open_local_path`), whose Rust api needs no such
+  // scope. If anyone routes them back through the plugin, these fail.
+  it("opens a directory through the BACKEND, not the scope-gated plugin", async () => {
     await openDir("/tmp/downloads");
-    expect(openPath).toHaveBeenCalledWith("/tmp/downloads");
+    expect(api.openLocalPath).toHaveBeenCalledWith("/tmp/downloads");
+    expect(openPath).not.toHaveBeenCalled();
   });
 
-  it("reveals a file in the system file manager", async () => {
+  it("opens a file through the BACKEND, not the scope-gated plugin", async () => {
+    await openFile("/tmp/downloads/photo.jpg");
+    expect(api.openLocalPath).toHaveBeenCalledWith("/tmp/downloads/photo.jpg");
+    expect(openPath).not.toHaveBeenCalled();
+  });
+
+  it("still reveals through the plugin (reveal IS granted by the capability)", async () => {
     await revealFile("/tmp/downloads/photo.jpg");
     expect(revealItemInDir).toHaveBeenCalledWith("/tmp/downloads/photo.jpg");
+  });
+});
+
+describe("isNotFound", () => {
+  it("only reports true for the backend's NotFound kind", () => {
+    // This is what lets the inbox say "that file is gone" ONLY when it really
+    // is — instead of blaming a stale record for every failure, which is how
+    // the scope-gate bug stayed hidden.
+    expect(isNotFound({ kind: "NotFound", message: "x" })).toBe(true);
+    expect(isNotFound({ kind: "Io", message: "x" })).toBe(false);
+    expect(isNotFound(new Error("boom"))).toBe(false);
+    expect(isNotFound(null)).toBe(false);
   });
 });
 

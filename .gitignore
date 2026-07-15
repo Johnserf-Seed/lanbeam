@@ -27,3 +27,6 @@ dist-ssr
 *.zip
 ui/*
 /coverage
+/Lanbeam工具logo设计
+# ...but the assets derived from it and actually shipped are versioned:
+!assets/brand/

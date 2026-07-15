@@ -62,7 +62,10 @@ function RunningRow({ tr }: { tr: UITransfer }) {
   const mx = Math.max(20, ...hist);
 
   // Pause is session-local backpressure (M6.2) — flip the UI flag optimistically
-  // (there is no backend "paused" event) and stall/resume the byte loop.
+  // and stall/resume the byte loop. The pause is BOUNDED: left alone, the backend
+  // un-parks the transfer itself and emits `transfer_resumed` (AppShell clears
+  // the flag). Say so on the way in, rather than letting the user believe a
+  // paused transfer stays paused forever.
   const togglePause = (e: ReactMouseEvent<HTMLElement>) => {
     e.stopPropagation();
     if (tr.paused) {
@@ -71,6 +74,7 @@ function RunningRow({ tr }: { tr: UITransfer }) {
     } else {
       void api.pauseTransfer(tr.sessionId);
       setPaused(tr.sessionId, true);
+      showToast(t("transfers.pausedToast"));
     }
   };
   // Cancel drops the session (M6.1); the peer fails through its error path and

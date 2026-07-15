@@ -20,6 +20,7 @@ vi.mock("../bridge/api", async (importActual) => {
     ...actual,
     setTrusted: vi.fn(() => Promise.resolve()),
     removeTrusted: vi.fn(() => Promise.resolve()),
+    forgetDevice: vi.fn(() => Promise.resolve()),
   };
 });
 
@@ -125,9 +126,9 @@ describe("TrustedPage", () => {
     expect(api.setTrusted).toHaveBeenCalledWith("d1", "Alice", true);
   });
 
-  it("removes a remembered offline peer from the page and the backend", () => {
-    // d1 is live; carol is a remembered offline record (no live device) — only
-    // such records can be forgotten, and removing one drops it from the list.
+  it("deletes a remembered offline peer from the page and the backend", () => {
+    // carol is a remembered offline record with no live device behind it. With
+    // nothing announcing her, deleting really does end her.
     seed([dev("d1", "Alice")], {
       d1: rec({ deviceId: "d1", name: "Alice" }),
       carol: rec({ deviceId: "carol", name: "Carol" }),
@@ -141,6 +142,29 @@ describe("TrustedPage", () => {
 
     expect(screen.queryByText("Carol")).not.toBeInTheDocument();
     expect(useTrust.getState().records.carol).toBeUndefined();
-    expect(api.removeTrusted).toHaveBeenCalledWith("carol");
+    // forget_device, NOT remove_trusted: deleting has to clear the manually-added
+    // ADDRESS too, or the peer is back on the very next device list. That was the
+    // whole bug — 「删除」 dropped the trust row and left the address behind.
+    expect(api.forgetDevice).toHaveBeenCalledWith("carol");
+  });
+
+  it("deleting also drops the device from the live list, so a manual peer really goes", () => {
+    // A peer that is only in the list because someone typed its address is the
+    // one kind that CAN be deleted for good — nothing will announce it back. It
+    // used to be the one kind you could never delete: with no trust record, the
+    // drop zone wasn't even offered, and `remove_trusted` couldn't touch the
+    // manual address anyway.
+    seed([{ ...dev("manual1", "Typed In"), manual: true }], {});
+    renderUI(<TrustedPage />);
+    // It is the only device, so it renders both as a chip and in the selection
+    // bar — hence getAllByText.
+    expect(screen.getAllByText("Typed In").length).toBeGreaterThan(0);
+
+    act(() => {
+      useTrust.getState().remove("manual1");
+    });
+
+    expect(screen.queryByText("Typed In")).not.toBeInTheDocument();
+    expect(api.forgetDevice).toHaveBeenCalledWith("manual1");
   });
 });

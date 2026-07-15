@@ -315,6 +315,47 @@ select.input {
   font-size: 11px;
 }
 
+/* A <select> is a NATIVE WIDGET, and macOS means it.
+ *
+ * WKWebView draws one as an Aqua popup button and simply ignores the border,
+ * background, radius and height above — so every dropdown in the app came out
+ * looking like it had been lifted from a different program. Chromium (WebView2, on
+ * Windows) honours most of that, which is exactly why the mismatch is invisible
+ * from the machine this was built on.
+ *
+ * `appearance: none` opts out of the native widget on every platform, so all three
+ * render the same control. The chevron then has to be ours: a <select> is a
+ * REPLACED element — ::before/::after don't render on it — so it rides in as a
+ * background image, and it needs its own colour per theme because a data-URI SVG
+ * can't reach a CSS variable.
+ *
+ * The option LIST is still the OS's, on every platform. That part is correct: a
+ * native menu is what the user expects when the box opens. */
+select.input {
+  appearance: none;
+  -webkit-appearance: none;
+  padding-right: 26px;
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%236f7378' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 9px center;
+  background-size: 10px 6px;
+}
+[data-theme="dark"] select.input {
+  background-image: url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b98a5' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+
+/* `outline: none` above left keyboard users with NO focus indicator at all — you
+ * could tab through every field in the app and never see where you were. Give it
+ * back, but only for keyboard focus (`:focus-visible`), so a mouse click doesn't
+ * ring the box. Dropping the native outline without replacing it is how this got
+ * lost in the first place. */
+.input:focus-visible,
+select.input:focus-visible {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
 /* ── segmented control ───────────────────────────────────────────────── */
 
 .seg {

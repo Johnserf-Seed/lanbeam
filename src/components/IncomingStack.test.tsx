@@ -129,7 +129,8 @@ describe("IncomingStack accept with trust", () => {
       const rec = useTrust.getState().records.peerT;
       expect(rec).toBeDefined();
       expect(rec.trusted).toBe(true);
-      // setTrust (autoAccept off) then the follow-up toggleAuto flips it on
+      // Trusting from the prompt enables auto-accept too (setTrust defaults it
+      // on for a fresh trust), so future transfers from this device don't nag.
       expect(rec.autoAccept).toBe(true);
     } finally {
       vi.useRealTimers();

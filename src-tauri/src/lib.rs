@@ -25,6 +25,8 @@ pub mod identity;
 #[doc(hidden)]
 pub mod partials;
 #[doc(hidden)]
+pub mod paths;
+#[doc(hidden)]
 pub mod protocol;
 mod sanitize;
 #[doc(hidden)]
@@ -35,8 +37,12 @@ pub mod share;
 pub mod state;
 #[doc(hidden)]
 pub mod transfer;
+
 #[doc(hidden)]
 pub mod transport;
+/// System tray + its menu (see the module docs: the tray is a remote control —
+/// Rust owns show/quit, the webview owns every other action).
+pub mod tray;
 #[doc(hidden)]
 pub mod trust;
 
@@ -53,15 +59,16 @@ use tauri::Manager;
 
 use commands::{
     cancel_pairing, cancel_transfer, connect_by_addr, connect_device, discard_partials,
-    export_diagnostics, get_download_dir, get_listen_port, get_log_dir, get_my_identity,
-    get_net_status, get_network_info, get_settings, join_by_code, list_discovered_devices,
-    list_shares, list_trusted, pause_transfer, remove_trusted, reply_file_request, reset_identity,
-    resume_transfer, reveal_received, self_test_secure_channel, send_files, send_text,
-    set_auto_open, set_autostart, set_clip_share, set_conflict_policy, set_device_name,
-    set_discoverable, set_download_dir, set_hotkey, set_hotkey_enabled, set_iface_filter,
-    set_listen_port, set_log_level, set_max_concurrent, set_notif_system, set_organize,
-    set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_trusted, set_verify_hash,
-    start_pairing, start_share, stop_share, take_pending_pair_link, update_share,
+    export_diagnostics, forget_device, get_download_dir, get_listen_port, get_log_dir,
+    get_my_identity, get_net_status, get_network_info, get_settings, join_by_code,
+    list_discovered_devices, list_partials, list_shares, list_trusted, open_local_path,
+    pause_transfer, remove_trusted, reply_file_request, reset_identity, resume_transfer,
+    reveal_received, send_files, send_text, set_auto_open, set_autostart, set_clip_share,
+    set_conflict_policy, set_device_name, set_discoverable, set_download_dir, set_hotkey,
+    set_hotkey_enabled, set_iface_filter, set_listen_port, set_log_level, set_max_concurrent,
+    set_notif_system, set_organize, set_rate_limit, set_recv_policy, set_strip_exif,
+    set_tray_close, set_trusted, set_ui_zoom, set_verify_hash, start_pairing, start_share,
+    stop_share, take_pending_deep_link, update_share,
 };
 use discovery::{DiscoveryCtx, PeerTable};
 use identity::Identity;
@@ -108,6 +115,30 @@ pub(crate) fn instance_id() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Apply the interface scale, and keep the window's minimum size in step with it.
+///
+/// The second half is the part that is easy to miss. A webview zoom SHRINKS the CSS
+/// viewport: a 920pt-wide window at 150% leaves the layout 613 CSS px to live in,
+/// which is well under the 920 it is built for. Zooming without moving the window
+/// floor would therefore let the user scale the interface straight off the edge of
+/// its own window — a clipped sidebar, a clipped radar, and no way to see it was the
+/// zoom that did it. So the floor is `MIN_LAYOUT_SIZE x zoom`, which keeps the CSS
+/// viewport at its designed minimum no matter how the user scales.
+///
+/// Both calls are best-effort: `set_zoom` is a no-op on macOS below 11, and a
+/// window that refuses a minimum is still a usable window.
+#[cfg(desktop)]
+pub(crate) fn apply_ui_zoom<R: tauri::Runtime>(win: &tauri::WebviewWindow<R>, zoom: f64) {
+    let z = settings::clamp_ui_zoom(zoom);
+    if let Err(e) = win.set_zoom(z) {
+        log::warn!("ui zoom {z} not applied: {e}");
+    }
+    let (w, h) = settings::MIN_LAYOUT_SIZE;
+    if let Err(e) = win.set_min_size(Some(tauri::LogicalSize::new(w * z, h * z))) {
+        log::warn!("window minimum for ui zoom {z} not applied: {e}");
+    }
+}
+
 /// Bring the main window back from the tray/taskbar: show + unminimize +
 /// focus. One helper because three paths need the exact same sequence — the
 /// tray's left click, its 显示 menu item, and a second launch caught by
@@ -123,21 +154,31 @@ pub(crate) fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
-/// Route an incoming `lanbeam://` deep link (currently only `…//pair?…`) to the
-/// UI. A deep link is UNTRUSTED input — anyone can hand one to the OS — so this
-/// NEVER acts on it: it brings the window forward and forwards the raw link to
-/// the webview, which pre-fills the pairing form and waits for the user to
-/// confirm. A non-`lanbeam://` URL is ignored. Shared by the cold-start,
-/// macOS `on_open_url`, and Windows/Linux single-instance paths so all three
-/// behave identically.
-fn handle_pair_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &str) {
+/// Route an incoming `lanbeam://` deep link to the UI.
+///
+/// A deep link is UNTRUSTED input — ANY web page can ask the OS to open one — so
+/// this NEVER acts on it. It does exactly two things: brings the window forward,
+/// and forwards the raw link to the webview. The webview owns the command
+/// allowlist (`src/lib/deepLink.ts`), and every command there is confined to
+/// SURFACING, PRE-FILLING or NAVIGATING: `pair` pre-fills the pairing form,
+/// `connect` pre-fills the IP-direct field (it does not dial), `text` pre-fills
+/// quick-text. The user still confirms.
+///
+/// THE INVARIANT: no `lanbeam://` command may ever pair, connect, send, trust,
+/// share or change a setting on its own. A link that decides something for the
+/// user is a link an attacker gets to decide with.
+///
+/// A non-`lanbeam://` URL is ignored. Shared by the cold-start, macOS
+/// `on_open_url`, and Windows/Linux single-instance paths so all three behave
+/// identically.
+fn handle_deep_link<R: tauri::Runtime>(app: &tauri::AppHandle<R>, url: &str) {
     use tauri::Emitter;
     let url = url.trim();
     if !url.starts_with("lanbeam://") {
         return;
     }
     show_main_window(app);
-    let _ = app.emit("pair_link", url);
+    let _ = app.emit("deep_link", url);
 }
 
 /// Register the global quick-summon shortcut `combo` with the standard press
@@ -182,7 +223,7 @@ fn should_hide_on_close(tray_close: bool, quitting: bool) -> bool {
 /// (highest) seq, so it wins. A poisoned lock degrades to a skipped flush rather
 /// than blocking the quit. `reset_identity` already awaits its own trust persist
 /// for the same reason.
-fn flush_persistence(state: &AppState) {
+pub(crate) fn flush_persistence(state: &AppState) {
     if let Some(snap) = state.trusted.read().ok().and_then(|t| t.snapshot()) {
         snap.persist();
     }
@@ -205,7 +246,7 @@ pub fn run() {
             // same handler the cold-start path uses instead of ignoring it.
             for arg in &args {
                 if arg.starts_with("lanbeam://") {
-                    handle_pair_link(app, arg);
+                    handle_deep_link(app, arg);
                 }
             }
         }));
@@ -259,6 +300,11 @@ pub fn run() {
                 Identity::load_or_create(instance.as_deref())
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
             );
+            // BEFORE settings are read: move an existing install's files out of
+            // Tauri's bundle-id folder. Cannot log yet (the logger is configured
+            // below, from the settings this is about to make readable), so the note
+            // rides along with settings' own deferred diagnostic.
+            let path_diag = paths::migrate_from_identifier_dir(app.handle());
             let (mut loaded, settings_diag) = settings::load(app.handle());
 
             // Logging comes up as early as possible, but AFTER settings — the level
@@ -270,7 +316,9 @@ pub fn run() {
                 tauri_plugin_log::Builder::new()
                     .targets([
                         tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
-                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+                        // Our folder, not the bundle id's — see `paths`.
+                        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Folder {
+                            path: paths::log_dir(app.handle()),
                             file_name: None,
                         }),
                     ])
@@ -281,6 +329,15 @@ pub fn run() {
                     .build(),
             )?;
             log::info!("logging initialized (level setting: {})", loaded.log_level);
+            // The persisted interface scale, applied before the window is shown so it
+            // never flashes at the wrong size.
+            #[cfg(desktop)]
+            if let Some(win) = app.get_webview_window("main") {
+                apply_ui_zoom(&win, loaded.ui_zoom);
+            }
+            if let Some(note) = path_diag {
+                log::info!("{note}");
+            }
             // Deferred from settings::load, which runs before the logger exists.
             if let Some(e) = settings_diag {
                 log::warn!("settings blob corrupted, fell back to defaults: {e}");
@@ -361,25 +418,39 @@ pub fn run() {
             // captured; per-instance file (like the keychain identity) so two
             // test processes on one machine don't share trust decisions.
             let trusted = {
-                let dir = app
-                    .path()
-                    .app_data_dir()
-                    .unwrap_or_else(|_| std::env::temp_dir());
+                let dir = paths::data_dir(app.handle());
                 let file = match &instance {
                     Some(id) => format!("trusted-{id}.json"),
                     None => "trusted.json".to_string(),
                 };
-                Arc::new(RwLock::new(trust::TrustStore::load(dir.join(file))))
+                let store = trust::TrustStore::load(dir.join(file));
+                Arc::new(RwLock::new(store))
             };
+
+            // Evict any trust record for THIS device. A build that let you dial
+            // your own address filed you as your own peer, and a self-record is
+            // pure garbage: it renders in your own trust circle as a device you
+            // trust, permanently "offline" (discovery drops its own announces, so
+            // nothing can ever mark it live), and it can never mean anything —
+            // you do not need permission to receive from yourself. `set_trusted`
+            // now refuses one; this clears the ones already on disk.
+            {
+                let my_id = identity.device_id();
+                let snapshot = match trusted.write() {
+                    Ok(mut store) => store.remove(&my_id).then(|| store.snapshot()),
+                    Err(_) => None,
+                };
+                if let Some(snapshot) = snapshot {
+                    log::info!("trust: evicted a self-record for {my_id}");
+                    trust::persist_async(snapshot);
+                }
+            }
 
             // Resume state for interrupted receives (M6.4): its own JSON file in
             // the app data dir, per-instance like the trust store so two test
             // processes never resume onto each other's partials.
             let partials = {
-                let dir = app
-                    .path()
-                    .app_data_dir()
-                    .unwrap_or_else(|_| std::env::temp_dir());
+                let dir = paths::data_dir(app.handle());
                 let file = match &instance {
                     Some(id) => format!("partials-{id}.json"),
                     None => "partials.json".to_string(),
@@ -423,7 +494,7 @@ pub fn run() {
             // Cold-start deep link (lanbeam://pair): filled below if this process
             // was launched by a link, drained by the webview on mount. See the
             // AppState field for why a stash (not an event) is needed.
-            let pending_pair_link: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+            let pending_deep_link: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
 
             app.manage(AppState {
                 identity: identity.clone(),
@@ -443,7 +514,7 @@ pub fn run() {
                 manual_peers: manual_peers.clone(),
                 shares: shares.clone(),
                 share_port: share_port.clone(),
-                pending_pair_link: pending_pair_link.clone(),
+                pending_deep_link: pending_deep_link.clone(),
             });
 
             // Start the TCP transfer listener (answers Noise handshakes; sets the real port).
@@ -494,6 +565,12 @@ pub fn run() {
             let on_download: share::DownloadHook =
                 Some(Arc::new(move |ev: share::ShareDownloadEvent| {
                     let _ = dl_app.emit("share_download", &ev);
+                    // A fetch can be the one that exhausts the share's budget, which
+                    // takes it off the live list. Re-broadcast so the UI's live
+                    // indicator goes out by itself.
+                    if let Some(state) = dl_app.try_state::<AppState>() {
+                        commands::emit_shares(&dl_app, &state);
+                    }
                     #[cfg(desktop)]
                     {
                         let notify = dl_app
@@ -524,10 +601,23 @@ pub fn run() {
                         }
                     }
                 }));
+            // A share expiring on its own is a change nobody is watching for. The
+            // commands broadcast their own mutations; this is the sweeper's. Same
+            // DTO builder either way — one source of truth for what a share looks
+            // like to the UI.
+            let on_change: share::ChangeHook = {
+                let handle = app.handle().clone();
+                Some(Arc::new(move || {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        commands::emit_shares(&handle, &state);
+                    }
+                }))
+            };
             share::spawn_share_server(share::ShareServerCtx {
                 registry: shares.clone(),
                 share_port: share_port.clone(),
                 on_download,
+                on_change,
             });
 
             // Start LAN discovery (announce + listen + expiry tasks).
@@ -551,59 +641,11 @@ pub fn run() {
 
             // System tray (M5.3, desktop only — `tauri::tray` does not exist on
             // mobile). With close-to-tray on by default, the tray is the way
-            // back into a hidden window AND the only reliable way out: 退出
-            // flips the quitting flag the close interception honors.
+            // back into a hidden window AND the only reliable way out: its 退出
+            // flips the quitting flag the close interception honors. See `tray`
+            // for why every OTHER item is delegated to the webview.
             #[cfg(desktop)]
-            {
-                use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-                use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-
-                let show = MenuItem::with_id(app, "show", "显示 LanBeam", true, None::<&str>)?;
-                let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-                let menu =
-                    Menu::with_items(app, &[&show, &PredefinedMenuItem::separator(app)?, &quit])?;
-                let mut tray = TrayIconBuilder::with_id("main")
-                    .tooltip("LanBeam")
-                    .menu(&menu)
-                    // Left click restores the window instead of popping the
-                    // menu (macOS would otherwise open the menu); the menu
-                    // stays reachable via right click everywhere.
-                    .show_menu_on_left_click(false)
-                    .on_menu_event(|app, event| match event.id().as_ref() {
-                        "show" => show_main_window(app),
-                        "quit" => {
-                            // Flag BEFORE exiting: any close request fired
-                            // during teardown must not be intercepted into a
-                            // hide, or the process would linger headless.
-                            if let Some(state) = app.try_state::<AppState>() {
-                                state.quitting.store(true, Ordering::Relaxed);
-                                // Drain fire-and-forget trust/partials writes
-                                // before app.exit(0), which does not wait on the
-                                // blocking pool — a just-made pairing/trust or
-                                // discard decision must not be lost on quit.
-                                flush_persistence(&state);
-                            }
-                            app.exit(0);
-                        }
-                        _ => {}
-                    })
-                    .on_tray_icon_event(|tray, event| {
-                        if let TrayIconEvent::Click {
-                            button: MouseButton::Left,
-                            button_state: MouseButtonState::Up,
-                            ..
-                        } = event
-                        {
-                            show_main_window(tray.app_handle());
-                        }
-                    });
-                // A missing icon degrades to a blank-but-clickable tray — not
-                // worth failing startup over.
-                if let Some(icon) = app.default_window_icon() {
-                    tray = tray.icon(icon.clone());
-                }
-                tray.build(app)?;
-            }
+            tray::build(app)?;
 
             // Autostart reconcile (M5.5): the persisted setting is the source
             // of truth. The OS entry can drift behind our back (removed via
@@ -658,7 +700,7 @@ pub fn run() {
 
             // Deep links (lanbeam://pair): a pairing link from another device can
             // launch or focus LanBeam and pre-fill the join form. See
-            // handle_pair_link — the webview still requires the user to confirm.
+            // handle_deep_link — the webview still requires the user to confirm.
             #[cfg(desktop)]
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -686,7 +728,7 @@ pub fn run() {
                 }
                 // Cold start: LanBeam may have been LAUNCHED by a link. The
                 // webview is not listening yet (events have no replay), so STASH
-                // the launch link for it to pull on mount (take_pending_pair_link)
+                // the launch link for it to pull on mount (take_pending_deep_link)
                 // instead of emitting into the void. Warm links (below / single-
                 // instance) emit normally because the webview is already up.
                 match app.deep_link().get_current() {
@@ -696,7 +738,7 @@ pub fn run() {
                             .map(|u| u.as_str().trim())
                             .find(|u| u.starts_with("lanbeam://"))
                         {
-                            if let Ok(mut slot) = pending_pair_link.lock() {
+                            if let Ok(mut slot) = pending_deep_link.lock() {
                                 *slot = Some(link.to_string());
                             }
                         }
@@ -709,7 +751,7 @@ pub fn run() {
                 let handle = app.handle().clone();
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        handle_pair_link(&handle, url.as_str());
+                        handle_deep_link(&handle, url.as_str());
                     }
                 });
             }
@@ -735,6 +777,8 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            tray::sync_tray,
+            open_local_path,
             get_my_identity,
             get_settings,
             set_device_name,
@@ -751,6 +795,7 @@ pub fn run() {
             set_hotkey_enabled,
             set_hotkey,
             set_verify_hash,
+            set_ui_zoom,
             set_conflict_policy,
             set_organize,
             set_max_concurrent,
@@ -758,6 +803,7 @@ pub fn run() {
             set_clip_share,
             set_strip_exif,
             discard_partials,
+            list_partials,
             reset_identity,
             get_network_info,
             get_listen_port,
@@ -767,8 +813,7 @@ pub fn run() {
             start_pairing,
             cancel_pairing,
             join_by_code,
-            take_pending_pair_link,
-            self_test_secure_channel,
+            take_pending_deep_link,
             send_text,
             send_files,
             start_share,
@@ -784,12 +829,31 @@ pub fn run() {
             list_trusted,
             set_trusted,
             remove_trusted,
+            forget_device,
             get_log_dir,
             export_diagnostics,
             get_net_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Persist on EVERY exit path, not just the tray's 退出. Closing the
+            // window with close-to-tray OFF, and macOS ⌘Q, both reach the exit
+            // WITHOUT passing through the tray's handler — so a pairing/trust or
+            // discard decision made moments earlier could be lost inside the
+            // fire-and-forget write's fsync+rename window (see flush_persistence).
+            // Snapshot persistence is idempotent (a stale image loses to the
+            // store's seq gate), so the tray's own explicit flush just repeats a
+            // harmless write rather than racing this one.
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    flush_persistence(&state);
+                }
+            }
+        });
 }
 
 #[cfg(test)]

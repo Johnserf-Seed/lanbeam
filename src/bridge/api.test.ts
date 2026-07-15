@@ -28,7 +28,6 @@ import {
   resetIdentity,
   resumeTransfer,
   revealReceived,
-  selfTestSecureChannel,
   sendFiles,
   sendText,
   setAutoOpen,
@@ -55,7 +54,7 @@ import {
   startPairing,
   startShare,
   stopShare,
-  takePendingPairLink,
+  takePendingDeepLink,
   updateShare,
 } from "./api";
 
@@ -169,8 +168,8 @@ describe("pairing + quick text stubs", () => {
     await expect(cancelPairing()).resolves.toBeUndefined();
   });
 
-  it("takePendingPairLink resolves null in browser mode", async () => {
-    await expect(takePendingPairLink()).resolves.toBeNull();
+  it("takePendingDeepLink resolves null in browser mode", async () => {
+    await expect(takePendingDeepLink()).resolves.toBeNull();
   });
 
   it("joinByCode fakes a paired peer regardless of args", async () => {
@@ -248,10 +247,6 @@ describe("discovery + secure channel stubs", () => {
 
   it("connectDevice resolves the demo SAS", async () => {
     await expect(connectDevice("demo-mini")).resolves.toBe("483921");
-  });
-
-  it("selfTestSecureChannel resolves the demo SAS", async () => {
-    await expect(selfTestSecureChannel()).resolves.toBe("483921");
   });
 });
 

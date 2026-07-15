@@ -18,6 +18,21 @@ pub enum LanBeamError {
     IdentityMismatch,
     #[error("peer not found")]
     PeerNotFound,
+    /// The peer received the text frame but did not surface it: this device is not
+    /// on their trusted list, and their receive policy only lets trusted senders
+    /// through. Quick text has no accept prompt, so there is nowhere to park it.
+    #[error("the peer's receive policy dropped the text")]
+    TextRefused,
+    /// The peer is rate-limiting quick text from this source.
+    #[error("the peer is throttling quick text")]
+    TextThrottled,
+    /// The address dialed answered with THIS device's own key. You cannot pair
+    /// with, trust, or send to yourself — and an entry for yourself in the peer
+    /// list is uniquely poisonous: discovery drops its own announces (so it can
+    /// never be discovered away), which leaves it stuck in the device list with
+    /// nothing able to remove it.
+    #[error("that address is this device")]
+    SelfPeer,
     #[error("rejected by peer")]
     Rejected,
     #[error("unsafe filename: {0}")]
@@ -45,6 +60,13 @@ pub enum LanBeamError {
     Integrity(String),
     #[error("timeout")]
     Timeout,
+    /// A path the UI asked us to open (a received file, the download folder) is
+    /// not on disk any more — moved, deleted, or the record predates a
+    /// download-dir change. Kept APART from `Io` so the UI can say "that file is
+    /// gone" instead of a generic failure, and — crucially — so it stops
+    /// blaming a stale record for what might really be an open failure.
+    #[error("not found: {0}")]
+    NotFound(String),
 }
 
 impl LanBeamError {
@@ -63,7 +85,14 @@ impl LanBeamError {
             // A corrupted-in-flight file is its own UI state (offer a resend),
             // distinct from the "conversation broke" protocol bucket (M6.3).
             LanBeamError::Integrity(_) => "integrity",
-            LanBeamError::Io(_) | LanBeamError::Bind(_) | LanBeamError::Keyring(_) => "io",
+            // Not a broken conversation — the peer heard it and declined to
+            // surface it. Its own bucket so the UI can say something actionable
+            // ("ask them to trust you") instead of "the connection failed".
+            LanBeamError::TextRefused | LanBeamError::TextThrottled => "text_dropped",
+            LanBeamError::Io(_)
+            | LanBeamError::Bind(_)
+            | LanBeamError::Keyring(_)
+            | LanBeamError::NotFound(_) => "io",
             // Handshake / identity / sanitizer / crypto / protocol failures all
             // mean "the conversation itself broke" as far as the UI cares.
             _ => "protocol",

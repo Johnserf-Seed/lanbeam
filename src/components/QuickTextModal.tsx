@@ -22,10 +22,16 @@ export default function QuickTextModal() {
   // scrim dispatches click on the scrim, which must not destroy the draft.
   const scrimDown = useRef(false);
 
-  // Reset draft state every time the modal opens.
+  // Reset draft state every time the modal opens. A `lanbeam://text?t=…` deep
+  // link may have staged a body — consume it ONCE (so a later manual open starts
+  // clean) and drop it into the draft. It is only a pre-fill: the user still
+  // picks the device and presses send, which is the whole reason a link is
+  // allowed to touch this at all.
   useEffect(() => {
     if (qtOpen) {
-      setText("");
+      const prefill = useOverlays.getState().qtPrefill;
+      setText(prefill ?? "");
+      if (prefill) useOverlays.setState({ qtPrefill: null });
       setClip(true);
       setTarget("");
       setSending(false);

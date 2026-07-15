@@ -6,6 +6,7 @@ import {
   useData,
   usePrefs,
   useOverlays,
+  useTransfers,
   showToast,
   displayIp,
   visibilityOf,
@@ -14,6 +15,8 @@ import {
 import type { Visibility, ThemeMode } from "../lib/store";
 import { Toggle, Segmented } from "../components/ui";
 import { copyText, errText, openDir, revealFile } from "../lib/sendops";
+import { fmtBytes } from "../lib/format";
+import { setZoom, UI_ZOOMS } from "../lib/uiZoom";
 import { playSound } from "../lib/sound";
 import type { SoundKind } from "../lib/sound";
 
@@ -156,6 +159,24 @@ export default function SettingsPage() {
   };
 
   const milestone = () => showToast(t("common.milestoneNote"));
+
+  // Half-written files still in the download folder (M6.4). Loaded on mount and
+  // after a clear; a transfer that ends while the page is open is rare enough
+  // that a re-poll isn't worth the noise.
+  const [partials, setPartials] = useState<api.Partial[]>([]);
+  const refreshPartials = () =>
+    void api
+      .listPartials()
+      .then(setPartials)
+      .catch(() => setPartials([]));
+  useEffect(refreshPartials, []);
+
+  const discardAllPartials = async () => {
+    const devices = [...new Set(partials.map((p) => p.deviceId))];
+    await Promise.all(devices.map((d) => api.discardPartials(d)));
+    showToast(t("settings.partialsClearedToast", { n: partials.length }));
+    refreshPartials();
+  };
 
   // 全局快捷键改键 (M5.5 rebind): 修改 focuses the chip into a capture state; the
   // next modifier+key chord is bound live via set_hotkey. The stored value is the
@@ -647,6 +668,51 @@ export default function SettingsPage() {
             {t("common.change")}
           </button>
         </div>
+
+        {/* Interrupted receives. They are saved under their FINAL name — a 1.2 GB
+            slice of a 4 GB holiday.mp4 sits there looking perfectly ordinary and
+            plays for thirty seconds — so without this row a user has no way to
+            know which files in the folder are only half there. The backend has
+            tracked them all along (it is what makes resume work) and could always
+            delete them; nothing ever asked it what it was holding. */}
+        {partials.length > 0 && (
+          <div className="set-row">
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div className="set-label">{t("settings.partials")}</div>
+              <div className="set-desc">
+                {t("settings.partialsDesc", {
+                  n: partials.length,
+                  size: fmtBytes(partials.reduce((a, p) => a + p.written, 0)),
+                })}
+              </div>
+              <div
+                className="set-desc mono"
+                style={{
+                  marginTop: 3,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+                title={partials.map((p) => p.name).join("\n")}
+              >
+                {partials
+                  .slice(0, 3)
+                  .map((p) => p.name)
+                  .join(" · ")}
+                {partials.length > 3 ? " …" : ""}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="btn sm danger"
+              style={{ flex: "none" }}
+              onClick={() => void discardAllPartials()}
+            >
+              {t("settings.partialsClear")}
+            </button>
+          </div>
+        )}
+
         <div className="set-row last">
           <div>
             <div className="set-label">{t("settings.visibility")}</div>
@@ -1021,7 +1087,7 @@ export default function SettingsPage() {
             </span>
           </div>
         </div>
-        <div className="set-row">
+        <div className="set-row last">
           <span className="set-label">{t("settings.rate")}</span>
           <select
             className="input"
@@ -1039,20 +1105,11 @@ export default function SettingsPage() {
             <option value="10">10 MB/s</option>
           </select>
         </div>
-        <div className="set-row last">
-          <div>
-            <div className="set-label">{t("settings.ssid")}</div>
-            <div className="set-desc">{t("settings.ssidDesc")}</div>
-          </div>
-          <select
-            className="input"
-            value={prefs.ssidOnly}
-            onChange={(e) => set({ ssidOnly: e.target.value })}
-          >
-            <option value="any">{t("settings.ssidAny")}</option>
-            <option value="current">{t("settings.ssidCurrent")}</option>
-          </select>
-        </div>
+        {/* 生效网络 (ssidOnly) lived here: a dropdown promising 「离开该网络自动隐身」
+            that was wired to nothing at all — no backend field, no command, no
+            reader. Rather than ship a half-honest SSID check (Windows-only WLAN
+            FFI, silently dead on macOS/Linux — a new lie to replace the old one),
+            the control is gone. 可被发现 already does the real job on demand. */}
 
         {/* ── 外观 ──────────────────────────────────────────────────── */}
         <div className="set-section">{t("settings.secAppearance")}</div>
@@ -1068,6 +1125,23 @@ export default function SettingsPage() {
             onChange={(k) => set({ themeMode: k })}
             itemStyle={{ padding: "4px 14px" }}
           />
+        </div>
+        <div className="set-row">
+          <div>
+            <div className="set-label">{t("settings.uiZoom")}</div>
+            <div className="set-desc">{t("settings.uiZoomDesc")}</div>
+          </div>
+          <select
+            className="input"
+            value={String(prefs.uiZoom)}
+            onChange={(e) => void setZoom(Number(e.target.value))}
+          >
+            {UI_ZOOMS.map((z) => (
+              <option key={z} value={String(z)}>
+                {Math.round(z * 100)}%
+              </option>
+            ))}
+          </select>
         </div>
         <div className="set-row last">
           <span className="set-label">{t("settings.language")}</span>
@@ -1108,7 +1182,11 @@ export default function SettingsPage() {
           <select
             className="input"
             value={prefs.histKeep}
-            onChange={(e) => set({ histKeep: e.target.value })}
+            onChange={(e) => {
+              set({ histKeep: e.target.value });
+              // Apply it now, not at some future write.
+              useTransfers.getState().pruneHistory();
+            }}
           >
             <option value="none">{t("settings.histNone")}</option>
             <option value="7d">{t("settings.hist7")}</option>

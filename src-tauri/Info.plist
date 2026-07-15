@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Discovery is IPv4 multicast (239.255.61.17) + broadcast on the LAN, and
+       transfers are direct TCP to a peer on that LAN. macOS gates all of that
+       behind the local-network permission, and without this key the system has
+       nothing to tell the user when it asks — so the prompt is unexplained, and a
+       denial looks to the user like LanBeam is simply broken (no devices, ever,
+       with nothing in the UI to say why). -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>LanBeam finds nearby devices on this network and sends files straight to them. Nothing leaves your local network.</string>
+</dict>
+</plist>

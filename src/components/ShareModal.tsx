@@ -196,9 +196,31 @@ export default function ShareModal() {
 
     let cancelled = false;
     void (async () => {
+      // ADOPT a share that is already running, rather than minting another one.
+      //
+      // This panel used to call start_share unconditionally on every open — so a
+      // share you'd left live (closing this panel doesn't stop one, by design)
+      // could never be reached again: reopening produced a NEW share, and the only
+      // 停止分享 button in the app now pointed at that one. The old share went on
+      // serving your files over HTTP until its TTL ran out, invisible and
+      // unstoppable. Opening from the send flow (a fresh selection) still means
+      // "share THESE files", so only a bare open adopts.
+      const ov = useOverlays.getState().send;
+      const fromSendFlow = !!ov?.sel.length;
+      if (!fromSendFlow) {
+        const live = await listShares().catch(() => [] as ShareEntry[]);
+        if (cancelled) return;
+        const cur = live[0];
+        if (cur) {
+          setLink({ token: cur.token, url: cur.url });
+          setEntry(cur);
+          showToast(t("share.adoptToast"));
+          return;
+        }
+      }
+
       // Prefer the send flow's current selection (path-backed only); if no send
       // flow is open, let the user pick files (native picker, desktop only).
-      const ov = useOverlays.getState().send;
       let files: SendFile[] = ov
         ? ov.pool.filter((f) => f.path && ov.sel.includes(f.path ?? f.name))
         : [];
@@ -263,7 +285,16 @@ export default function ShareModal() {
   }, [shareOpen, link?.token]);
 
   if (!shareOpen) return null;
-  const close = () => setShare(false);
+
+  /** Dismiss the panel. The share stays live — that is the design (a link you
+   *  handed someone shouldn't die because you closed the panel you copied it
+   *  from) — but it used to be a SILENT one, and silence is what turned it into a
+   *  bug: the user closed the box believing they'd ended the share. Say it, and
+   *  say where to stop it. The sidebar keeps saying it afterwards. */
+  const close = () => {
+    if (link) showToast(t("share.keptToast"), undefined, 7000);
+    setShare(false);
+  };
 
   // Subtitle: the server's authoritative file count + size once the share
   // exists, else the pending selection so the header isn't blank while loading.

@@ -253,6 +253,15 @@ impl PartialsStore {
     /// Forget every partial for `device_id` (the user-initiated "discard"),
     /// returning the removed records so the caller can delete the on-disk
     /// files. Empty when the device had none.
+    /// Every record, flattened to `(device_id, record)`. Read-only — the UI needs
+    /// it to show what is half-written on disk (see the `list_partials` command).
+    pub fn entries(&self) -> Vec<(String, PartialRecord)> {
+        self.map
+            .iter()
+            .flat_map(|(dev, list)| list.iter().map(|r| (dev.clone(), r.clone())))
+            .collect()
+    }
+
     pub fn clear_device(&mut self, device_id: &str) -> Vec<PartialRecord> {
         match self.map.remove(device_id) {
             Some(list) => {

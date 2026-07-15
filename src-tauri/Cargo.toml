@@ -1,8 +1,10 @@
 [package]
 name = "lanbeam"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Fast, private, peer-to-peer file transfer over your LAN"
+authors = ["Johnserf-Seed"]
+license = "MIT"
+repository = "https://github.com/Johnserf-Seed/lanbeam"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
@@ -20,7 +22,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 # `tray-icon` (M5.3): system tray + close-to-tray; the feature only takes
 # effect on desktop targets, so no per-target dependency split is needed.
-tauri = { version = "2", features = ["tray-icon"] }
+# `image-png` is what gates `Image::from_bytes` — the macOS menu-bar TEMPLATE icon
+# (tray.rs) decodes a PNG at startup. That call lives in a `cfg(target_os = "macos")`
+# block, so a Windows build never even type-checked it; the three-platform CI matrix
+# caught it on its first run, which is precisely what the matrix is for.
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,7 +39,19 @@ tauri-plugin-clipboard-manager = "2"
 
 # ── M1: identity + discovery ──
 snow = "0.9"
-keyring = { version = "3", features = ["windows-native"] }
+# One feature per platform backend. keyring 3 picks its store at COMPILE time and
+# falls back to an in-memory MOCK when no feature matches the target — which is
+# what `["windows-native"]` alone did on macOS and Linux: `Identity::load_or_create`
+# minted a brand-new X25519 key on every launch, silently, so the Device ID changed
+# every restart and every peer's pinned fingerprint went stale. The crate's own
+# test `identity_is_stable_across_loads` would have caught it on the first CI run
+# on either platform — see .github/workflows/ci.yml, which now does exactly that.
+keyring = { version = "3", features = [
+    "windows-native",
+    "apple-native",
+    "sync-secret-service",
+    "crypto-rust",
+] }
 base64 = "0.22"
 zeroize = "1"
 socket2 = "0.5"

@@ -15,6 +15,7 @@ import {
 } from "../lib/store";
 import { estChipW, shortName } from "../lib/format";
 import { hashId, resolveChips, trustGeom, trustSlots } from "../lib/radar";
+import { toneColor, trustDot, withHalo } from "../lib/trustDot";
 import { Toggle } from "../components/ui";
 
 /* base canvas the free-mode positions are persisted on */
@@ -101,6 +102,20 @@ type FreeNode = {
   dragging: boolean;
 };
 
+/** Is there anything for 删除设备 to delete? A trust record, or a manually added
+ *  address (IP-direct / pair-by-code) — the one kind of peer that really can be
+ *  deleted, since nothing will announce it back.
+ *
+ *  Reads live store state on purpose: the drag handlers' `up` closure is created
+ *  at pointer-DOWN, when `drag` is still null, so any render-time boolean it
+ *  captured would be stale-false and the drop would silently do nothing. */
+function isDeletable(id: string): boolean {
+  return (
+    Boolean(useTrust.getState().records[id]) ||
+    useData.getState().devices.some((d) => d.deviceId === id && d.manual)
+  );
+}
+
 export default function TrustedPage() {
   const { t } = useTranslation();
   const devices = useData((s) => s.devices);
@@ -155,6 +170,14 @@ export default function TrustedPage() {
   const mode: "free" | "slots" | "list" =
     tl.length > 20 ? "list" : tl.length > 8 ? "slots" : "free";
 
+  /* Names worn by more than one device. Those nodes get their fingerprint shown
+     beside the name — otherwise the page looks like it is listing the same device
+     twice, when what it is really showing is two different keys that happen to
+     answer to the same name. */
+  const dupNames = new Set(
+    tl.map((d) => d.name).filter((name, i, all) => all.indexOf(name) !== i),
+  );
+
   /* ── geometry (from the prototype, scaled into the measured box) ────── */
   const tg = trustGeom(tl);
   const bw = Math.min(box.w, 640);
@@ -201,14 +224,19 @@ export default function TrustedPage() {
       const dragging = drag !== null && drag.id === d.deviceId;
       const p = drag !== null && drag.id === d.deviceId ? drag.pos : rp;
       const insideNow = Math.hypot(p.x - tcX, p.y - tcY) <= R2;
+      /* When a device is away, say so. The old copy printed a confident
+         "Trusted" next to a dead grey dot — the words and the drawing
+         disagreeing about the same device. */
       const sub = d.fpChanged
         ? t("trusted.fpChangedShort")
-        : d.trusted
-          ? d.autoAccept
-            ? t("trusted.trustedAuto")
-            : t("trusted.trusted")
-          : !d.online
-            ? t("trusted.offline")
+        : !d.online
+          ? d.trusted
+            ? t("trusted.trustedOffline")
+            : t("trusted.offline")
+          : d.trusted
+            ? d.autoAccept
+              ? t("trusted.trustedAuto")
+              : t("trusted.trusted")
             : t("trusted.askEach");
       return {
         id: d.deviceId,
@@ -216,7 +244,9 @@ export default function TrustedPage() {
         y: p.y,
         mirror: p.x < tcX,
         inside: insideNow,
-        w: estChipW(d.name, sub),
+        // The fingerprint rides on the name line for duplicated names, so it has
+        // to be in the width estimate too or the collision resolver overlaps them.
+        w: estChipW(dupNames.has(d.name) ? `${d.name}  ${d.fp}` : d.name, sub),
         d,
         sub,
         dragging,
@@ -226,20 +256,42 @@ export default function TrustedPage() {
   }
 
   /* ── shared release helpers ─────────────────────────────────────────── */
+
+  /** Forget a device: drop its trust, its name and its position.
+   *
+   *  Forgetting is not the same as making it go away, and conflating the two is
+   *  what made this confusing. If the device is still on the LAN, discovery keeps
+   *  announcing it — it simply comes back as a stranger, outside the ring. Only a
+   *  device that ISN'T here right now actually vanishes from the page.
+   *
+   *  This used to toast a flat 「已移除 X」 while X sat there on screen. Say which
+   *  of the two things just happened. */
   const removeWithUndo = (id: string, name: string) => {
-    const rec = useTrust.getState().records[id];
-    if (!rec) return;
+    // A device with no trust record is still deletable — it may be a manually
+    // added address, which is precisely the kind that CAN be deleted for good.
+    const rec = useTrust.getState().records[id] ?? null;
+    // "Still on the LAN" means announcing itself. A manual peer is in the device
+    // list only because someone typed its address, so deleting it really does
+    // end it.
+    const stillOnLan = devices.some((x) => x.deviceId === id && !x.manual);
     remove(id);
-    /* 6 s window to undo, matching the prototype's removeDevice toast */
+    /* 6 s window to undo. Undo restores what the UI owns — the trust row, the
+       name, the ring position. It does NOT re-add a manually-typed address: that
+       table is in-memory and already evaporates on every restart, so there is no
+       durable thing to put back. Re-adding by IP takes five seconds. */
     showToast(
-      t("trusted.removedToast", { name }),
-      {
-        label: t("common.undo"),
-        fn: () => {
-          restore(rec);
-          showToast(t("trusted.restoredToast"));
-        },
-      },
+      stillOnLan
+        ? t("trusted.deletedStillHereToast", { name })
+        : t("trusted.deletedToast", { name }),
+      rec
+        ? {
+            label: t("common.undo"),
+            fn: () => {
+              restore(rec);
+              showToast(t("trusted.restoredToast"));
+            },
+          }
+        : undefined,
       6000,
     );
   };
@@ -284,9 +336,9 @@ export default function TrustedPage() {
         setSel(id);
         return;
       }
-      /* only remembered devices can be forgotten — otherwise treat the
-         corner like any other drop spot */
-      if (inRemoveZone(last, bw, bh) && useTrust.getState().records[id]) {
+      /* The zone is only drawn when something is actually deletable
+         (dragRemovable), so honour it here rather than re-deriving the rule. */
+      if (inRemoveZone(last, bw, bh) && isDeletable(id)) {
         removeWithUndo(id, d.name);
         return;
       }
@@ -371,10 +423,7 @@ export default function TrustedPage() {
         setSel(id);
         return;
       }
-      if (
-        inRemoveZone(last, rect.width, rect.height) &&
-        useTrust.getState().records[id]
-      ) {
+      if (inRemoveZone(last, rect.width, rect.height) && isDeletable(id)) {
         removeWithUndo(id, d.name);
         return;
       }
@@ -398,14 +447,10 @@ export default function TrustedPage() {
 
   /* ── selection bar model ────────────────────────────────────────────── */
   const selD = tl.find((d) => d.deviceId === sel) ?? tl[0] ?? null;
-  const selDotBg = selD
-    ? selD.fpChanged
-      ? "var(--danger)"
-      : selD.trusted
-        ? "var(--dot-live)"
-        : "var(--muted)"
-    : "var(--muted)";
-  const selDotShadow = selD?.trusted ? "0 0 9px var(--glow)" : "none";
+  /* Nothing selected → a plain present-looking dot; there is nothing to report. */
+  const selDot = selD
+    ? trustDot(selD)
+    : trustDot({ trusted: false, online: true });
 
   const commitRename = (v: string) => {
     const name = v.trim();
@@ -426,9 +471,18 @@ export default function TrustedPage() {
     }
   }, [editing, selId]);
 
-  /* the remove zone only applies to remembered devices (those with a
-     trust record) — never advertise a drop target that would no-op */
-  const dragRemovable = drag !== null && Boolean(records[drag.id]);
+  /* The delete zone appears when there is actually something to delete: a trust
+     record, or a manually-added address (IP-direct / pair-by-code). Never
+     advertise a drop target that would no-op.
+
+     It used to require a trust RECORD, and only that — which produced a genuinely
+     maddening loop: delete a device, the record goes, the device stays (it is
+     still in the list), and now you cannot drop it on the zone again because it
+     has no record. The only way to get the zone back was to drag the device INTO
+     the circle to mint a record, so you could delete it again... and it would
+     still be there. A manually-added peer, the one kind that really can be
+     deleted, was unreachable this way unless you first trusted it. */
+  const dragRemovable = drag !== null && isDeletable(drag.id);
   const hotC = drag && dragRemovable ? inRemoveZone(drag.pos, bw, bh) : false;
   const hotL = drag && dragRemovable ? inRemoveZone(drag.pos, lcW, bh) : false;
   const hint =
@@ -541,13 +595,13 @@ export default function TrustedPage() {
             {mode === "free" &&
               freeNodes.map((n) => {
                 const selMe = sel === n.id;
-                const online = n.d.online;
+                const dot = trustDot(n.d, { ringWidth: 2 });
                 const wrap: CSSProperties = {
                   position: "absolute",
                   top: Math.round(n.y),
                   zIndex: n.dragging ? 6 : 3,
                   transform: "translate(0,-50%)",
-                  opacity: online ? 1 : 0.55,
+                  opacity: dot.opacity,
                   touchAction: "none",
                   userSelect: "none",
                   cursor: n.dragging ? "grabbing" : "grab",
@@ -591,15 +645,10 @@ export default function TrustedPage() {
                           width: 12,
                           height: 12,
                           borderRadius: "50%",
-                          background: !online
-                            ? "transparent"
-                            : n.d.trusted
-                              ? "var(--dot-live)"
-                              : "var(--muted)",
-                          border: !online ? "1.5px solid var(--muted)" : "none",
-                          boxShadow: n.d.trusted
-                            ? "0 0 10px var(--glow)"
-                            : "none",
+                          boxSizing: "border-box",
+                          background: dot.background,
+                          border: dot.border,
+                          boxShadow: dot.boxShadow,
                           flex: "none",
                         }}
                       />
@@ -614,16 +663,30 @@ export default function TrustedPage() {
                           }}
                         >
                           {n.d.name}
+                          {/* Two devices can share a name — the default one is
+                              whatever the machine's hostname is, and every install
+                              nobody renamed answers to it. Then the page shows what
+                              looks like the same device twice. It isn't: the key is
+                              the identity, so show the key. */}
+                          {dupNames.has(n.d.name) && (
+                            <span
+                              style={{
+                                fontFamily: "var(--mono)",
+                                fontSize: 9.5,
+                                fontWeight: 500,
+                                color: "var(--muted)",
+                                marginLeft: 6,
+                              }}
+                            >
+                              {n.d.fp}
+                            </span>
+                          )}
                         </div>
                         <div
                           style={{
                             fontFamily: "var(--mono)",
                             fontSize: 10,
-                            color: n.d.fpChanged
-                              ? "var(--danger)"
-                              : n.d.trusted
-                                ? "var(--accent-ink)"
-                                : "var(--muted)",
+                            color: toneColor(dot.tone),
                             lineHeight: "14px",
                             whiteSpace: "nowrap",
                           }}
@@ -644,7 +707,7 @@ export default function TrustedPage() {
                     ? drag.pos
                     : (slotMap[d.deviceId] ?? { x: tcX, y: tcY });
                 const selMe = sel === d.deviceId;
-                const glow = d.trusted ? "0 0 10px var(--glow)" : "none";
+                const dot = trustDot(d, { ringWidth: 2 });
                 return (
                   <div
                     key={d.deviceId}
@@ -658,7 +721,7 @@ export default function TrustedPage() {
                       width: 84,
                       marginLeft: -42,
                       marginTop: -8,
-                      opacity: d.online ? 1 : 0.55,
+                      opacity: dot.opacity,
                       touchAction: "none",
                       userSelect: "none",
                       cursor: dragging ? "grabbing" : "grab",
@@ -671,17 +734,13 @@ export default function TrustedPage() {
                         width: 12,
                         height: 12,
                         borderRadius: "50%",
-                        background: !d.online
-                          ? "transparent"
-                          : d.trusted
-                            ? "var(--dot-live)"
-                            : "var(--muted)",
-                        border: !d.online ? "1.5px solid var(--muted)" : "none",
-                        boxShadow: selMe
-                          ? d.trusted
-                            ? "0 0 10px var(--glow),0 0 0 3px var(--accent-soft)"
-                            : "0 0 0 3px var(--accent-soft)"
-                          : glow,
+                        boxSizing: "border-box",
+                        background: dot.background,
+                        border: dot.border,
+                        boxShadow: withHalo(
+                          dot.boxShadow,
+                          selMe ? "0 0 0 3px var(--accent-soft)" : null,
+                        ),
                         margin: "0 auto",
                       }}
                     />
@@ -690,9 +749,7 @@ export default function TrustedPage() {
                         fontFamily: "var(--mono)",
                         fontSize: 10,
                         lineHeight: "14px",
-                        color: d.trusted
-                          ? "var(--accent-ink)"
-                          : "var(--muted2)",
+                        color: toneColor(dot.tone, "var(--muted2)"),
                         marginTop: 4,
                         whiteSpace: "nowrap",
                         overflow: "hidden",
@@ -791,6 +848,7 @@ export default function TrustedPage() {
                     ? drag.pos
                     : (listMap[d.deviceId] ?? { x: lcX, y: lcY });
                 const size = selMe ? 14 : 10;
+                const dot = trustDot(d);
                 return (
                   <div
                     key={d.deviceId}
@@ -804,7 +862,7 @@ export default function TrustedPage() {
                       width: 72,
                       marginLeft: -36,
                       marginTop: -8,
-                      opacity: d.online ? 1 : 0.55,
+                      opacity: dot.opacity,
                       touchAction: "none",
                       userSelect: "none",
                       cursor: dragging ? "grabbing" : "grab",
@@ -817,15 +875,13 @@ export default function TrustedPage() {
                         width: size,
                         height: size,
                         borderRadius: "50%",
-                        background: d.trusted
-                          ? "var(--dot-live)"
-                          : "var(--muted)",
-                        boxShadow: selMe
-                          ? "0 0 0 3px var(--accent-soft)" +
-                            (d.trusted ? ",0 0 10px var(--glow)" : "")
-                          : d.trusted
-                            ? "0 0 8px var(--glow)"
-                            : "none",
+                        boxSizing: "border-box",
+                        background: dot.background,
+                        border: dot.border,
+                        boxShadow: withHalo(
+                          dot.boxShadow,
+                          selMe ? "0 0 0 3px var(--accent-soft)" : null,
+                        ),
                         margin: "0 auto",
                       }}
                     />
@@ -834,9 +890,7 @@ export default function TrustedPage() {
                         fontFamily: "var(--mono)",
                         fontSize: 9.5,
                         lineHeight: "13px",
-                        color: d.trusted
-                          ? "var(--accent-ink)"
-                          : "var(--muted2)",
+                        color: toneColor(dot.tone, "var(--muted2)"),
                         marginTop: 3,
                         whiteSpace: "nowrap",
                         overflow: "hidden",
@@ -903,81 +957,87 @@ export default function TrustedPage() {
                     {t("trusted.noMatch")}
                   </div>
                 ) : (
-                  rows.map((d) => (
-                    // biome-ignore lint/a11y/useSemanticElements: styled device row, not a native button — keeps the custom layout/markup while staying keyboard-operable via role/tabIndex/onKeyDown
-                    <div
-                      key={d.deviceId}
-                      role="button"
-                      tabIndex={0}
-                      onClick={() => setSel(d.deviceId)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") {
-                          if (e.key === " ") e.preventDefault();
-                          setSel(d.deviceId);
-                        }
-                      }}
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: 10,
-                        padding: "9px 13px",
-                        borderBottom: "1px solid var(--border)",
-                        cursor: "pointer",
-                        background:
-                          sel === d.deviceId
-                            ? "var(--accent-soft)"
-                            : "transparent",
-                      }}
-                    >
-                      <span
-                        style={{
-                          width: 8,
-                          height: 8,
-                          borderRadius: "50%",
-                          background: d.trusted
-                            ? "var(--dot-live)"
-                            : "var(--muted)",
-                          boxShadow: d.trusted ? "0 0 8px var(--glow)" : "none",
-                          flex: "none",
+                  rows.map((d) => {
+                    /* The row carries a live Toggle, so it is never dimmed —
+                       don't fade an interactive control to say something about
+                       the data. The dot alone reports "away". */
+                    const dot = trustDot(d);
+                    return (
+                      // biome-ignore lint/a11y/useSemanticElements: styled device row, not a native button — keeps the custom layout/markup while staying keyboard-operable via role/tabIndex/onKeyDown
+                      <div
+                        key={d.deviceId}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setSel(d.deviceId)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            if (e.key === " ") e.preventDefault();
+                            setSel(d.deviceId);
+                          }
                         }}
-                      />
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          gap: 10,
+                          padding: "9px 13px",
+                          borderBottom: "1px solid var(--border)",
+                          cursor: "pointer",
+                          background:
+                            sel === d.deviceId
+                              ? "var(--accent-soft)"
+                              : "transparent",
+                        }}
+                      >
+                        <span
                           style={{
-                            fontSize: 12,
-                            fontWeight: 600,
-                            color: "var(--ink2)",
-                            whiteSpace: "nowrap",
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
+                            width: 8,
+                            height: 8,
+                            borderRadius: "50%",
+                            boxSizing: "border-box",
+                            background: dot.background,
+                            border: dot.border,
+                            boxShadow: dot.boxShadow,
+                            flex: "none",
                           }}
-                        >
-                          {d.name}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div
+                            style={{
+                              fontSize: 12,
+                              fontWeight: 600,
+                              color: "var(--ink2)",
+                              whiteSpace: "nowrap",
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                            }}
+                          >
+                            {d.name}
+                          </div>
+                          <div
+                            style={{
+                              fontFamily: "var(--mono)",
+                              fontSize: 9.5,
+                              color: "var(--muted)",
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {d.address ?? d.fp}
+                          </div>
                         </div>
-                        <div
-                          style={{
-                            fontFamily: "var(--mono)",
-                            fontSize: 9.5,
-                            color: "var(--muted)",
-                            whiteSpace: "nowrap",
-                          }}
-                        >
-                          {d.address ?? d.fp}
-                        </div>
+                        <Toggle
+                          on={d.trusted}
+                          size="sm"
+                          stop
+                          onClick={() =>
+                            setTrust(
+                              { deviceId: d.deviceId, name: d.name },
+                              !d.trusted,
+                            )
+                          }
+                        />
                       </div>
-                      <Toggle
-                        on={d.trusted}
-                        size="sm"
-                        stop
-                        onClick={() =>
-                          setTrust(
-                            { deviceId: d.deviceId, name: d.name },
-                            !d.trusted,
-                          )
-                        }
-                      />
-                    </div>
-                  ))
+                    );
+                  })
                 )}
               </div>
             </div>
@@ -1011,8 +1071,10 @@ export default function TrustedPage() {
               width: 9,
               height: 9,
               borderRadius: "50%",
-              background: selDotBg,
-              boxShadow: selDotShadow,
+              boxSizing: "border-box",
+              background: selDot.background,
+              border: selDot.border,
+              boxShadow: selDot.boxShadow,
               flex: "none",
             }}
           />
@@ -1129,13 +1191,11 @@ export default function TrustedPage() {
             <span
               role="button"
               tabIndex={0}
-              onClick={() =>
-                setFpAlert({ deviceId: selD.deviceId, step: "warn" })
-              }
+              onClick={() => setFpAlert({ deviceId: selD.deviceId })}
               onKeyDown={(e) => {
                 if (e.key === "Enter" || e.key === " ") {
                   if (e.key === " ") e.preventDefault();
-                  setFpAlert({ deviceId: selD.deviceId, step: "warn" });
+                  setFpAlert({ deviceId: selD.deviceId });
                 }
               }}
               style={{

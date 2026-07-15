@@ -136,10 +136,34 @@ pub enum AppMessage {
         to_clipboard: Option<bool>,
     },
     /// Acknowledges a control message by a short tag (M7.3): the quick-text
-    /// receiver replies `Ack { of: "text" }` once it has emitted the text, so the
-    /// sender's `send_text` resolves only after delivery. Gated on `TRANSFER_V2`.
+    /// receiver replies `Ack { of: "text" }`, so the sender's `send_text` resolves
+    /// only after delivery. Gated on `TRANSFER_V2`.
     Ack {
         of: String,
+        /// Whether it actually reached the user. Additive: a peer predating this
+        /// omits the key, which decodes to `None` — read as "yes", which is what
+        /// an ack meant in those builds.
+        ///
+        /// A quick text IS dropped when the sender isn't trusted and the receive
+        /// policy isn't "all" (there is no prompt for text, so a stranger's note
+        /// can't be parked for a decision). That part was fine. What was not fine
+        /// was acking anyway: `send_text` promises to "resolve only once the peer
+        /// confirms it received it", so the sender saw success while the receiver
+        /// saw nothing at all. A confirmation has to be able to say no.
+        ///
+        /// Yes, this tells a sender it isn't on the receiver's trusted list. That
+        /// is not a secret — it is a setting the user picked precisely so that
+        /// senders would run into it, and the file path already broadcasts the
+        /// same fact by prompting instead of auto-accepting. Trading a silent,
+        /// everyday lie to a legitimate user for a fact an attacker can already
+        /// observe was a bad trade.
+        #[serde(default)]
+        delivered: Option<bool>,
+        /// Coarse, stable reason token when `delivered` is false ("untrusted" /
+        /// "throttled") — never a sentence, and never anything the UI shows raw.
+        /// Additive.
+        #[serde(default)]
+        reason: Option<String>,
     },
     Error {
         code: String,
@@ -335,6 +359,38 @@ mod tests {
     /// builds negotiate the v2 feature level, while an M4–M6 peer that speaks
     /// only v1 pins the session to 1 — always the highest COMMON version, never
     /// a guess. This is what every v2-only send (pairing, text) checks before it
+    /// The ack's delivery fields are ADDITIVE: a peer that predates them writes
+    /// `{"t":"ack","of":"text"}`, which must decode to `delivered: None` — read by
+    /// the sender as "it arrived", exactly what an ack meant in those builds. A
+    /// stricter decode would break every older peer's quick text.
+    #[test]
+    fn ack_delivery_fields_are_additive_both_ways() {
+        let legacy = br#"{"t":"ack","of":"text"}"#;
+        let decoded: AppMessage = serde_json::from_slice(legacy).unwrap();
+        assert_eq!(
+            decoded,
+            AppMessage::Ack {
+                of: "text".into(),
+                delivered: None,
+                reason: None,
+            },
+            "a legacy ack must decode, not fail"
+        );
+
+        // And a refusal round-trips intact, so the sender can fail instead of
+        // reporting a delivery that never happened.
+        let refused = AppMessage::Ack {
+            of: "text".into(),
+            delivered: Some(false),
+            reason: Some("untrusted".into()),
+        };
+        let bytes = serde_json::to_vec(&refused).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<AppMessage>(&bytes).unwrap(),
+            refused
+        );
+    }
+
     /// puts a `PairRequest`/`TextSend` on the wire.
     #[test]
     fn negotiate_picks_highest_common_transfer_version() {
@@ -391,7 +447,11 @@ mod tests {
                 text: "no clip".into(),
                 to_clipboard: None,
             },
-            AppMessage::Ack { of: "text".into() },
+            AppMessage::Ack {
+                of: "text".into(),
+                delivered: None,
+                reason: None,
+            },
         ] {
             let enc = encode_control(&m).unwrap();
             assert_eq!(enc[0], KIND_CONTROL);

@@ -447,10 +447,7 @@ export default function SendModal() {
                       tabIndex={0}
                       onClick={() => {
                         if (changed) {
-                          setFpAlert({
-                            deviceId: oldIdByNew[d.deviceId],
-                            step: "warn",
-                          });
+                          setFpAlert({ deviceId: oldIdByNew[d.deviceId] });
                           return;
                         }
                         toggleDevice(d.deviceId);
@@ -459,10 +456,7 @@ export default function SendModal() {
                         if (e.key === "Enter" || e.key === " ") {
                           if (e.key === " ") e.preventDefault();
                           if (changed) {
-                            setFpAlert({
-                              deviceId: oldIdByNew[d.deviceId],
-                              step: "warn",
-                            });
+                            setFpAlert({ deviceId: oldIdByNew[d.deviceId] });
                             return;
                           }
                           toggleDevice(d.deviceId);

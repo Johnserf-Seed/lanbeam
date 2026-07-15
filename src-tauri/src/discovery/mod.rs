@@ -42,6 +42,16 @@ pub struct DiscoveredDevice {
     pub name: String,
     pub address: String,
     pub port: u16,
+    /// This peer is in the list because someone typed its address (IP-direct or
+    /// pair-by-code), not because it announced itself. Additive; older frontends
+    /// ignore it.
+    ///
+    /// The UI needs the difference to be honest about 删除设备: a manually-added
+    /// peer really can be deleted (nothing will put it back), while a device
+    /// broadcasting on the LAN cannot — it reappears on the next announce, and
+    /// offering to "delete" it is a promise nothing can keep.
+    #[serde(default)]
+    pub manual: bool,
 }
 
 /// Snapshot the peer table into a sorted device list for the UI.
@@ -56,6 +66,8 @@ pub fn snapshot(peers: &Arc<Mutex<PeerTable>>) -> Vec<DiscoveredDevice> {
     let mut list: Vec<DiscoveredDevice> = table
         .values()
         .map(|p| DiscoveredDevice {
+            // It announced itself — that is the definition of not-manual.
+            manual: false,
             device_id: p.id.clone(),
             name: p.name.clone(),
             address: p.addr.to_string(),
@@ -238,7 +250,7 @@ fn active_interfaces(settings: &Arc<RwLock<Settings>>) -> (Vec<interfaces::Iface
 fn emit_devices(ctx: &DiscoveryCtx) {
     let _ = ctx.app.emit(
         "devices_updated",
-        devices_payload(&ctx.peers, &ctx.manual_peers),
+        devices_payload(&ctx.peers, &ctx.manual_peers, &ctx.my_id),
     );
 }
 
@@ -265,10 +277,11 @@ fn share_http_advert(ctx: &DiscoveryCtx) -> Option<u16> {
 fn devices_payload(
     peers: &Arc<Mutex<PeerTable>>,
     manual: &Arc<Mutex<HashMap<String, ManualPeer>>>,
+    my_id: &str,
 ) -> Vec<DiscoveredDevice> {
     let discovered = snapshot(peers);
     match manual.lock() {
-        Ok(m) => crate::commands::merge_devices(discovered, &m),
+        Ok(m) => crate::commands::merge_devices(discovered, &m, my_id),
         // Poisoned lock: emit discovery alone rather than skip the update.
         Err(_) => discovered,
     }
@@ -593,7 +606,7 @@ mod tests {
             },
         );
 
-        let payload = devices_payload(&peers, &manual);
+        let payload = devices_payload(&peers, &manual, "me");
         assert!(
             payload.iter().any(|d| d.device_id == "disc1"),
             "the discovered peer is present"

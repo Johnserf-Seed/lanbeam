@@ -137,20 +137,26 @@ async fn pair_then_quick_text_share_one_host_ctx() {
             .expect("a successful pair is a clean Ok(())");
     }
 
-    // The host now trusts the joiner, and the one-shot code is spent.
-    {
-        let store = ctx.trusted.read().unwrap();
-        let entry = store.get(&joiner_id).expect("pairing trusted the joiner");
-        assert_eq!(entry.name, "Joiner Device");
-        assert!(
-            !entry.auto_accept,
-            "pairing establishes identity, not a standing grant"
-        );
-    }
+    // The code is spent — and NOTHING is trusted yet. Redeeming a code proves the
+    // code, not the device holding it; the SAS compare is what proves that, and
+    // it happens in front of a human, in the UI.
+    assert!(
+        ctx.trusted.read().unwrap().list().is_empty(),
+        "the pairing handshake must not trust anyone on its own"
+    );
     assert!(
         pairing.session.lock().unwrap().is_none(),
         "the code was consumed by the pair"
     );
+
+    // Stand in for the UI: the user compared the two SAS screens, they matched,
+    // and PairModal recorded the trust through `set_trusted` — which, like the
+    // trust circle, turns auto-accept on with it. This is the step that used to
+    // happen behind the user's back inside the handshake.
+    {
+        let mut store = ctx.trusted.write().unwrap();
+        store.set(joiner_id.clone(), "Joiner Device".into(), true, None, None);
+    }
 
     // ── session 2: quick text (M7.3) over the SAME host ctx ─────────────────
     let listener2 = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

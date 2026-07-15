@@ -18,6 +18,7 @@ import { fmtBytes, fmtWhen, whenGroup } from "../lib/format";
 import {
   copyText,
   errText,
+  isNotFound,
   openDir,
   openFile,
   revealFile,
@@ -457,7 +458,12 @@ export default function InboxPage() {
           if (isTauri)
             showToast(t("inbox.openToast", { name: displayName(it) }));
         })
-        .catch(() => showToast(t("inbox.noPathToast")));
+        // Blame the RECORD only when the file is genuinely gone. Anything else is
+        // an open failure and must say so — this used to swallow every error and
+        // pin it on a "stale record", which hid a real bug for a long time.
+        .catch((e) =>
+          showToast(isNotFound(e) ? t("inbox.noPathToast") : errText(e)),
+        );
     },
     [t, displayName],
   );
@@ -521,7 +527,7 @@ export default function InboxPage() {
     setSel([]);
   };
 
-  const fwdBatch = (ids: string[], d: DiscoveredDevice) => {
+  const fwdBatch = async (ids: string[], d: DiscoveredDevice) => {
     setMenu(null);
     const selected = items.filter((i) => ids.includes(i.id));
     const txts = selected.filter((i) => i.kind === "txt");
@@ -531,18 +537,40 @@ export default function InboxPage() {
       showToast(t("inbox.noPathToast"));
       return;
     }
-    // Text items ride the real text channel (M7.3), each logged as a sent-text
-    // history entry; files ride the transfer path.
-    for (const it of txts)
-      sendTextTracked(d.deviceId, d.name, it.text ?? "", true).catch(() => {});
-    if (paths.length) sendToDevice(d, paths.map(sendFileFromPath));
-    showToast(
-      t("inbox.fwdBatchToast", {
-        n: files.length + txts.length,
-        device: d.name,
-      }),
-    );
     setSel([]);
+    // Files ride the transfer path: queued here, and any later failure surfaces
+    // through transfer_error (which now speaks up). Texts ride the text channel
+    // and resolve — or REJECT — right here: the peer can be offline, too old to
+    // receive text, or rate-limited.
+    //
+    // Those rejections used to land in a bare `.catch(() => {})` underneath an
+    // unconditional 「已转发 N 项」. A forward that failed on every single item
+    // still reported success, to the user AND to the log. Report what happened.
+    const queued = paths.length
+      ? sendToDevice(d, paths.map(sendFileFromPath))
+      : true;
+    const sent = await Promise.allSettled(
+      txts.map((it) =>
+        sendTextTracked(d.deviceId, d.name, it.text ?? "", true),
+      ),
+    );
+    const rejected = sent.filter((r) => r.status === "rejected");
+    const total = files.length + txts.length;
+    const ok = total - rejected.length - (queued ? 0 : files.length);
+    if (ok === total) {
+      showToast(t("inbox.fwdBatchToast", { n: total, device: d.name }));
+      return;
+    }
+    const first = rejected[0] as PromiseRejectedResult | undefined;
+    showToast(
+      t("inbox.fwdBatchPartial", {
+        ok,
+        n: total,
+        err: first ? errText(first.reason) : t("errors.generic"),
+      }),
+      undefined,
+      7000,
+    );
   };
 
   const openMenu = useCallback(
@@ -587,7 +615,10 @@ export default function InboxPage() {
       ? devices.map((d) => ({
           label: d.name,
           dot: "var(--success)",
-          onClick: () => (batchIds ? fwdBatch(batchIds, d) : fwdItem(mItem, d)),
+          onClick: () => {
+            if (batchIds) void fwdBatch(batchIds, d);
+            else fwdItem(mItem, d);
+          },
         }))
       : [{ label: t("trusted.noDevices"), fg: "var(--muted)" }];
     if (menu.mode === "fwd") {
@@ -941,15 +972,14 @@ export default function InboxPage() {
                     key={d.deviceId}
                     role="button"
                     tabIndex={0}
-                    onClick={() =>
-                      batchIds
-                        ? fwdBatch(batchIds, d)
-                        : mItem && fwdItem(mItem, d)
-                    }
+                    onClick={() => {
+                      if (batchIds) void fwdBatch(batchIds, d);
+                      else if (mItem) fwdItem(mItem, d);
+                    }}
                     onKeyDown={(e) => {
                       if (e.key !== "Enter" && e.key !== " ") return;
                       if (e.key === " ") e.preventDefault();
-                      if (batchIds) fwdBatch(batchIds, d);
+                      if (batchIds) void fwdBatch(batchIds, d);
                       else if (mItem) fwdItem(mItem, d);
                     }}
                     onMouseEnter={(e) =>
