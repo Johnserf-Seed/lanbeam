@@ -157,11 +157,19 @@ mod tests {
     }
 
     // AC-K3: a second load returns the SAME identity (persisted in the OS keychain).
-    // Hits the real credential store; the entry is the same one the app uses.
+    // Real credential store, but a throwaway account — never the app's own. On
+    // macOS an entry trusts only the binary that created it, so a test-created
+    // production entry makes every rebuilt test binary, and the app itself, prompt
+    // for keychain access (and a denied prompt fails startup). The account changes
+    // nothing this catches: a store that doesn't persist (keyring's silent mock
+    // fallback) still hands the second load a fresh key.
     #[test]
     fn identity_is_stable_across_loads() {
-        let a = Identity::load_or_create(None).expect("first load");
-        let b = Identity::load_or_create(None).expect("second load");
+        let sfx = format!("stable-{}", std::process::id());
+        let a = Identity::load_or_create(Some(&sfx)).expect("first load");
+        let b = Identity::load_or_create(Some(&sfx)).expect("second load");
+        // before the asserts, so a failing run leaves nothing behind either
+        delete_persisted(Some(&sfx)).expect("cleanup");
         assert_eq!(a.public, b.public);
         assert_eq!(a.device_id(), b.device_id());
     }
