@@ -3,6 +3,7 @@
 // design review) with static demo data instead of a live backend.
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { demoContent, type DemoContent } from "../lib/demoContent";
 
 export const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -239,45 +240,22 @@ export type ShareEntry = {
 };
 
 // ── demo fixtures for browser mode ──────────────────────────────────────
-const DEMO_IDENTITY: MyIdentity = {
-  deviceId: "vJx0Qm8dR3kePzW1bT5uYhN2aFcL7sG9oXiKM4EwD6A",
-  shortId: "vJx0Qm8d",
-  name: "书房 · MacBook Pro",
-};
-const DEMO_DEVICES: DiscoveredDevice[] = [
-  {
-    deviceId: "demo-mini",
-    name: "客厅 · Mac mini",
-    address: "192.168.1.23",
-    port: 52637,
-  },
-  {
-    deviceId: "demo-min",
-    name: "小敏的手机",
-    address: "192.168.1.41",
-    port: 52637,
-  },
-  {
-    deviceId: "demo-nas",
-    name: "NAS · Synology",
-    address: "192.168.1.9",
-    port: 52637,
-  },
-  {
-    deviceId: "demo-tp",
-    name: "工位 · ThinkPad",
-    address: "192.168.1.36",
-    port: 52637,
-  },
-  {
-    deviceId: "demo-ipad",
-    name: "iPad Air",
-    address: "192.168.1.57",
-    port: 52637,
-  },
+// Names come from lib/demoContent so they follow the UI language.
+const DEMO_DEVICE_ID = "vJx0Qm8dR3kePzW1bT5uYhN2aFcL7sG9oXiKM4EwD6A";
+const DEMO_PEERS: Array<{
+  deviceId: string;
+  peer: keyof DemoContent["peers"];
+  address: string;
+}> = [
+  { deviceId: "demo-mini", peer: "mini", address: "192.168.1.23" },
+  { deviceId: "demo-min", peer: "phone", address: "192.168.1.41" },
+  { deviceId: "demo-nas", peer: "nas", address: "192.168.1.9" },
+  { deviceId: "demo-tp", peer: "thinkpad", address: "192.168.1.36" },
+  { deviceId: "demo-ipad", peer: "ipad", address: "192.168.1.57" },
 ];
 let demoSettings: Settings = {
-  deviceName: DEMO_IDENTITY.name,
+  /** "" until renamed: then the localized default name is shown */
+  deviceName: "",
   discoverable: true,
   autoOpenFolder: false,
   logLevel: "normal",
@@ -300,17 +278,22 @@ let demoSettings: Settings = {
 const DEMO_NETWORK: NetworkInfo[] = [
   { ip: "192.168.1.20", broadcast: "192.168.1.255" },
 ];
+const demoDeviceName = () => demoSettings.deviceName || demoContent().me;
 
 // ── commands ────────────────────────────────────────────────────────────
 export const getMyIdentity = () =>
   isTauri
     ? invoke<MyIdentity>("get_my_identity")
-    : Promise.resolve({ ...DEMO_IDENTITY, name: demoSettings.deviceName });
+    : Promise.resolve<MyIdentity>({
+        deviceId: DEMO_DEVICE_ID,
+        shortId: DEMO_DEVICE_ID.slice(0, 8),
+        name: demoDeviceName(),
+      });
 
 export const getSettings = () =>
   isTauri
     ? invoke<Settings>("get_settings")
-    : Promise.resolve({ ...demoSettings });
+    : Promise.resolve({ ...demoSettings, deviceName: demoDeviceName() });
 
 /** Every user-facing string in the tray menu plus its live state. The backend
  *  has no i18n layer, so the UI pushes the whole localized snapshot; the call is
@@ -565,7 +548,7 @@ export const startPairing = () =>
     ? invoke<PairingInvite>("start_pairing")
     : Promise.resolve<PairingInvite>({
         code: "482913",
-        qr: "lanbeam://pair?d=demo&n=%E4%B9%A6%E6%88%BF&a=192.168.1.20&p=51704&c=482913",
+        qr: `lanbeam://pair?d=demo&n=${encodeURIComponent(demoDeviceName())}&a=192.168.1.20&p=51704&c=482913`,
       });
 
 // M7.1: cancel the active pairing code so it can no longer be redeemed. Safe
@@ -631,7 +614,8 @@ const demoShareToken = () =>
 // M8.2: publish files for a browser on the LAN to download — the fallback for a
 // recipient without LanBeam. `ttlSecs` is the link lifetime, `maxDownloads` the
 // download cap (null = unlimited). Resolves with the link, its token, and the
-// expiry. Browser mode returns a demo localhost link so the modal renders.
+// expiry. Browser mode returns a demo link on the demo LAN address (see
+// DEMO_NETWORK) so the modal renders.
 export const startShare = (
   paths: string[],
   ttlSecs: number,
@@ -641,7 +625,7 @@ export const startShare = (
     const token = demoShareToken();
     return Promise.resolve<ShareStarted>({
       token,
-      url: `http://127.0.0.1:51705/s/${token}`,
+      url: `http://${DEMO_NETWORK[0].ip}:51705/s/${token}`,
       expiresAt: Math.floor(Date.now() / 1000) + ttlSecs,
     });
   }
@@ -688,7 +672,14 @@ export const resetIdentity = () =>
 export const listDiscoveredDevices = () =>
   isTauri
     ? invoke<DiscoveredDevice[]>("list_discovered_devices")
-    : Promise.resolve(DEMO_DEVICES);
+    : Promise.resolve<DiscoveredDevice[]>(
+        DEMO_PEERS.map(({ deviceId, peer, address }) => ({
+          deviceId,
+          name: demoContent().peers[peer],
+          address,
+          port: 52637,
+        })),
+      );
 
 // M2: open an authenticated Noise channel to a peer; returns the SAS.
 export const connectDevice = (deviceId: string) =>

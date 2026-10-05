@@ -69,7 +69,7 @@ function seedAndRender() {
 /** Render + wait until the created share link is on screen. */
 async function renderWithLink() {
   const view = seedAndRender();
-  await screen.findByText(/127\.0\.0\.1:51705\/s\//);
+  await screen.findByText(/192\.168\.1\.20:51705\/s\//);
   return view;
 }
 
@@ -117,7 +117,7 @@ describe("ShareModal", () => {
 
     expect(copyText).toHaveBeenCalledTimes(1);
     expect(copyText).toHaveBeenCalledWith(
-      expect.stringContaining("127.0.0.1:51705/s/"),
+      expect.stringContaining("192.168.1.20:51705/s/"),
     );
     expect(useToast.getState().msg).toBe(i18n.t("share.copiedToast"));
   });

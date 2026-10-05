@@ -11,6 +11,8 @@ node_modules
 dist
 dist-ssr
 *.local
+# TypeScript's incremental build cache
+*.tsbuildinfo
 
 # Editor directories and files
 .vscode/*

@@ -22,12 +22,13 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with: { version: 9 }
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      # No `version:` — the action reads `packageManager` from package.json, so
+      # CI runs exactly the pnpm a developer's `pnpm` resolves to.
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # biome is fetched via npx rather than vendored (see package.json), so
@@ -48,7 +49,7 @@ jobs:
       run:
         working-directory: src-tauri
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Tauri's Linux deps, plus the ones this app actually needs at runtime:
       # webkit2gtk (the webview) and libayatana-appindicator (the tray — the

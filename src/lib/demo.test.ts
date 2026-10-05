@@ -9,12 +9,14 @@ function setSearch(search: string): void {
 }
 
 // Load a fresh copy of demo.ts plus the stores it mutates, all sharing one
-// freshly-reset module graph so their state is isolated per call.
+// freshly-reset module graph so their state is isolated per call. i18n is part
+// of that graph, so it re-detects the language (localStorage first) each time.
 async function freshModules() {
   vi.resetModules();
   const demo = await import("./demo");
   const store = await import("./store");
-  return { ...demo, ...store };
+  const { demoContent } = await import("./demoContent");
+  return { ...demo, ...store, demoContent };
 }
 
 beforeEach(() => {
@@ -23,6 +25,7 @@ beforeEach(() => {
 
 afterEach(() => {
   setSearch("");
+  localStorage.removeItem("lanbeam.lang");
   vi.resetModules();
 });
 
@@ -53,7 +56,7 @@ describe("maybeSeedDemo", () => {
       "t1",
       "t2",
     ]);
-    expect(t.transfers.d1.name).toBe("产品设计稿 v2.zip");
+    expect(t.transfers.d1.name).toBe("Product design v2.zip");
     expect(t.transfers.d1.direction).toBe("send");
     expect(t.transfers.d2.status).toBe("done");
     expect(t.transfers.d4.status).toBe("error");
@@ -74,6 +77,41 @@ describe("maybeSeedDemo", () => {
     // Five inbox items.
     expect(useInbox.getState().items).toHaveLength(5);
     expect(useInbox.getState().unread).toBe(0);
+  });
+
+  it("writes the sample names in the UI language", async () => {
+    // English (the test env's browser language): no Chinese sample names.
+    let m = await freshModules();
+    m.maybeSeedDemo();
+    expect(m.useTransfers.getState().transfers.d1.peerName).toBe(
+      "Living room · Mac mini",
+    );
+    expect(m.useInbox.getState().items[0].from).toBe("Living room · Mac mini");
+    expect(m.useTrust.getState().records["demo-mini"].name).toBe(
+      "Living room · Mac mini",
+    );
+
+    // A user who picked 中文 gets the Chinese set, end to end.
+    localStorage.setItem("lanbeam.lang", "zh");
+    m = await freshModules();
+    m.maybeSeedDemo();
+    const t = m.useTransfers.getState().transfers;
+    expect(t.d1.name).toBe("产品设计稿 v2.zip");
+    expect(t.d1.peerName).toBe("客厅 · Mac mini");
+    expect(t.d4.error).toBe("连接中断");
+    expect(m.useInbox.getState().items[0].name).toBe("出差照片 ×24");
+  });
+
+  it("names a sample text the way a real received text is named", async () => {
+    const { maybeSeedDemo, useInbox, useTransfers, demoContent } =
+      await freshModules();
+    maybeSeedDemo();
+    const text = demoContent().textReceived;
+    const item = useInbox.getState().items.find((i) => i.id === "s4");
+    expect(item?.text).toBe(text);
+    // A single-line preview, ellipsized — no locale-specific prefix.
+    expect(item?.name).toBe(`${text.replace(/\s+/g, " ").slice(0, 48)}…`);
+    expect(useTransfers.getState().transfers.t2.name).toBe(item?.name);
   });
 
   it("applies the mk() defaults for fields not overridden", async () => {

@@ -45,7 +45,8 @@
     "longDescription": "Fast, private, peer-to-peer file transfer over your local network. No cloud, no account, no relay.",
     "homepage": "https://github.com/Johnserf-Seed/lanbeam",
     "macOS": {
-      "minimumSystemVersion": "10.15"
+      "minimumSystemVersion": "10.15",
+      "signingIdentity": "-"
     },
     "linux": {
       "deb": {
