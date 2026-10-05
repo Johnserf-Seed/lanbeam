@@ -30,7 +30,7 @@ Built with **Tauri 2** (a Rust core + a WebView UI): a native app of a few megab
 uses the system's own web runtime (WebView2 on Windows, WebKit on macOS and Linux), so
 nothing extra is bundled.
 
-- **Status:** `v0.1.0` — feature‑complete, pre‑release.
+- **Status:** `v0.1.0`, the first public release — see [Download](#download).
 - **Platforms:** Windows 10/11, macOS 10.15+, Linux (x64) — installers for all three are
   built by CI on every release.
 - **Languages:** English & 简体中文 (in‑app, switchable).
