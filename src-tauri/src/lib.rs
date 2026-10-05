@@ -154,6 +154,63 @@ pub(crate) fn show_main_window<R: tauri::Runtime>(app: &tauri::AppHandle<R>) {
     }
 }
 
+/// Startup cannot go on without the device identity: say why in a native dialog,
+/// and exit (status 1) once it is dismissed. The webview is hidden first — nothing
+/// behind it can work without an identity.
+///
+/// Asynchronous on purpose. The dialog needs the event loop running to appear: on
+/// Linux rfd queues the GTK dialog onto the very main loop `setup` runs inside, so
+/// a blocking show from there would deadlock.
+fn show_identity_failure<R: tauri::Runtime>(app: &tauri::AppHandle<R>, err: &error::LanBeamError) {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
+
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.hide();
+    }
+    #[cfg(target_os = "macos")]
+    let (store, store_zh) = ("Keychain", "钥匙串");
+    #[cfg(windows)]
+    let (store, store_zh) = ("Windows Credential Manager", "Windows 凭据管理器");
+    #[cfg(not(any(target_os = "macos", windows)))]
+    let (store, store_zh) = ("system keyring", "系统密钥环");
+    // Both languages: the UI language is kept in the webview's storage, which the
+    // backend cannot read.
+    let what = if matches!(err, error::LanBeamError::Crypto(_)) {
+        format!(
+            "The device identity LanBeam keeps in the {store} is damaged. Deleting the \
+             \"LanBeam\" entry there lets LanBeam start with a new identity; paired \
+             devices will then need to pair again.\n\n\
+             LanBeam 保存在{store_zh}中的设备身份已损坏。删除其中的“LanBeam”条目后即可用新身份\
+             启动；已配对的设备需要重新配对。"
+        )
+    } else {
+        format!(
+            "LanBeam couldn't read this device's identity from the {store}. If you were \
+             asked for access, choose Allow; if the {store} is locked, unlock it. Then \
+             open LanBeam again. It won't create a new identity on its own: this device \
+             would get a new ID, and paired devices would no longer recognize it.\n\n\
+             LanBeam 无法从{store_zh}读取本机的设备身份。如果系统询问访问权限，请选择“允许”；\
+             如果{store_zh}已锁定，请先解锁。然后重新打开 LanBeam。它不会自行创建新身份：\
+             那会让本机换一个设备 ID，已配对的设备将不再认得它。"
+        )
+    };
+    let handle = app.clone();
+    app.dialog()
+        .message(format!(
+            "{what}\n\n{err}\nLog / 日志: {}",
+            paths::log_dir(app).display()
+        ))
+        .title("LanBeam couldn't start · LanBeam 无法启动")
+        .kind(MessageDialogKind::Error)
+        // Not `handle.exit(1)`: tauri-runtime-wry ends the loop with a plain
+        // `ControlFlow::Exit`, dropping the code, so a failed start would report
+        // success. This is the exit Tauri itself falls back to.
+        .show(move |_| {
+            handle.cleanup_before_exit();
+            std::process::exit(1);
+        });
+}
+
 /// Route an incoming `lanbeam://` deep link to the UI.
 ///
 /// A deep link is UNTRUSTED input — ANY web page can ask the OS to open one — so
@@ -341,19 +398,23 @@ pub fn run() {
             // The device identity (distinct per test instance). Loaded AFTER the
             // logger so its failure is captured: an unreadable keychain fails
             // startup rather than mint a new Device ID (see
-            // `Identity::load_or_create`), and Tauri reports a failed setup only as
-            // a panic on stderr — which a GUI launch (Finder; the console-less
-            // Windows release build) throws away.
-            let identity = Arc::new(
-                Identity::load_or_create(instance.as_deref())
-                    .inspect_err(|e| {
-                        log::error!(
-                            "device identity unavailable, not starting \
-                             (a new one would change this device's ID): {e}"
-                        )
-                    })
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
-            );
+            // `Identity::load_or_create`).
+            let identity = match Identity::load_or_create(instance.as_deref()) {
+                Ok(id) => Arc::new(id),
+                Err(e) => {
+                    log::error!(
+                        "device identity unavailable, not starting \
+                         (a new one would change this device's ID): {e}"
+                    );
+                    // NOT `Err`: Tauri reports a setup error only as a panic — on
+                    // stderr, which a GUI launch throws away, and on macOS from inside
+                    // tao's did_finish_launching, which cannot unwind, so the app just
+                    // aborts ("quit unexpectedly"). Setup ends here instead, with
+                    // nothing started, and the dialog exits the app once dismissed.
+                    show_identity_failure(app.handle(), &e);
+                    return Ok(());
+                }
+            };
 
             if let Some(id) = &instance {
                 // distinguish the two windows in the UI
