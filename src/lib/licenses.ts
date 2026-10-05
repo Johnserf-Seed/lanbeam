@@ -17,7 +17,7 @@ export const LICENSES: LicenseEntry[] = [
   // ── frontend · package.json dependencies ──
   { name: "react", version: "19.2.7", license: "MIT" },
   { name: "react-dom", version: "19.2.7", license: "MIT" },
-  { name: "react-router-dom", version: "7.18.1", license: "MIT" },
+  { name: "react-router-dom", version: "7.18.4", license: "MIT" },
   { name: "zustand", version: "5.0.14", license: "MIT" },
   { name: "i18next", version: "26.3.6", license: "MIT" },
   { name: "react-i18next", version: "17.0.9", license: "MIT" },
@@ -43,6 +43,19 @@ export const LICENSES: LicenseEntry[] = [
     version: "2.4.3",
     license: "MIT OR Apache-2.0",
   },
+  {
+    name: "@tauri-apps/plugin-clipboard-manager",
+    version: "2.3.2",
+    license: "MIT OR Apache-2.0",
+  },
+  // Bundled typefaces — SIL Open Font License; the font files ship inside the
+  // app, so their license travels with it like any other dependency's.
+  {
+    name: "@fontsource-variable/space-grotesk",
+    version: "5.3.0",
+    license: "OFL-1.1",
+  },
+  { name: "@fontsource/ibm-plex-mono", version: "5.3.0", license: "OFL-1.1" },
 
   // ── backend · src-tauri/Cargo.toml dependencies ──
   { name: "tauri", version: "2.11.5", license: "Apache-2.0 OR MIT" },
@@ -107,6 +120,11 @@ export const LICENSES: LicenseEntry[] = [
   {
     name: "tauri-plugin-global-shortcut",
     version: "2.3.2",
+    license: "Apache-2.0 OR MIT",
+  },
+  {
+    name: "tauri-plugin-deep-link",
+    version: "2.4.9",
     license: "Apache-2.0 OR MIT",
   },
 ];

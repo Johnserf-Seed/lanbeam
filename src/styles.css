@@ -4,8 +4,8 @@
 
 :root {
   --font:
-    "Space Grotesk", system-ui, -apple-system, "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    "Space Grotesk Variable", "Space Grotesk", system-ui, -apple-system,
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Consolas, monospace;
   --bg: #faf9f6;
   --panel: #ffffff;
