@@ -5,6 +5,7 @@
 // through i18n.t(key) so the assertions hold in whatever language i18n resolves.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../i18n";
+import { demoContent } from "../lib/demoContent";
 import * as sendops from "../lib/sendops";
 import { useOverlays, useToast, useTrust } from "../lib/store";
 import { fireEvent, renderUI, screen, waitFor } from "../test/render";
@@ -16,9 +17,10 @@ vi.mock("../lib/sendops", async (importOriginal) => {
   return { ...actual, copyText: vi.fn() };
 });
 
-// The browser-mode start_pairing stub QR payload (see bridge/api.ts).
-const DEMO_QR =
-  "lanbeam://pair?d=demo&n=%E4%B9%A6%E6%88%BF&a=192.168.1.20&p=51704&c=482913";
+// The browser-mode start_pairing stub QR payload (see bridge/api.ts). It
+// carries the demo device name, which follows the language i18n resolved.
+const demoQr = () =>
+  `lanbeam://pair?d=demo&n=${encodeURIComponent(demoContent().me)}&a=192.168.1.20&p=51704&c=482913`;
 
 const overlays0 = { ...useOverlays.getState() };
 const toast0 = { ...useToast.getState() };
@@ -93,7 +95,7 @@ describe("PairModal", () => {
     const clickable = qr.parentElement as HTMLElement;
     fireEvent.click(clickable);
 
-    expect(sendops.copyText).toHaveBeenCalledWith(DEMO_QR);
+    expect(sendops.copyText).toHaveBeenCalledWith(demoQr());
     expect(useToast.getState().msg).toBe(i18n.t("pair.linkCopied"));
   });
 

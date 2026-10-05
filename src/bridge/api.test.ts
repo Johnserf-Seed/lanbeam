@@ -57,6 +57,7 @@ import {
   takePendingDeepLink,
   updateShare,
 } from "./api";
+import { demoContent } from "../lib/demoContent";
 
 describe("isTauri", () => {
   it("is false in the happy-dom test env (no __TAURI_INTERNALS__)", () => {
@@ -69,7 +70,8 @@ describe("identity + settings stubs", () => {
     const id = await getMyIdentity();
     expect(id.deviceId).toHaveLength(43);
     expect(id.shortId).toBe(id.deviceId.slice(0, 8));
-    expect(typeof id.name).toBe("string");
+    // Not renamed yet: the localized demo name.
+    expect(id.name).toBe(demoContent().me);
   });
 
   it("getSettings returns a fresh copy each call (not the same reference)", async () => {
@@ -212,7 +214,7 @@ describe("browser share stubs", () => {
     expect(share.token).toMatch(/^[a-z0-9]+$/);
     expect(share.token.length).toBeLessThanOrEqual(32);
     expect(share.token.length).toBeGreaterThan(0);
-    expect(share.url).toBe(`http://127.0.0.1:51705/s/${share.token}`);
+    expect(share.url).toBe(`http://192.168.1.20:51705/s/${share.token}`);
     expect(share.expiresAt).toBe(nowSecs + 600);
   });
 
@@ -237,7 +239,7 @@ describe("discovery + secure channel stubs", () => {
     expect(devices).toHaveLength(5);
     expect(devices[0]).toMatchObject({
       deviceId: "demo-mini",
-      name: "客厅 · Mac mini",
+      name: demoContent().peers.mini,
       port: 52637,
     });
     for (const d of devices) {
