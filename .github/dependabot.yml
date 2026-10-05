@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # Keeps the workflow actions current (their Node runtimes get deprecated on
+  # GitHub's schedule, not ours). One grouped PR a month at most.
+  #
+  # npm / cargo are deliberately NOT here: Dependabot *security* updates already
+  # cover them, and blanket version bumps would fight pins that are documented
+  # in Cargo.toml (axum 0.7, snow 0.9 …) as intentional.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ['*']
