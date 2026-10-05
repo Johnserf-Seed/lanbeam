@@ -1,6 +1,6 @@
 [package]
 name = "lanbeam"
-version = "0.1.0"
+version = "0.1.1"
 description = "Fast, private, peer-to-peer file transfer over your LAN"
 authors = ["Johnserf-Seed"]
 license = "MIT"
