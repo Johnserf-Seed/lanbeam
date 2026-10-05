@@ -1,0 +1,259 @@
+name: Release
+
+# One pipeline, three ways in:
+#
+#   • push a tag `vX.Y.Z`  → build every platform, attach the installers to a
+#     DRAFT GitHub Release, add SHA256SUMS.txt + build-provenance attestations.
+#     Nothing is public until a maintainer reviews the draft and presses Publish.
+#   • a pull request that touches packaging, or "Run workflow" (workflow_dispatch)
+#     → the same builds, uploaded as workflow artifacts only. No tag, no release:
+#     it is how a change proves it still PACKAGES on all three platforms, which
+#     `ci.yml` (compile + test) cannot tell you — before release day, not on it.
+#
+# Code signing is opt-in through repository secrets (see the macOS step below).
+# Without them the builds are unsigned — the macOS app is ad-hoc signed
+# (`signingIdentity: "-"` in tauri.conf.json), which is what Apple Silicon
+# requires for an unsigned download to be openable at all.
+
+on:
+  push:
+    tags: ['v*.*.*']
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - .github/release-notes.md
+      - src-tauri/tauri.conf.json
+      - src-tauri/Cargo.toml
+      - src-tauri/Cargo.lock
+      - src-tauri/build.rs
+      - src-tauri/Info.plist
+      - src-tauri/icons/**
+      - package.json
+      - pnpm-lock.yaml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A newer push to a PR supersedes its packaging run; a release never cancels.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GH_REPO: ${{ github.repository }}
+
+jobs:
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      release-id: ${{ steps.release.outputs.id }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The version lives in three manifests. A tag that disagrees with them would
+      # ship installers whose filenames, About box and MSI product version all say
+      # something other than the release they hang off — so refuse, loudly, before
+      # spending forty runner-minutes on it.
+      - name: Check version consistency
+        id: version
+        run: |
+          conf=$(jq -r .version src-tauri/tauri.conf.json)
+          pkg=$(jq -r .version package.json)
+          cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' src-tauri/Cargo.toml | head -n1)
+          echo "tauri.conf.json=$conf  package.json=$pkg  Cargo.toml=$cargo"
+          if [ "$conf" != "$pkg" ] || [ "$conf" != "$cargo" ]; then
+            echo "::error::Version mismatch: tauri.conf.json $conf, package.json $pkg, Cargo.toml $cargo. Run 'pnpm version:set <x.y.z>'."
+            exit 1
+          fi
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$conf" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the app version $conf (expected v$conf)."
+            exit 1
+          fi
+          echo "version=$conf" >> "$GITHUB_OUTPUT"
+
+      # Re-running a failed release reuses its draft instead of creating a
+      # duplicate — but never touches a release that is already published.
+      - name: Create draft release
+        id: release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if gh release view "$TAG" --json isDraft --jq .isDraft >state 2>/dev/null; then
+            if [ "$(cat state)" != "true" ]; then
+              echo "::error::Release $TAG is already published; refusing to modify it."
+              exit 1
+            fi
+            echo "Reusing the existing draft for $TAG"
+          else
+            # Single quotes on purpose: envsubst takes the variable NAMES and
+            # substitutes only these two, so any other `$` in the notes is kept.
+            # shellcheck disable=SC2016
+            envsubst '$VERSION $GH_REPO' < .github/release-notes.md > notes.md
+            flags=()
+            case "$VERSION" in *-*) flags+=(--prerelease) ;; esac
+            gh release create "$TAG" --verify-tag --draft "${flags[@]}" \
+              --title "LanBeam $VERSION" --notes-file notes.md --generate-notes
+          fi
+          echo "id=$(gh release view "$TAG" --json databaseId --jq .databaseId)" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: prepare
+    permissions:
+      contents: write # upload release assets
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            args: ''
+          # One universal .dmg serves Apple Silicon and Intel alike, instead of
+          # asking users which chip they have.
+          - name: macOS universal
+            os: macos-latest
+            args: --target universal-apple-darwin
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+          # 22.04, not latest: the binary links the glibc of the machine that
+          # built it, and 22.04's (2.35) is old enough to run on every distro
+          # still in support — a 24.04 build would refuse to start on 22.04 or
+          # Debian 12.
+          - name: Linux x64
+            os: ubuntu-22.04
+            args: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: release-${{ matrix.os }}
+
+      # Same set as ci.yml — webkit2gtk (the webview), ayatana-appindicator (the
+      # tray: the bundler finds it via pkg-config, ships it inside the AppImage
+      # and adds it to the .deb/.rpm dependencies), libdbus/libsecret (keyring).
+      - name: Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev librsvg2-dev patchelf libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev libdbus-1-dev libsecret-1-dev
+
+      - run: pnpm install --frozen-lockfile
+
+      # Optional Developer ID signing + notarization. Add these repository
+      # secrets and the macOS build is signed and notarized; leave them out and
+      # it stays ad-hoc signed. They are exported only when present: Tauri reads
+      # APPLE_SIGNING_IDENTITY with `var_os`, so an EMPTY value (what a missing
+      # secret expands to) would override the config and break the build.
+      #   APPLE_CERTIFICATE (base64 .p12) · APPLE_CERTIFICATE_PASSWORD
+      #   APPLE_SIGNING_IDENTITY · APPLE_ID · APPLE_PASSWORD (app-specific)
+      #   APPLE_TEAM_ID
+      - name: macOS signing secrets
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE" ]; then
+            echo "No APPLE_CERTIFICATE secret: building ad-hoc signed."
+            exit 0
+          fi
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY \
+                      APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            value="${!name}"
+            [ -n "$value" ] || continue
+            delim="EOF_$(openssl rand -hex 8)"
+            printf '%s<<%s\n%s\n%s\n' "$name" "$delim" "$value" "$delim" >> "$GITHUB_ENV"
+          done
+          echo "Developer ID signing enabled."
+
+      - name: Build
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          releaseId: ${{ needs.prepare.outputs.release-id }}
+          args: ${{ matrix.args }}
+          # No updater is configured yet, so there is nothing to sign or describe.
+          uploadUpdaterJson: false
+          uploadWorkflowArtifacts: ${{ needs.prepare.outputs.release-id == '' }}
+          workflowArtifactNamePattern: LanBeam-[platform]-[arch]-[bundle]
+          retryAttempts: 1
+
+      # The "green" build: the bare exe runs without installing (it registers the
+      # lanbeam:// scheme for itself on first launch — see lib.rs).
+      - name: Windows portable exe
+        if: runner.os == 'Windows'
+        id: portable
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          RELEASE: ${{ needs.prepare.outputs.release-id != '' }}
+        run: |
+          file="portable/LanBeam_${VERSION}_x64_portable.exe"
+          mkdir -p portable
+          cp src-tauri/target/release/lanbeam.exe "$file"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+          if [ "$RELEASE" = "true" ]; then
+            gh release upload "$GITHUB_REF_NAME" "$file" --clobber
+          fi
+      - name: Upload portable exe (workflow artifact)
+        if: runner.os == 'Windows' && needs.prepare.outputs.release-id == ''
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.portable.outputs.file }}
+          archive: false
+
+  checksums:
+    name: Checksums & provenance
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release-id != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # upload SHA256SUMS.txt
+      id-token: write # sign the attestation
+      attestations: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Download release assets
+        run: |
+          gh release download "$TAG" --dir assets
+          rm -f assets/SHA256SUMS.txt
+          (cd assets && sha256sum -- *) | tee SHA256SUMS.txt
+
+      # Lets anyone check that a download was built by this repository's
+      # workflow from the tagged commit:
+      #   gh attestation verify <file> --repo Johnserf-Seed/lanbeam
+      - uses: actions/attest@v4
+        with:
+          subject-path: assets/*
+
+      - name: Upload SHA256SUMS.txt
+        run: gh release upload "$TAG" SHA256SUMS.txt --clobber
