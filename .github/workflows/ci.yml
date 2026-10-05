@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   frontend:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
       # No `version:` — the action reads `packageManager` from package.json, so
@@ -43,7 +43,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
+        # Linux is pinned, not `-latest`: that label moves to a new Ubuntu on
+        # GitHub's schedule (26.04 from 2026-10-19), and the apt package names
+        # below are exactly what breaks when it does. Bump it deliberately.
+        os: [windows-latest, macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -59,7 +62,7 @@ jobs:
       # NOT libappindicator3-dev: it CONFLICTS with the ayatana one (apt refuses to
       # install both), and ayatana is what Tauri 2 wants on a current Ubuntu.
       - name: Linux system deps
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -81,7 +84,7 @@ jobs:
       # gnome-keyring — otherwise the identity tests would "pass" against nothing,
       # which is exactly the failure mode this matrix exists to catch.
       - name: Test (Linux, with a real secret service)
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt-get install -y gnome-keyring dbus-x11
           eval "$(dbus-launch --sh-syntax)"
@@ -92,5 +95,5 @@ jobs:
       # in parallel — an environment quirk, not a logic error. Serial, like the
       # other two, so a red run means something real.
       - name: Test
-        if: matrix.os != 'ubuntu-latest'
+        if: matrix.os != 'ubuntu-24.04'
         run: cargo test -- --test-threads=1
