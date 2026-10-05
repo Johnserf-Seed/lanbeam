@@ -7,14 +7,14 @@
 > 1. **协议兼容**：给现有 JSON 结构**加字段**（`#[serde(default)] Option<T>`）双向兼容；**加变体/kind 字节**会杀死旧对端 —— 任何新变体必须先落地 M4 的 `Hello` 版本协商。
 > 2. **每个里程碑交付 = Rust 命令/事件 + 前端接线（拆掉对应 milestoneNote 提示）+ 回环集成测试**。
 >
-> **进度**（2026-07-12）：✅ M4 · ✅ M5 · ✅ M6 · ✅ M7 · ✅ **M8（axum 一次性分享服务：token/TTL/次数/停止即失效，仅局域网、按索引服务文件；ShareModal 接真；发现包广播分享端口）**。**五个核心后端里程碑全部交付**，界面所有外壳已接真实 Rust。测试：250 单元 + 13 集成（Rust）· 365（前端 Vitest，28 文件），全绿。三平台 CI（Windows / macOS / Linux）见 `.github/workflows/ci.yml`。
+> **进度**（2026-07-12）：✅ M4 · ✅ M5 · ✅ M6 · ✅ M7 · ✅ **M8（axum 一次性分享服务：token/TTL/次数/停止即失效，仅局域网、按索引服务文件；ShareModal 接真；发现包广播分享端口）**。**五个核心后端里程碑全部交付**，界面所有外壳已接真实 Rust。测试：253 单元 + 13 集成（Rust）· 378（前端 Vitest，29 文件），全绿（2026-10-05）。三平台 CI（Windows / macOS / Linux）见 `.github/workflows/ci.yml`；**发版流水线**见 `.github/workflows/release.yml`：推送 `vX.Y.Z` tag → 三平台安装包（NSIS/MSI/便携 exe · 通用 dmg · deb/rpm/AppImage）+ `SHA256SUMS.txt` + 构建来源证明 → 草稿 Release，人工检查后发布。
 > - M4 Hello 协商 / 信任存储 / 安全加固 / 日志诊断
 > - M5 本机 IP / 下载目录·端口 / 托盘 / 通知 / 自启 / Alt+Space 可开关快捷键·默认关 / 重置身份
 > - M6 取消·暂停（有时限）/ SHA-256 校验 / 断点续传 / 冲突策略 / 自动整理 / 并发·限速 / 逐文件进度
 > - M7 配对码·QR / IP 直连 / 快传文本 + 剪贴板（传输层 version 2 门控）
 > - M8 浏览器接收（HTTP 回退）
 >
-> **M9 可选润色**：✅ **EXIF 抹除已交付**（`img-parts` 无重编码剥离 JPEG/PNG/WebP 的 EXIF/ICC/XMP + Extended-XMP；HEIC/TIFF/GIF/RAW 透传；剥离后 size+SHA-256 按流出字节重算、临时文件 RAII 全路径清理、Unix 0600/0700 权限；`stripExif` 开关真实化）。⬜ 检查更新（`tauri-plugin-updater`，**卡在发布服务器 + 签名密钥基础设施**，你提供前无法完成）· ~~⬜ 生效网络 SSID 检测~~ → **已放弃**：那个下拉框接的是空气（无后端字段、无命令、无读取方），而唯一诚实的实现是 Windows-only 的 WLAN FFI —— 在 macOS/Linux 上会静默失效，等于用一个新谎言换掉旧谎言。控件已从设置页移除；「可被发现」开关本来就在按需做这件事。
+> **M9 可选润色**：✅ **EXIF 抹除已交付**（`img-parts` 无重编码剥离 JPEG/PNG/WebP 的 EXIF/ICC/XMP + Extended-XMP；HEIC/TIFF/GIF/RAW 透传；剥离后 size+SHA-256 按流出字节重算、临时文件 RAII 全路径清理、Unix 0600/0700 权限；`stripExif` 开关真实化）。⬜ 检查更新（`tauri-plugin-updater`）：发布服务器**已就位**（GitHub Releases + `release.yml`，tauri-action 能直接生成 `latest.json`），**只差更新签名密钥**：`pnpm tauri signer generate` 生成密钥对 → 私钥存为仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（及其密码）→ 公钥写进 `tauri.conf.json` 的 updater 配置并开启 `bundle.createUpdaterArtifacts` → 把 `release.yml` 里的 `uploadUpdaterJson` 改为 true，再接前端· ~~⬜ 生效网络 SSID 检测~~ → **已放弃**：那个下拉框接的是空气（无后端字段、无命令、无读取方），而唯一诚实的实现是 Windows-only 的 WLAN FFI —— 在 macOS/Linux 上会静默失效，等于用一个新谎言换掉旧谎言。控件已从设置页移除；「可被发现」开关本来就在按需做这件事。
 >
 > **注**：暂停为「有时限」语义 —— 超过 50s 自动恢复（受帧层单向流 + Noise nonce 约束，无法安全加跨向 keepalive；已在代码中详述）。续传 offsets 用稀疏编码（仅非零、限帧预算），超预算文件回退到从头传。
 
