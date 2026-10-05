@@ -33,9 +33,18 @@ pub struct Identity {
 impl Identity {
     /// Load the persisted identity, or generate + store one on first run.
     /// `account_suffix` gives a distinct keychain identity per test instance
-    /// (so two instances on one machine don't share a Device ID).
+    /// (so two instances on one machine don't share a Device ID). Only a MISSING
+    /// entry is a first run: a store that can't be read, or holds a malformed
+    /// blob, is an error — never a reason to generate.
     pub fn load_or_create(account_suffix: Option<&str>) -> Result<Identity> {
         let entry = Entry::new(KR_SERVICE, &account_for(account_suffix))?;
+        Self::load_or_create_in(&entry)
+    }
+
+    /// [`Identity::load_or_create`] against a given entry. Split out so the tests
+    /// can hand it a `keyring::mock` entry with an injected store failure — the
+    /// real stores offer no way to deny access on demand.
+    fn load_or_create_in(entry: &Entry) -> Result<Identity> {
         match entry.get_secret() {
             Ok(blob) if blob.len() == 64 => {
                 let b = Zeroizing::new(blob); // wiped on drop
@@ -50,7 +59,9 @@ impl Identity {
                     private: Zeroizing::new(private),
                 })
             }
-            _ => {
+            // First run — the ONLY case that may mint an identity: the store
+            // answered, and it holds none.
+            Err(keyring::Error::NoEntry) => {
                 let id = generate_identity()?;
                 let mut blob = [0u8; 64];
                 blob[..32].copy_from_slice(&id.public);
@@ -61,6 +72,24 @@ impl Identity {
                 blob.zeroize();
                 Ok(id)
             }
+            // A stored blob of the wrong size is corruption, not a first run:
+            // generating over it would silently give this device a new ID and
+            // destroy the bytes someone could inspect. Refuse instead.
+            Ok(blob) => {
+                let b = Zeroizing::new(blob); // may still hold key bytes — wiped on drop
+                Err(LanBeamError::Crypto(format!(
+                    "bad identity blob: {} bytes, expected 64",
+                    b.len()
+                )))
+            }
+            // Any other error — a declined keychain prompt, a locked Secret Service
+            // collection, a transient platform failure — says nothing about whether
+            // an identity EXISTS. Generating one here would overwrite the real key
+            // as soon as the store let the write through: a new Device ID, and
+            // "fingerprint changed" on every peer that pinned the old one. Fail
+            // startup instead; once the store is reachable, the next launch finds
+            // the key.
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -117,6 +146,7 @@ pub fn generate_identity() -> Result<Identity> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use keyring::mock::MockCredential;
 
     #[test]
     fn generated_keys_have_correct_shape() {
@@ -127,11 +157,19 @@ mod tests {
     }
 
     // AC-K3: a second load returns the SAME identity (persisted in the OS keychain).
-    // Hits the real credential store; the entry is the same one the app uses.
+    // Real credential store, but a throwaway account — never the app's own. On
+    // macOS an entry trusts only the binary that created it, so a test-created
+    // production entry makes every rebuilt test binary, and the app itself, prompt
+    // for keychain access (and a denied prompt fails startup). The account changes
+    // nothing this catches: a store that doesn't persist (keyring's silent mock
+    // fallback) still hands the second load a fresh key.
     #[test]
     fn identity_is_stable_across_loads() {
-        let a = Identity::load_or_create(None).expect("first load");
-        let b = Identity::load_or_create(None).expect("second load");
+        let sfx = format!("stable-{}", std::process::id());
+        let a = Identity::load_or_create(Some(&sfx)).expect("first load");
+        let b = Identity::load_or_create(Some(&sfx)).expect("second load");
+        // before the asserts, so a failing run leaves nothing behind either
+        delete_persisted(Some(&sfx)).expect("cleanup");
         assert_eq!(a.public, b.public);
         assert_eq!(a.device_id(), b.device_id());
     }
@@ -165,5 +203,69 @@ mod tests {
         );
         // leave nothing behind in the user's credential store
         delete_persisted(Some(&sfx)).expect("cleanup");
+    }
+
+    /// A `keyring::mock` entry, handed straight to `load_or_create_in` rather
+    /// than installed with `set_default_credential_builder` — that is
+    /// process-global, and would swap the real store out from under the
+    /// keychain tests above.
+    fn mock_entry() -> Entry {
+        Entry::new_with_credential(Box::new(MockCredential::default()))
+    }
+
+    /// First run generates, and stores exactly what it returned as
+    /// `public||private` — pinning the layout the load arm reads back.
+    #[test]
+    fn missing_entry_creates_and_stores_identity() {
+        let entry = mock_entry();
+        let id = Identity::load_or_create_in(&entry).expect("first run creates");
+        let blob = entry.get_secret().expect("the new identity was stored");
+        assert_eq!(blob[..32], id.public);
+        assert_eq!(blob[32..], id.private_bytes()[..]);
+    }
+
+    #[test]
+    fn existing_entry_loads_the_same_identity() {
+        let entry = mock_entry();
+        let a = Identity::load_or_create_in(&entry).expect("create");
+        let b = Identity::load_or_create_in(&entry).expect("load");
+        assert_eq!(a.public, b.public);
+        assert_eq!(a.private_bytes(), b.private_bytes());
+    }
+
+    /// The regression: an unreadable store must fail the load, never mint a
+    /// replacement. The mock spends its injected error on the read, so a write
+    /// attempted after it WOULD land — exactly how a key gets silently rotated.
+    #[test]
+    fn store_errors_fail_without_replacing_the_identity() {
+        let entry = mock_entry();
+        let original = Identity::load_or_create_in(&entry).expect("create");
+        let mock: &MockCredential = entry.get_credential().downcast_ref().expect("mock");
+        for err in [
+            keyring::Error::NoStorageAccess("keychain access denied".into()),
+            keyring::Error::PlatformFailure("transient".into()),
+        ] {
+            mock.set_error(err);
+            match Identity::load_or_create_in(&entry) {
+                Err(LanBeamError::Keyring(_)) => {}
+                Err(e) => panic!("expected a keyring error, got {e:?}"),
+                Ok(_) => panic!("a store error must not yield an identity"),
+            }
+            let blob = entry.get_secret().expect("the entry is still there");
+            assert_eq!(blob[..32], original.public, "the identity was replaced");
+        }
+    }
+
+    /// Corruption is not a first run: fail, and leave the bytes in place.
+    #[test]
+    fn malformed_blob_fails_without_overwriting() {
+        let entry = mock_entry();
+        let corrupt = [7u8; 32];
+        entry.set_secret(&corrupt).expect("seed");
+        assert!(matches!(
+            Identity::load_or_create_in(&entry),
+            Err(LanBeamError::Crypto(_))
+        ));
+        assert_eq!(entry.get_secret().expect("still stored"), corrupt);
     }
 }

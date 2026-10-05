@@ -295,11 +295,6 @@ pub fn run() {
         .setup(|app| {
             let instance = instance_id();
 
-            // Load (or generate) the device identity (distinct per test instance) + settings.
-            let identity = Arc::new(
-                Identity::load_or_create(instance.as_deref())
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
-            );
             // BEFORE settings are read: move an existing install's files out of
             // Tauri's bundle-id folder. Cannot log yet (the logger is configured
             // below, from the settings this is about to make readable), so the note
@@ -342,6 +337,23 @@ pub fn run() {
             if let Some(e) = settings_diag {
                 log::warn!("settings blob corrupted, fell back to defaults: {e}");
             }
+
+            // The device identity (distinct per test instance). Loaded AFTER the
+            // logger so its failure is captured: an unreadable keychain fails
+            // startup rather than mint a new Device ID (see
+            // `Identity::load_or_create`), and Tauri reports a failed setup only as
+            // a panic on stderr — which a GUI launch (Finder; the console-less
+            // Windows release build) throws away.
+            let identity = Arc::new(
+                Identity::load_or_create(instance.as_deref())
+                    .inspect_err(|e| {
+                        log::error!(
+                            "device identity unavailable, not starting \
+                             (a new one would change this device's ID): {e}"
+                        )
+                    })
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            );
 
             if let Some(id) = &instance {
                 // distinguish the two windows in the UI
