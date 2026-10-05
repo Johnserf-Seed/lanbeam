@@ -808,7 +808,18 @@ export default function Sidebar() {
                 {localIp}
               </span>
             )}
-            <span style={{ fontSize: 9.5, color: stateColor }}>
+            {/* Last in a nowrap row: ellipsize instead of hard-clipping
+                ("Discove") when the ID + IP leave too little room. */}
+            <span
+              title={stateText}
+              style={{
+                fontSize: 9.5,
+                color: stateColor,
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
               {stateText}
             </span>
           </div>
