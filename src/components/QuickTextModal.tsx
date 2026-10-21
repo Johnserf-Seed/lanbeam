@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { showToast, useData, useOverlays } from "../lib/store";
+import { isMac } from "../lib/platform";
 import { errText, sendTextTracked } from "../lib/sendops";
 import { ModalHead, Toggle } from "./ui";
 
@@ -153,7 +154,11 @@ export default function QuickTextModal() {
             style={{ padding: "0 16px" }}
             onClick={() => void send()}
           >
-            {t("qt.send")}
+            {t("qt.send")}{" "}
+            {/* The chord as THIS OS spells it — the handler above takes either
+                modifier, but a Windows user shown ⌘⏎ has no ⌘ key to press.
+                Hidden from the accessible name: "Send", not "Send ⌘⏎". */}
+            <span aria-hidden="true">{isMac() ? "⌘⏎" : "Ctrl+Enter"}</span>
           </button>
         </div>
         <div className="modal-foot">{t("qt.foot")}</div>

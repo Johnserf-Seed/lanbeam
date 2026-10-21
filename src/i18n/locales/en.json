@@ -528,7 +528,7 @@
     "sendTo": "Send to",
     "placeholder": "Type text or a link…",
     "clipToo": "Ask to also write to their clipboard",
-    "send": "Send ⌘⏎",
+    "send": "Send",
     "sentToast": "Sent to {{name}}",
     "sendFailed": "Send failed: {{err}}",
     "foot": "End-to-end encrypted · instant while online · also via the global shortcut"
