@@ -227,17 +227,21 @@ logs live in a `LanBeam` folder in the usual place for your OS:
 | macOS | `~/Library/Application Support/LanBeam` | `~/Library/Logs/LanBeam` |
 | Linux | `~/.local/share/LanBeam` | `~/.config/LanBeam/logs` |
 
-The device's private key is not among them — it lives in the OS keychain.
+On Windows and Linux the device's private key isn't among them — it lives in the system's
+credential store. On macOS it is `identity.key` in the data folder, readable only by your
+user account (see [Security model](#security-model-at-a-glance)).
 *Settings → Export diagnostics* bundles the logs and a network self‑check into one file.
 </details>
 
 <details>
-<summary><b>macOS asks for keychain access after an update</b></summary>
+<summary><b>macOS asks for the keychain password once, when updating from 0.1.x</b></summary>
 
-LanBeam keeps its device key in your login keychain. The builds are ad‑hoc signed, so macOS
-sees each new version as a different app and asks once whether it may read the key —
-choose *Always Allow*. That key *is* the device's identity: it is what your peers have
-pinned.
+LanBeam 0.1.0 and 0.1.1 kept the device key in your login keychain, and the macOS keychain
+hands a key only to the exact build that stored it. The first launch of a newer version
+moves the key into a file instead, and needs that access one last time — choose *Allow* or
+*Always Allow*. It's the same key, so paired devices see no change, and LanBeam doesn't
+use the keychain on macOS after that. If you choose *Deny*, LanBeam says so and quits
+rather than create a new identity; open it again to retry.
 </details>
 
 <details>
@@ -256,8 +260,12 @@ pinned.
 
 ## Security model (at a glance)
 
-- The device's X25519 private key lives in the **OS keychain** (`keyring`), never on disk
-  in plaintext.
+- The device's X25519 private key lives in the **OS credential store** (`keyring`) on
+  Windows and Linux. On **macOS** it is a file in LanBeam's data folder that only your user
+  account can read (`0600`), the way an SSH key sits in `~/.ssh`. The macOS
+  keychain releases an item only to the exact build that stored it, judged by code
+  signature; without a paid Developer ID, every update would have asked for your login
+  password just to start.
 - All peer traffic is encrypted end‑to‑end (Noise); the app opens no internet connections.
 - Untrusted input is treated as hostile: manifest names/sizes/counts are bounded, received
   paths are sanitized against traversal and Windows reserved‑name/ADS tricks, and pairing
