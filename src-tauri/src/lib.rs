@@ -87,10 +87,30 @@ fn build_menu<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> tauri::Result<
         &[&about, &PredefinedMenuItem::separator(handle)?, &quit],
     )?;
 
+    // Load-bearing, not decoration: on macOS ⌘X/⌘C/⌘V/⌘A/⌘Z are menu key
+    // equivalents, delivered to the focused text field THROUGH these items. With
+    // no Edit menu, every text box in the webview ignored them — typing worked,
+    // the right-click menu (ours, reading the clipboard via the backend) worked,
+    // and keyboard paste silently did nothing.
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(handle, None)?,
+            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+        ],
+    )?;
+
     let reload = MenuItem::with_id(handle, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
     let view_menu = Submenu::with_items(handle, "View", true, &[&reload])?;
 
-    Menu::with_items(handle, &[&app_menu, &view_menu])
+    Menu::with_items(handle, &[&app_menu, &edit_menu, &view_menu])
 }
 
 /// Map the persisted `log_level` setting onto the `log` facade.
