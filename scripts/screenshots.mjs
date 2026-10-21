@@ -218,7 +218,7 @@ async function main() {
           await stage(page, shot);
           if (shot.scene === "share")
             await page.waitForFunction(() =>
-              document.body.innerText.includes(":51705/s/"),
+              document.body.textContent?.includes(":51705/s/"),
             );
           // entrance animations (modals rise, the radar settles)
           await page.waitForTimeout(900);
