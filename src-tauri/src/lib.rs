@@ -185,12 +185,12 @@ fn show_identity_failure<R: tauri::Runtime>(app: &tauri::AppHandle<R>, err: &err
                 path = file.display()
             ),
             "LanBeam couldn't read this device's identity. If macOS asked for access to \
-             the keychain, choose Allow: this version moves the key out of the keychain, \
+             the keychain, choose Allow: this version copies the key out of the keychain, \
              once, and needs that access to do it. Then open LanBeam again. It won't \
              create a new identity on its own: this device would get a new ID, and paired \
              devices would no longer recognize it.\n\n\
              LanBeam 无法读取本机的设备身份。如果系统询问钥匙串访问权限，请选择“允许”：\
-             这个版本会把密钥从钥匙串中移出，只需这一次授权。然后重新打开 LanBeam。\
+             这个版本会把密钥从钥匙串中复制出来，只需这一次授权。然后重新打开 LanBeam。\
              它不会自行创建新身份：那会让本机换一个设备 ID，已配对的设备将不再认得它。"
                 .to_string(),
         )

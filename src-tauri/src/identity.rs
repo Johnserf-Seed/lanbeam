@@ -11,7 +11,7 @@
 //!   it — judged by code signature, and without a paid Developer ID every
 //!   LanBeam build signs differently — so it demanded the login password at the
 //!   first launch after every update. Builds up to 0.1.1 kept the key in the
-//!   keychain; the first launch of a newer one moves it into the file
+//!   keychain; the first launch of a newer one copies it into the file
 //!   ([`Identity::load_or_create_file`]), keeping the same Device ID.
 
 use std::io::Write;
@@ -79,9 +79,13 @@ impl Identity {
     ///
     /// No file means a first run OR an older build's keychain identity. Taking
     /// the keychain's (same Device ID — no peer sees a fingerprint change) costs
-    /// one last access prompt; then the keychain copy is deleted, so the file is
-    /// the only identity left. An unreadable keychain fails exactly as in
-    /// [`Identity::load_or_create_in`]: never a reason to mint a replacement.
+    /// one last access prompt. The keychain copy is then LEFT where it is: this
+    /// build never reads it again once the file exists, but an older build run
+    /// later still finds the same key there instead of minting a new one — a
+    /// device that flips between two IDs depending on which version starts is
+    /// worse than a duplicate. A reset deletes both. An unreadable keychain
+    /// fails exactly as in [`Identity::load_or_create_in`]: never a reason to
+    /// mint a replacement.
     fn load_or_create_file(path: &Path, legacy: &Entry) -> Result<Identity> {
         match std::fs::read(path) {
             Ok(bytes) => {
@@ -111,15 +115,6 @@ impl Identity {
                     Err(e) => return Err(e.into()),
                 };
                 write_private_file(path, &id)?;
-                // Best effort: the file wins from now on either way. A leftover
-                // entry only matters to a reset, which deletes it too.
-                match legacy.delete_credential() {
-                    Ok(()) | Err(keyring::Error::NoEntry) => {}
-                    Err(e) => log::warn!(
-                        "identity moved to {}, but the old keychain entry stays: {e}",
-                        path.display()
-                    ),
-                }
                 Ok(id)
             }
             Err(e) => Err(e.into()),
@@ -404,8 +399,9 @@ mod tests {
         assert_eq!(a.private_bytes(), b.private_bytes());
     }
 
-    /// Upgrading from a keychain build: the SAME identity moves into the file —
-    /// the Device ID peers pinned survives — and the keychain copy is deleted.
+    /// Upgrading from a keychain build: the SAME identity is copied into the
+    /// file — the Device ID peers pinned survives — and the keychain copy stays,
+    /// so an older build run later still finds that key, not a new one.
     #[test]
     fn file_store_migrates_the_keychain_identity() {
         let dir = TempDir::new("migrate");
@@ -419,10 +415,8 @@ mod tests {
         );
         assert_eq!(moved.private_bytes(), old.private_bytes());
         assert!(path.exists());
-        assert!(
-            matches!(legacy.get_secret(), Err(keyring::Error::NoEntry)),
-            "the keychain copy is removed"
-        );
+        let kept = legacy.get_secret().expect("the keychain copy is kept");
+        assert_eq!(kept[..32], old.public, "for an older build to find");
     }
 
     /// The keychain can't be read during the move (a declined prompt): still an

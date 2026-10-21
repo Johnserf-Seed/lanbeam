@@ -238,9 +238,10 @@ user account (see [Security model](#security-model-at-a-glance)).
 
 LanBeam 0.1.0 and 0.1.1 kept the device key in your login keychain, and the macOS keychain
 hands a key only to the exact build that stored it. The first launch of a newer version
-moves the key into a file instead, and needs that access one last time — choose *Allow* or
+copies the key into a file instead, and needs that access one last time — choose *Allow* or
 *Always Allow*. It's the same key, so paired devices see no change, and LanBeam doesn't
-use the keychain on macOS after that. If you choose *Deny*, LanBeam says so and quits
+read the keychain on macOS after that. The keychain entry is left in place, so an older
+version, if you ever run one again, still finds the same key. If you choose *Deny*, LanBeam says so and quits
 rather than create a new identity; open it again to retry.
 </details>
 
