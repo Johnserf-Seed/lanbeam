@@ -80,17 +80,62 @@ use transport::TransportCtx;
 fn build_menu<R: tauri::Runtime>(handle: &tauri::AppHandle<R>) -> tauri::Result<Menu<R>> {
     let about = MenuItem::with_id(handle, "about", "About LanBeam", true, None::<&str>)?;
     let quit = PredefinedMenuItem::quit(handle, Some("Quit LanBeam"))?;
+    // ⌘H / ⌥⌘H, like every Mac app. They act on the application, not the
+    // window, so they work on this borderless window where ⌘W/⌘M would not.
     let app_menu = Submenu::with_items(
         handle,
         "LanBeam",
         true,
-        &[&about, &PredefinedMenuItem::separator(handle)?, &quit],
+        &[
+            &about,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::hide(handle, Some("Hide LanBeam"))?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::show_all(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &quit,
+        ],
     )?;
 
-    let reload = MenuItem::with_id(handle, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
-    let view_menu = Submenu::with_items(handle, "View", true, &[&reload])?;
+    // Load-bearing, not decoration: on macOS ⌘X/⌘C/⌘V/⌘A/⌘Z are menu key
+    // equivalents, delivered to the focused text field THROUGH these items. With
+    // no Edit menu, every text box in the webview ignored them — typing worked,
+    // the right-click menu (ours, reading the clipboard via the backend) worked,
+    // and keyboard paste silently did nothing.
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(handle, None)?,
+            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+        ],
+    )?;
 
-    Menu::with_items(handle, &[&app_menu, &view_menu])
+    // Reload is a developer's tool. The shipped app refuses it on every other
+    // platform (browserShortcuts.ts swallows Ctrl+R / F5 outside dev), and a menu
+    // item carrying ⌘R would hand it straight back on macOS — so it exists in dev
+    // builds only.
+    #[cfg(debug_assertions)]
+    let view_menu = {
+        let reload = MenuItem::with_id(handle, "reload", "Reload", true, Some("CmdOrCtrl+R"))?;
+        Submenu::with_items(handle, "View", true, &[&reload])?
+    };
+
+    Menu::with_items(
+        handle,
+        &[
+            &app_menu,
+            &edit_menu,
+            #[cfg(debug_assertions)]
+            &view_menu,
+        ],
+    )
 }
 
 /// Map the persisted `log_level` setting onto the `log` facade.
@@ -925,6 +970,14 @@ pub fn run() {
                 if let Some(state) = app.try_state::<AppState>() {
                     flush_persistence(&state);
                 }
+            }
+            // macOS: a click on the Dock icon (or opening the app again from
+            // Finder). With close-to-tray on — the default — closing the window
+            // only HIDES it, and nothing answered the Dock, so the click did
+            // nothing and the menu-bar icon was the only way back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = &event {
+                show_main_window(app);
             }
         });
 }

@@ -16,6 +16,7 @@ import type { Visibility, ThemeMode } from "../lib/store";
 import { Toggle, Segmented } from "../components/ui";
 import { copyText, errText, openDir, revealFile } from "../lib/sendops";
 import { fmtBytes } from "../lib/format";
+import { isMac } from "../lib/platform";
 import { setZoom, UI_ZOOMS } from "../lib/uiZoom";
 import { playSound } from "../lib/sound";
 import type { SoundKind } from "../lib/sound";
@@ -26,14 +27,6 @@ function fpGroups(deviceId: string): string {
   return [hex.slice(0, 4), hex.slice(4, 8), hex.slice(8, 12), hex.slice(12, 16)]
     .filter(Boolean)
     .join(" · ");
-}
-
-function isMac(): boolean {
-  const ua =
-    (typeof navigator !== "undefined" &&
-      (navigator.platform || navigator.userAgent)) ||
-    "";
-  return /Mac/i.test(ua);
 }
 
 /* Platform-format a canonical accelerator ("Alt+Space", "Ctrl+Shift+K") for

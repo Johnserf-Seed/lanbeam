@@ -528,7 +528,7 @@
     "sendTo": "发送到",
     "placeholder": "输入文字、链接…",
     "clipToo": "请求同时写入对方剪贴板",
-    "send": "发送 ⌘⏎",
+    "send": "发送",
     "sentToast": "已发送到 {{name}}",
     "sendFailed": "发送失败：{{err}}",
     "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起"

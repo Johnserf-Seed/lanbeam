@@ -63,6 +63,31 @@ describe("QuickTextModal", () => {
     ).toBeTruthy();
   });
 
+  it("names the send chord the way the OS does, outside the accessible name", () => {
+    useData.setState({ devices: [device()] });
+    useOverlays.setState({ qtOpen: true });
+
+    // Not a Mac (happy-dom reports "X11; <host OS>", never "Mac"): Ctrl+Enter.
+    const { unmount } = renderUI(<QuickTextModal />);
+    let btn = screen.getByRole("button", { name: i18n.t("qt.send") });
+    expect(btn).toHaveTextContent("Ctrl+Enter");
+    expect(btn).not.toHaveTextContent("⌘");
+    unmount();
+
+    // A Mac webview reports "MacIntel" (Apple Silicon included): ⌘⏎.
+    const platform = vi
+      .spyOn(navigator, "platform", "get")
+      .mockReturnValue("MacIntel");
+    try {
+      renderUI(<QuickTextModal />);
+      btn = screen.getByRole("button", { name: i18n.t("qt.send") });
+      expect(btn).toHaveTextContent("⌘⏎");
+      expect(btn).not.toHaveTextContent("Ctrl");
+    } finally {
+      platform.mockRestore();
+    }
+  });
+
   it("sends the trimmed text to the selected device and closes", async () => {
     const user = userEvent.setup();
     useData.setState({ devices: [device()] });
