@@ -52,7 +52,7 @@
     "happy-dom": "^20.10.6",
     "playwright-core": "^1.63.0",
     "typescript": "~7.0.0",
-    "vite": "^8.0.0",
+    "vite": "^8.1.6",
     "vitest": "^4.1.11"
   }
 }
