@@ -212,32 +212,63 @@ fn show_identity_failure<R: tauri::Runtime>(app: &tauri::AppHandle<R>, err: &err
     if let Some(w) = app.get_webview_window("main") {
         let _ = w.hide();
     }
-    #[cfg(target_os = "macos")]
-    let (store, store_zh) = ("Keychain", "钥匙串");
-    #[cfg(windows)]
-    let (store, store_zh) = ("Windows Credential Manager", "Windows 凭据管理器");
-    #[cfg(not(any(target_os = "macos", windows)))]
-    let (store, store_zh) = ("system keyring", "系统密钥环");
     // Both languages: the UI language is kept in the webview's storage, which the
     // backend cannot read.
+    //
+    // macOS keeps the identity in a file (see `identity`), so damage means that
+    // file, and the only keychain read left is the one-time move out of it.
+    #[cfg(target_os = "macos")]
+    let (damaged, unreadable) = {
+        let file = paths::data_dir(app).join(identity::file_for(instance_id().as_deref()));
+        (
+            format!(
+                "The device identity file LanBeam keeps at {path} is damaged. Deleting it \
+                 lets LanBeam start with a new identity; paired devices will then need to \
+                 pair again.\n\n\
+                 LanBeam 的设备身份文件已损坏：{path}。删除它后即可用新身份启动；\
+                 已配对的设备需要重新配对。",
+                path = file.display()
+            ),
+            "LanBeam couldn't read this device's identity. If macOS asked for access to \
+             the keychain, choose Allow: this version copies the key out of the keychain, \
+             once, and needs that access to do it. Then open LanBeam again. It won't \
+             create a new identity on its own: this device would get a new ID, and paired \
+             devices would no longer recognize it.\n\n\
+             LanBeam 无法读取本机的设备身份。如果系统询问钥匙串访问权限，请选择“允许”：\
+             这个版本会把密钥从钥匙串中复制出来，只需这一次授权。然后重新打开 LanBeam。\
+             它不会自行创建新身份：那会让本机换一个设备 ID，已配对的设备将不再认得它。"
+                .to_string(),
+        )
+    };
+    #[cfg(not(target_os = "macos"))]
+    let (damaged, unreadable) = {
+        #[cfg(windows)]
+        let (store, store_zh) = ("Windows Credential Manager", "Windows 凭据管理器");
+        #[cfg(not(windows))]
+        let (store, store_zh) = ("system keyring", "系统密钥环");
+        (
+            format!(
+                "The device identity LanBeam keeps in the {store} is damaged. Deleting the \
+                 \"LanBeam\" entry there lets LanBeam start with a new identity; paired \
+                 devices will then need to pair again.\n\n\
+                 LanBeam 保存在{store_zh}中的设备身份已损坏。删除其中的“LanBeam”条目后即可用新身份\
+                 启动；已配对的设备需要重新配对。"
+            ),
+            format!(
+                "LanBeam couldn't read this device's identity from the {store}. If you were \
+                 asked for access, choose Allow; if the {store} is locked, unlock it. Then \
+                 open LanBeam again. It won't create a new identity on its own: this device \
+                 would get a new ID, and paired devices would no longer recognize it.\n\n\
+                 LanBeam 无法从{store_zh}读取本机的设备身份。如果系统询问访问权限，请选择“允许”；\
+                 如果{store_zh}已锁定，请先解锁。然后重新打开 LanBeam。它不会自行创建新身份：\
+                 那会让本机换一个设备 ID，已配对的设备将不再认得它。"
+            ),
+        )
+    };
     let what = if matches!(err, error::LanBeamError::Crypto(_)) {
-        format!(
-            "The device identity LanBeam keeps in the {store} is damaged. Deleting the \
-             \"LanBeam\" entry there lets LanBeam start with a new identity; paired \
-             devices will then need to pair again.\n\n\
-             LanBeam 保存在{store_zh}中的设备身份已损坏。删除其中的“LanBeam”条目后即可用新身份\
-             启动；已配对的设备需要重新配对。"
-        )
+        damaged
     } else {
-        format!(
-            "LanBeam couldn't read this device's identity from the {store}. If you were \
-             asked for access, choose Allow; if the {store} is locked, unlock it. Then \
-             open LanBeam again. It won't create a new identity on its own: this device \
-             would get a new ID, and paired devices would no longer recognize it.\n\n\
-             LanBeam 无法从{store_zh}读取本机的设备身份。如果系统询问访问权限，请选择“允许”；\
-             如果{store_zh}已锁定，请先解锁。然后重新打开 LanBeam。它不会自行创建新身份：\
-             那会让本机换一个设备 ID，已配对的设备将不再认得它。"
-        )
+        unreadable
     };
     let handle = app.clone();
     app.dialog()
@@ -441,10 +472,14 @@ pub fn run() {
             }
 
             // The device identity (distinct per test instance). Loaded AFTER the
-            // logger so its failure is captured: an unreadable keychain fails
+            // logger so its failure is captured: an unreadable store fails
             // startup rather than mint a new Device ID (see
-            // `Identity::load_or_create`).
-            let identity = match Identity::load_or_create(instance.as_deref()) {
+            // `Identity::load_or_create`). On macOS it is a file in the data
+            // folder; elsewhere, the OS credential store.
+            let identity = match Identity::load_or_create(
+                instance.as_deref(),
+                &paths::data_dir(app.handle()),
+            ) {
                 Ok(id) => Arc::new(id),
                 Err(e) => {
                     log::error!(

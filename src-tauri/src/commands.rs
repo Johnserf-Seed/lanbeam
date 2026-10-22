@@ -1347,7 +1347,8 @@ pub fn get_log_dir(app: AppHandle) -> Result<String, LanBeamError> {
 ///
 /// Contents: app version, OS, a settings snapshot, network interfaces, and the
 /// tail of the current log file. Deliberately NO key material — the identity's
-/// private key lives only in the OS keychain and is never read here; the
+/// private key (the OS credential store; `identity.key` in the DATA folder on
+/// macOS) is never read here, and nothing here reads the data folder; the
 /// settings snapshot must likewise stay free of secrets if any are ever added.
 #[tauri::command]
 pub fn export_diagnostics(
@@ -2022,7 +2023,7 @@ pub fn set_strip_exif(app: AppHandle, state: State<'_, AppState>, enabled: bool)
 ///
 /// Order matters: (1) go invisible NOW — discoverable off in-memory plus one
 /// best-effort tombstone broadcast — so peers drop the old ID immediately
-/// instead of showing a ghost until expiry; (2) delete the keychain identity,
+/// instead of showing a ghost until expiry; (2) delete the stored identity,
 /// the only step that can fail, placed before anything irreversible happens;
 /// (3) clear the trust store, persisted before the restart; (4) restart —
 /// the identity is snapshotted at startup and threaded through the live
@@ -2036,7 +2037,7 @@ pub async fn reset_identity(
     // (1) In-memory only, deliberately NOT persisted: the next launch (fresh
     // identity) comes up with whatever discoverability the user configured.
     // Capture the PRIOR discoverable so step (2) can roll it back if the
-    // keychain delete fails — otherwise the box goes silently invisible
+    // identity delete fails — otherwise the box goes silently invisible
     // (tombstone already out, announces stopped) while the UI still shows
     // 可被发现. A poisoned lock degrades to an empty tombstone name — removal is
     // keyed on the id, and a recovery action must not be blocked by a lock.
@@ -2061,7 +2062,10 @@ pub async fn reset_identity(
     // so the announce loop re-announces within one 2s tick and peers that
     // consumed the best-effort tombstone re-add the device. The identity itself
     // is intact, so the UI can simply show the error and stop.
-    if let Err(e) = identity::delete_persisted(crate::instance_id().as_deref()) {
+    if let Err(e) = identity::delete_persisted(
+        crate::instance_id().as_deref(),
+        &crate::paths::data_dir(&app),
+    ) {
         if let Ok(mut s) = state.settings.write() {
             s.discoverable = prev_disc;
         }
@@ -2089,7 +2093,7 @@ pub async fn reset_identity(
         let _ = tauri::async_runtime::spawn_blocking(move || snap.persist()).await;
     }
 
-    log::info!("identity reset: keychain entry deleted, trust cleared; restarting");
+    log::info!("identity reset: stored identity deleted, trust cleared; restarting");
     // (4) Mark quit intent so close-to-tray can never intercept teardown.
     state.quitting.store(true, Ordering::Relaxed);
     app.restart()

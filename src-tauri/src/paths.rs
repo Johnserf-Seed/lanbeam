@@ -16,9 +16,11 @@
 //! | macOS | `~/Library/Application Support/LanBeam` | `~/Library/Logs/LanBeam` |
 //! | Linux | `~/.local/share/LanBeam` | `~/.config/LanBeam/logs` |
 //!
-//! The DEVICE IDENTITY is not here and never was — the X25519 private key lives in
-//! the OS keychain under the service name `LanBeam` (see [`crate::identity`]), so
-//! none of this can lose it. What IS here is the trust store, which is why
+//! The DEVICE IDENTITY is here only on macOS, as `identity.key` (0600 — see
+//! [`crate::identity`] for why not the keychain); elsewhere it lives in the OS
+//! credential store under the service name `LanBeam`. It was never in the old
+//! bundle-id folder, so the migration has nothing of it to move. What the
+//! migration DOES move is the trust store, which is why
 //! [`migrate_from_identifier_dir`] exists rather than a rename and a shrug.
 
 use std::path::PathBuf;
