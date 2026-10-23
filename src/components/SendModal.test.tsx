@@ -187,3 +187,37 @@ describe("SendModal · scrim drag-guard", () => {
     expect(useOverlays.getState().send).toBeNull();
   });
 });
+
+describe("SendModal · closing keeps or drops the selection", () => {
+  it("a click outside keeps it: reopening resumes at the same step", () => {
+    useData.setState({ devices: [mini, nano] });
+    useOverlays.getState().openSend(null, [fileA, fileB]);
+    useOverlays.getState().patchSend({ sel: ["beta.pdf"], step: "device" });
+    const { container } = renderUI(<SendModal />);
+
+    const scrim = container.querySelector(".scrim") as HTMLElement;
+    fireEvent.mouseDown(scrim);
+    fireEvent.click(scrim);
+    expect(useOverlays.getState().send).toBeNull();
+
+    // reopened the plain way (the header's 发送文件 button)
+    useOverlays.getState().openSend(null, [fileA, fileB]);
+    expect(useOverlays.getState().send?.step).toBe("device");
+    expect(useOverlays.getState().send?.sel).toEqual(["beta.pdf"]);
+  });
+
+  it("the × drops it: reopening starts over", () => {
+    useData.setState({ devices: [mini, nano] });
+    useOverlays.getState().openSend(null, [fileA, fileB]);
+    useOverlays.getState().patchSend({ sel: ["beta.pdf"], step: "device" });
+    renderUI(<SendModal />);
+
+    fireEvent.click(screen.getByRole("button", { name: "×" }));
+    expect(useOverlays.getState().send).toBeNull();
+    expect(useOverlays.getState().sendDraft).toBeNull();
+
+    useOverlays.getState().openSend(null, [fileA, fileB]);
+    expect(useOverlays.getState().send?.step).toBe("files");
+    expect(useOverlays.getState().send?.sel).toEqual([]);
+  });
+});

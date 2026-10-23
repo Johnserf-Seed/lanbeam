@@ -65,6 +65,7 @@ export default function SendModal() {
   const send = useOverlays((s) => s.send);
   const patchSend = useOverlays((s) => s.patchSend);
   const closeSend = useOverlays((s) => s.closeSend);
+  const dismissSend = useOverlays((s) => s.dismissSend);
   const setShare = useOverlays((s) => s.setShare);
   const setFpAlert = useOverlays((s) => s.setFpAlert);
   const devices = useData((s) => s.devices);
@@ -75,7 +76,8 @@ export default function SendModal() {
   /** epoch ms when startSend fired — matches live transfers to pending rows */
   const flowStart = useRef(0);
   // Guard against a slip-off press (mousedown inside, mouseup on scrim) closing
-  // the modal and discarding the send config — matches the other four modals.
+  // the modal — matches the other four modals. (A real click outside no longer
+  // costs the selection either: it is kept as a draft, see onDismiss.)
   const scrimDown = useRef(false);
   /** device card under the pointer — declarative so re-renders keep the
    *  hover border (imperative style writes were clobbered by React). */
@@ -177,9 +179,17 @@ export default function SendModal() {
   ];
 
   /* ── actions ──────────────────────────────────────────────────────────── */
+  /** × — the deliberate close: the selection goes with it. */
   const onClose = () => {
     if (step === "waiting") showToast(t("send.canceledToast"));
     closeSend();
+  };
+  /** A click outside — easily a slip. The selection is kept, so reopening the
+   *  send resumes at this step (the store's dismissSend); once requests are out
+   *  there is nothing left to keep. */
+  const onDismiss = () => {
+    if (step === "waiting") showToast(t("send.canceledToast"));
+    dismissSend();
   };
 
   const toggleSel = (key: string) =>
@@ -266,7 +276,7 @@ export default function SendModal() {
         scrimDown.current = e.target === e.currentTarget;
       }}
       onClick={() => {
-        if (scrimDown.current) onClose();
+        if (scrimDown.current) onDismiss();
       }}
     >
       {/* biome-ignore lint/a11y/noStaticElementInteractions: onClick only stops propagation so clicks inside the modal don't reach the backdrop — not an interactive control */}
