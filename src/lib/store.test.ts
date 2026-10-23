@@ -29,7 +29,7 @@ import {
   useTrust,
   visibilityOf,
 } from "./store";
-import type { OutgoingMeta, TrustRecord, UITransfer } from "./store";
+import type { OutgoingMeta, SendFile, TrustRecord, UITransfer } from "./store";
 
 // ── snapshots for reset ────────────────────────────────────────────────────
 const prefs0 = { ...usePrefs.getState() };
@@ -1118,5 +1118,76 @@ describe("指纹变化告警:名字必须真的说明问题", () => {
     expect(out.find((d) => d.deviceId === "oldkey")?.fpChanged).toEqual({
       newDeviceId: "newkey",
     });
+  });
+});
+
+describe("useOverlays send draft (resume after a click outside)", () => {
+  const a: SendFile = { path: "/x/a.txt", name: "a.txt", ext: "TXT" };
+  const b: SendFile = { path: "/x/b.txt", name: "b.txt", ext: "TXT" };
+  const c: SendFile = { path: "/x/c.txt", name: "c.txt", ext: "TXT" };
+  const ov = () => useOverlays.getState();
+
+  it("reopens a dismissed send at the same step, with the same selection", () => {
+    ov().openSend(null, [a, b]);
+    ov().patchSend({ sel: ["/x/b.txt"], step: "device", deviceIds: ["dev-1"] });
+    ov().dismissSend();
+    expect(ov().send).toBeNull();
+
+    ov().openSend(null, [a, b, c]); // recents grew in the meantime
+    const s = ov().send;
+    expect(s?.step).toBe("device");
+    expect(s?.sel).toEqual(["/x/b.txt"]);
+    expect(s?.deviceIds).toEqual(["dev-1"]);
+    // the draft's own files first, then what's new in recents — no duplicates
+    expect(s?.pool.map((f) => f.name)).toEqual(["a.txt", "b.txt", "c.txt"]);
+    expect(ov().sendDraft).toBeNull(); // consumed by the resume
+  });
+
+  it("resumes a device's draft when that same device is clicked again", () => {
+    ov().openSend("dev-1", [a]);
+    ov().patchSend({ sel: ["/x/a.txt"], step: "confirm" });
+    ov().dismissSend();
+    ov().openSend("dev-1", [a]);
+    expect(ov().send?.step).toBe("confirm");
+    expect(ov().send?.sel).toEqual(["/x/a.txt"]);
+  });
+
+  it("forgets the selection on × (closeSend)", () => {
+    ov().openSend(null, [a, b]);
+    ov().patchSend({ sel: ["/x/a.txt"], step: "device" });
+    ov().closeSend();
+    expect(ov().sendDraft).toBeNull();
+    ov().openSend(null, [a, b]);
+    expect(ov().send?.step).toBe("files");
+    expect(ov().send?.sel).toEqual([]);
+  });
+
+  it("keeps nothing once the requests are out (waiting)", () => {
+    ov().openSend(null, [a]);
+    ov().patchSend({ sel: ["/x/a.txt"], step: "waiting" });
+    ov().dismissSend();
+    expect(ov().sendDraft).toBeNull();
+  });
+
+  it("starts over for specific files, or for another device", () => {
+    // another device than the draft's
+    ov().openSend("dev-1", [a]);
+    ov().patchSend({ sel: ["/x/a.txt"], step: "confirm" });
+    ov().dismissSend();
+    ov().openSend("dev-2", [a]);
+    expect(ov().send?.step).toBe("files");
+    expect(ov().send?.deviceIds).toEqual(["dev-2"]);
+    expect(ov().send?.sel).toEqual([]);
+    expect(ov().sendDraft).toBeNull();
+
+    // files handed in (a drop, "send again") are a new send
+    ov().closeSend();
+    ov().openSend(null, [a]);
+    ov().patchSend({ sel: ["/x/a.txt"], step: "device" });
+    ov().dismissSend();
+    ov().openSend(null, [a], [c]);
+    expect(ov().send?.step).toBe("files");
+    expect(ov().send?.sel).toEqual(["/x/c.txt"]);
+    expect(ov().sendDraft).toBeNull();
   });
 });
