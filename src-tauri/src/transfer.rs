@@ -180,10 +180,10 @@ pub async fn send_text(
     to_clipboard: Option<bool>,
 ) -> Result<()> {
     let frame = protocol::encode_control(&AppMessage::TextSend { text, to_clipboard })?;
+    // Escaping can push a text that is under MAX_TEXT_BYTES past the frame (a
+    // `"` or newline costs 2 bytes, a control char 6), so this is a separate check.
     if frame.len() > MAX_PLAINTEXT {
-        return Err(LanBeamError::Protocol(
-            "quick text is too large to send in one frame".into(),
-        ));
+        return Err(LanBeamError::TextTooLong);
     }
     let acked = tokio::time::timeout(MANIFEST_TIMEOUT, async {
         session.write_msg(&frame).await?;
@@ -3808,8 +3808,16 @@ mod tests {
         let huge = "z".repeat(MAX_TEXT_BYTES * 4);
         let res = send_text(&mut s, huge, Some(false)).await;
         assert!(
-            matches!(res, Err(LanBeamError::Protocol(_))),
+            matches!(res, Err(LanBeamError::TextTooLong)),
             "oversized text must be rejected: {res:?}"
+        );
+        // Within the raw byte cap, but every `"` escapes to two bytes — the frame
+        // overflows, and that must surface as the same TextTooLong, not Protocol.
+        let quoted = "\"".repeat(MAX_TEXT_BYTES);
+        let res = send_text(&mut s, quoted, Some(false)).await;
+        assert!(
+            matches!(res, Err(LanBeamError::TextTooLong)),
+            "escape-heavy text must be rejected: {res:?}"
         );
 
         drop(s);

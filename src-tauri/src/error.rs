@@ -26,6 +26,13 @@ pub enum LanBeamError {
     /// The peer is rate-limiting quick text from this source.
     #[error("the peer is throttling quick text")]
     TextThrottled,
+    /// A quick text is over the size cap — raw bytes past `MAX_TEXT_BYTES`, or a
+    /// JSON-escaped frame past one Noise message. Raised BEFORE any byte goes out
+    /// (usually before the socket is even opened), so it is kept apart from
+    /// `Protocol`: the UI used to show "connection failed, retry" for it, and no
+    /// retry of the same text can ever succeed.
+    #[error("quick text is too long")]
+    TextTooLong,
     /// The address dialed answered with THIS device's own key. You cannot pair
     /// with, trust, or send to yourself — and an entry for yourself in the peer
     /// list is uniquely poisonous: discovery drops its own announces (so it can
@@ -184,6 +191,10 @@ mod tests {
             "integrity: hash"
         );
         assert_eq!(LanBeamError::Timeout.to_string(), "timeout");
+        assert_eq!(
+            LanBeamError::TextTooLong.to_string(),
+            "quick text is too long"
+        );
     }
 
     #[test]
@@ -237,5 +248,9 @@ mod tests {
 
         let unit = serde_json::to_value(LanBeamError::Timeout).unwrap();
         assert_eq!(unit["kind"], "Timeout");
+
+        // The UI keys its "text too long" message off this exact tag (sendops.ts).
+        let long = serde_json::to_value(LanBeamError::TextTooLong).unwrap();
+        assert_eq!(long["kind"], "TextTooLong");
     }
 }

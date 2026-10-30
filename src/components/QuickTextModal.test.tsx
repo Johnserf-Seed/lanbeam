@@ -134,4 +134,38 @@ describe("QuickTextModal", () => {
     // still open — nothing sent
     expect(useOverlays.getState().qtOpen).toBe(true);
   });
+
+  it("shows the byte count against the cap once there is text", async () => {
+    const user = userEvent.setup();
+    useData.setState({ devices: [device()] });
+    useOverlays.setState({ qtOpen: true });
+    renderUI(<QuickTextModal />);
+
+    // empty draft: no counter
+    expect(screen.queryByText(/\/ 60 KB/)).toBeNull();
+    await user.type(
+      screen.getByPlaceholderText(i18n.t("qt.placeholder")),
+      "hi",
+    );
+    expect(screen.getByText("1 KB / 60 KB")).toBeTruthy();
+    expect(screen.queryByText(new RegExp(i18n.t("qt.tooLong")))).toBeNull();
+  });
+
+  it("refuses an over-long text before it reaches the backend", async () => {
+    const user = userEvent.setup();
+    useData.setState({ devices: [device()] });
+    // ~66 KB of CJK — under 60K characters, over the 60 KiB byte cap. Staged as
+    // a deep-link prefill so the draft lands without typing 20k keystrokes.
+    useOverlays.setState({ qtOpen: true, qtPrefill: "字".repeat(22_000) });
+    renderUI(<QuickTextModal />);
+
+    expect(
+      screen.getByText(`${i18n.t("qt.tooLong")} · 64 KB / 60 KB`),
+    ).toBeTruthy();
+    const btn = screen.getByRole("button", { name: i18n.t("qt.send") });
+    expect(btn).toHaveClass("off");
+    await user.click(btn);
+    expect(sendTextTracked).not.toHaveBeenCalled();
+    expect(useOverlays.getState().qtOpen).toBe(true);
+  });
 });
