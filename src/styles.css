@@ -380,6 +380,12 @@ select.input:focus-visible {
   background: var(--panel);
   color: var(--ink2);
 }
+.seg-item:disabled {
+  cursor: default;
+}
+.seg-item:disabled:not(.active) {
+  opacity: 0.55;
+}
 
 /* ── toggle switch ───────────────────────────────────────────────────── */
 

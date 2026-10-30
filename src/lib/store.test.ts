@@ -854,19 +854,34 @@ describe("useToast", () => {
 // ── useOverlays ──────────────────────────────────────────────────────────────
 describe("useOverlays.setPair / pairPrefill", () => {
   it("stashes a prefill on open and clears it on close", () => {
-    useOverlays.getState().setPair(true, "lanbeam://pair?x=1");
+    useOverlays.getState().setPair(true, { link: "lanbeam://pair?x=1" });
     expect(useOverlays.getState().pairOpen).toBe(true);
-    expect(useOverlays.getState().pairPrefill).toBe("lanbeam://pair?x=1");
+    expect(useOverlays.getState().pairPrefill).toEqual({
+      link: "lanbeam://pair?x=1",
+    });
     useOverlays.getState().setPair(false);
     expect(useOverlays.getState().pairOpen).toBe(false);
     expect(useOverlays.getState().pairPrefill).toBeNull();
   });
 
   it("opening without a prefill leaves it null", () => {
+    useOverlays.getState().setPair(true, { addr: "10.0.0.2" });
+    // A later plain open (tray, header) must not inherit an older prefill.
     useOverlays.getState().setPair(true);
     expect(useOverlays.getState().pairPrefill).toBeNull();
-    useOverlays.getState().setPairPrefill("later");
-    expect(useOverlays.getState().pairPrefill).toBe("later");
+  });
+
+  it("stages a NEW object per call, so an open form sees a repeated link", () => {
+    // The form applies each prefill once, by identity. The same link opened
+    // twice must still arrive twice — the user clicked it twice.
+    const p = { link: "lanbeam://pair?a=10.0.0.2&c=111111" };
+    useOverlays.getState().setPair(true, p);
+    const first = useOverlays.getState().pairPrefill;
+    useOverlays.getState().setPair(true, p);
+    const second = useOverlays.getState().pairPrefill;
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    expect(second).not.toBe(p);
   });
 });
 

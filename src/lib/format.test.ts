@@ -3,7 +3,14 @@
 // (and an explicit `now`), so no timers or IPC are involved.
 import { beforeEach, describe, expect, it } from "vitest";
 import i18n from "../i18n";
-import { baseName, extOf, fmtBytes, fmtWhen, whenGroup } from "./format";
+import {
+  baseName,
+  extOf,
+  fmtBytes,
+  fmtCountdown,
+  fmtWhen,
+  whenGroup,
+} from "./format";
 
 const MB = 1048576;
 
@@ -143,5 +150,20 @@ describe("extOf", () => {
   it("falls back to FILE when there is no usable extension", () => {
     expect(extOf("noext")).toBe("FILE");
     expect(extOf(".hidden")).toBe("FILE");
+  });
+});
+
+describe("fmtCountdown", () => {
+  it("renders m:ss, rounding UP so it never reads 0:00 while still valid", () => {
+    expect(fmtCountdown(600_000)).toBe("10:00");
+    expect(fmtCountdown(581_000)).toBe("9:41");
+    expect(fmtCountdown(59_001)).toBe("1:00");
+    expect(fmtCountdown(1)).toBe("0:01");
+  });
+
+  it("is 0:00 once expired (or for nonsense)", () => {
+    expect(fmtCountdown(0)).toBe("0:00");
+    expect(fmtCountdown(-5_000)).toBe("0:00");
+    expect(fmtCountdown(Number.NaN)).toBe("0:00");
   });
 });

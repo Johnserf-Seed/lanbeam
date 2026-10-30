@@ -1313,6 +1313,11 @@ export type SendState = {
   startedTrusted: number;
 };
 
+/** What opens the pairing form on its JOIN view: a pasted/opened
+ *  `lanbeam://pair` link (unpacked by the form), or just an address — with the
+ *  device's name when the caller knows it (the fingerprint alert does). */
+export type PairPrefill = { link: string } | { addr: string; name?: string };
+
 /** The remembered device whose name has reappeared under a different key.
  *
  *  It used to carry a `step` and a `sas`, for a "re-verify and restore trust"
@@ -1345,16 +1350,16 @@ interface OverlayState {
   sendDraft: SendState | null;
   detailId: string | null;
   pairOpen: boolean;
-  /** A `lanbeam://pair` link captured from a deep link, staged for the pairing
-   *  modal to pre-fill its join field. Cleared once consumed / on close. */
-  pairPrefill: string | null;
+  /** What to pre-fill the pairing form's JOIN view with, staged by whoever
+   *  opened it: a `lanbeam://pair` link (deep link), or a bare address (a
+   *  `lanbeam://connect` link, the fingerprint alert). A fresh object per call:
+   *  the form applies each object once, by identity, so a second link reaches
+   *  an already-open form even when it is the same link. Cleared on close. */
+  pairPrefill: PairPrefill | null;
   qtOpen: boolean;
   /** Body staged for quick-text by a `lanbeam://text?t=…` deep link. Cleared
    *  once consumed / on close. The user still picks a device and sends. */
   qtPrefill: string | null;
-  /** Address staged for the Devices page's IP-direct field by a
-   *  `lanbeam://connect?a=…` deep link. A PRE-FILL only — it never dials. */
-  connectPrefill: string | null;
   shareOpen: boolean;
   licenseOpen: boolean;
   fpAlert: FpAlert | null;
@@ -1372,10 +1377,8 @@ interface OverlayState {
   /** Close but keep the selection as `sendDraft` (a click outside). */
   dismissSend: () => void;
   setDetail: (id: string | null) => void;
-  setPair: (v: boolean, prefill?: string | null) => void;
-  setPairPrefill: (v: string | null) => void;
+  setPair: (v: boolean, prefill?: PairPrefill | null) => void;
   setQt: (v: boolean, prefill?: string | null) => void;
-  setConnectPrefill: (v: string | null) => void;
   setShare: (v: boolean) => void;
   setLicense: (v: boolean) => void;
   setFpAlert: (v: FpAlert | null) => void;
@@ -1391,7 +1394,6 @@ export const useOverlays = create<OverlayState>((set) => ({
   pairPrefill: null,
   qtOpen: false,
   qtPrefill: null,
-  connectPrefill: null,
   shareOpen: false,
   licenseOpen: false,
   fpAlert: null,
@@ -1456,14 +1458,16 @@ export const useOverlays = create<OverlayState>((set) => ({
       sendDraft: s.send && s.send.step !== "waiting" ? s.send : null,
     })),
   setDetail: (detailId) => set({ detailId }),
-  // Opening with a prefill stashes the pairing link for the modal to consume;
-  // closing (or opening without one) clears it so a later manual open is clean.
+  // Opening with a prefill stages it for the form; closing (or opening without
+  // one) clears it so a later manual open is clean. The copy makes every call a
+  // new object, which is what tells an ALREADY-open form to look again.
   setPair: (pairOpen, prefill = null) =>
-    set({ pairOpen, pairPrefill: pairOpen ? prefill : null }),
-  setPairPrefill: (pairPrefill) => set({ pairPrefill }),
+    set({
+      pairOpen,
+      pairPrefill: pairOpen && prefill ? { ...prefill } : null,
+    }),
   setQt: (qtOpen, prefill = null) =>
     set({ qtOpen, qtPrefill: qtOpen ? prefill : null }),
-  setConnectPrefill: (connectPrefill) => set({ connectPrefill }),
   setShare: (shareOpen) => set({ shareOpen }),
   setLicense: (licenseOpen) => set({ licenseOpen }),
   setFpAlert: (fpAlert) => set({ fpAlert }),

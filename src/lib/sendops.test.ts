@@ -42,6 +42,7 @@ import {
   revealFile,
   sendTextTracked,
   sendToDevice,
+  transferErrText,
 } from "./sendops";
 import { useRecents, useToast, useTransfers } from "./store";
 import i18n from "../i18n";
@@ -95,6 +96,23 @@ describe("errText", () => {
     expect(out).not.toContain("not a valid address");
   });
 
+  it("gives pairing failures their own words, not 'the connection failed'", () => {
+    // These used to arrive as Protocol ("连接失败，请重试") or Io ("文件或磁盘出错")
+    // — a wrong code and an unreachable peer both read as something else.
+    const cases: [string, string][] = [
+      ["PairRejected", "errors.pairRejected"],
+      ["InvalidAddress", "errors.invalidAddress"],
+      ["PairCodeMissing", "errors.pairCodeMissing"],
+      ["Unreachable", "errors.unreachable"],
+    ];
+    for (const [kind, key] of cases) {
+      const out = errText({ kind, message: "internal" });
+      expect(out).toBe(i18n.t(key));
+      expect(out).not.toBe(i18n.t("errors.protocol"));
+      expect(out).not.toBe(i18n.t("errors.io"));
+    }
+  });
+
   it("falls back to a generic localized message for unknown/absent kinds", () => {
     const generic = i18n.t("errors.generic");
     expect(errText({ kind: "SomethingNew" })).toBe(generic);
@@ -104,6 +122,18 @@ describe("errText", () => {
     expect(errText(undefined)).toBe(generic);
     expect(errText(42)).toBe(generic);
     expect(errText({})).toBe(generic);
+  });
+});
+
+describe("transferErrText", () => {
+  it("says an undialable peer is unreachable, not a disk error", () => {
+    expect(transferErrText("unreachable")).toBe(i18n.t("errors.unreachable"));
+    expect(transferErrText("io")).toBe(i18n.t("errors.io"));
+  });
+
+  it("never shows a code it doesn't know — the generic line instead", () => {
+    expect(transferErrText("brand_new")).toBe(i18n.t("errors.generic"));
+    expect(transferErrText(undefined)).toBe(i18n.t("errors.generic"));
   });
 });
 

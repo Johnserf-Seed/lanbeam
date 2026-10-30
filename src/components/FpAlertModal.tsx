@@ -92,13 +92,20 @@ export default function FpAlertModal() {
     close();
   };
 
-  /* Pair with the new key, like the new device it is. PairModal shows the SAS on
-     both screens and records trust only when a human says they match.
+  /* Pair with the new key, like the new device it is. PairModal opens on its
+     join view with this device's address (and PORT — it may not listen on the
+     default) filled in; the user still needs the code its screen shows, and
+     trust is recorded only when a human says the two SASes match.
      `setPair(open, prefill)` in ONE call — the two-arg form exists because
      `setPair(true)` alone defaults the prefill to null and would wipe it. */
   const pair = () => {
     close();
-    setPair(true, newDevice.address);
+    setPair(true, {
+      addr: newDevice.port
+        ? `${newDevice.address}:${newDevice.port}`
+        : newDevice.address,
+      name: newDevice.name,
+    });
   };
 
   return (

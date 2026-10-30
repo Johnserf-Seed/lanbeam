@@ -1,4 +1,4 @@
-import { HashRouter, Routes, Route } from "react-router-dom";
+import { HashRouter, Navigate, Routes, Route } from "react-router-dom";
 import AppShell from "./components/AppShell";
 import DevicesPage from "./pages/DevicesPage";
 import TransfersPage from "./pages/TransfersPage";
@@ -16,6 +16,12 @@ export default function App() {
           <Route path="inbox" element={<InboxPage />} />
           <Route path="trusted" element={<TrustedPage />} />
           <Route path="settings" element={<SettingsPage />} />
+          {/* Any other path lands on Devices. It must exist, and it must sit
+              INSIDE the layout route: with no match at all, <Routes> renders
+              nothing — AppShell included, and with it the sidebar, the header
+              and every backend event listener (an incoming request would then
+              time out unseen). One stray `#/devices` was a blank app. */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Route>
       </Routes>
     </HashRouter>

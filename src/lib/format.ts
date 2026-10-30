@@ -95,3 +95,11 @@ export function whenGroup(
   if (diff === 1) return "yday";
   return "earlier";
 }
+
+/** `m:ss` of a countdown (the pairing code's remaining life). Rounds UP, so the
+ *  display never reads 0:00 while the code still works; ≤ 0 is "0:00". */
+export function fmtCountdown(ms: number): string {
+  if (!(ms > 0)) return "0:00";
+  const sec = Math.ceil(ms / 1000);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+}

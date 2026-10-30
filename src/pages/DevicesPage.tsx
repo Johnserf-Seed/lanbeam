@@ -108,18 +108,6 @@ export default function DevicesPage() {
     }
   };
 
-  /* ── `lanbeam://connect?a=…` deep link ──────────────────────────────────
-     A link may STAGE an address here — it may never dial one. We drop it into
-     the field, consume the stage (so a later visit starts clean) and stop: the
-     user reads the address and presses 「IP 直连」 themselves. An untrusted link
-     that could connect on its own would be an attacker's connect button. */
-  const connectPrefill = useOverlays((s) => s.connectPrefill);
-  useEffect(() => {
-    if (!connectPrefill) return;
-    setIpTry(connectPrefill);
-    useOverlays.getState().setConnectPrefill(null);
-  }, [connectPrefill]);
-
   /* ── clock tick so「刚刚发现」expires (60 s window) ─────────────────── */
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
