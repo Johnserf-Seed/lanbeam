@@ -87,6 +87,7 @@ async fn duplicate_id_rejected_while_live_and_freed_after_completion() {
         identity: receiver_identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.clone())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),

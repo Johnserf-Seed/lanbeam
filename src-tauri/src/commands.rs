@@ -125,7 +125,10 @@ pub struct NetworkInfo {
 #[tauri::command]
 pub fn get_network_info() -> Vec<NetworkInfo> {
     let mut ifaces = discovery::interfaces::enumerate();
-    ifaces.sort_by_key(|i| i.ip);
+    // Same order `first_lan_ip` picks from, so the address the sidebar shows
+    // first is the one the pair link / invite carries (real LAN ranges before
+    // virtual-adapter ranges; by IP within a rank, for a stable list).
+    ifaces.sort_by_key(|i| (lan_ip_rank(i.ip), i.ip));
     ifaces
         .into_iter()
         .map(|i| NetworkInfo {
@@ -177,12 +180,21 @@ pub async fn connect_device(
 
 // ── pairing + IP direct connect (M7.1/7.2) ─────────────────────────────
 
-/// A fresh pairing invitation: the 6-digit code plus a QR/deep-link payload
-/// another device can scan to join.
+/// A fresh pairing invitation: the 6-digit code, the pair link (`qr` — the
+/// same string a QR would carry), the address the other side must dial, and
+/// when the code stops working.
 #[derive(Serialize)]
 pub struct PairingInvite {
     pub code: String,
     pub qr: String,
+    /// `ip:port` the joiner types next to the code — the SAME endpoint the link's
+    /// `a=`/`p=` carry, so what the host screen shows and what the link says can
+    /// never disagree. `None` when this machine has no LAN address at all (then
+    /// there is nothing to invite with, and the link carries no `a=` either).
+    pub addr: Option<String>,
+    /// Unix milliseconds at which the code expires, for the UI's countdown.
+    #[serde(rename = "expiresAt")]
+    pub expires_at: u64,
 }
 
 /// The peer a pairing or IP-direct handshake reached: its Device ID, friendly
@@ -195,19 +207,22 @@ pub struct ConnectResult {
     pub sas: String,
 }
 
-/// Start pairing: show a fresh 6-digit code (valid for 10 minutes) plus a QR
-/// payload another device can scan. Only one code is active at a time — calling
-/// this again replaces the previous one. Pair by entering the code (or scanning
-/// the QR) on the other device; cancel it with `cancel_pairing`.
+/// Start pairing: mint a fresh 6-digit code (valid for 10 minutes) and return
+/// it with this device's dial address and the pair link that packs both. Only
+/// one code is active at a time — calling this again replaces the previous one.
+/// The other device joins by entering the address + code (or pasting the link);
+/// cancel it with `cancel_pairing`.
 #[tauri::command]
 pub fn start_pairing(state: State<'_, AppState>) -> PairingInvite {
     let code = fresh_pairing_code();
     let expires = Instant::now() + crate::consts::PAIRING_CODE_TTL;
+    let expires_at = std::time::SystemTime::now() + crate::consts::PAIRING_CODE_TTL;
     // Single-active: replace whatever was minted before.
     if let Ok(mut slot) = state.pairing.session.lock() {
         *slot = Some(PairingSession {
             code: code.clone(),
             expires,
+            expires_at,
         });
     }
     let device_id = state.identity.device_id();
@@ -225,7 +240,17 @@ pub fn start_pairing(state: State<'_, AppState>) -> PairingInvite {
     let ip = first_lan_ip(filter);
     let port = state.tcp_port.load(Ordering::Relaxed);
     let qr = build_pair_uri(&device_id, &name, ip, port, &code);
-    PairingInvite { code, qr }
+    let addr = ip.map(|ip| format!("{ip}:{port}"));
+    let expires_at = expires_at
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    PairingInvite {
+        code,
+        qr,
+        addr,
+        expires_at,
+    }
 }
 
 /// Cancel the active pairing code so it can no longer be redeemed. Safe to call
@@ -253,8 +278,16 @@ pub fn take_pending_deep_link(state: State<'_, AppState>) -> Option<String> {
 }
 
 /// Redeem a device that is showing a pairing code. Pass its address (`ip:port`,
-/// or the scanned `lanbeam://pair…` link) and the 6-digit code; returns the
-/// peer's Device ID, name, and the SAS. A wrong or expired code errors.
+/// or the pasted `lanbeam://pair…` link) and the 6-digit code; returns the
+/// peer's Device ID, name, and the SAS. A wrong or expired code errors with
+/// `PairRejected`; an unparseable address with `InvalidAddress`; a dial that
+/// never connects with `Unreachable`.
+///
+/// `expected_id`, when the UI has it (the `d=` of a pasted link), PINS the
+/// handshake: the device that answers must be the one the link named, or the
+/// connect fails with `IdentityMismatch` before any code is sent. A link the
+/// host generated says who the host is — not using that would hand the SAS
+/// compare a job the link already did.
 ///
 /// This GRANTS NO TRUST, by design. The SAS is the only thing standing between a
 /// pairing and a machine-in-the-middle, and a code nobody read is not a check —
@@ -266,18 +299,31 @@ pub async fn join_by_code(
     state: State<'_, AppState>,
     addr: String,
     code: String,
+    expected_id: Option<String>,
 ) -> Result<ConnectResult, LanBeamError> {
-    let target = parse_dial_target(&addr)
-        .ok_or_else(|| LanBeamError::Protocol(format!("not a valid address: {addr}")))?;
-    // Prefer an explicitly-typed code; fall back to one carried in a scanned link.
+    let target =
+        parse_dial_target(&addr).ok_or_else(|| LanBeamError::InvalidAddress(addr.trim().into()))?;
+    // Prefer an explicitly-typed code; fall back to one carried in a pasted link.
     let code = pick_code(code, target.code);
     if code.is_empty() {
-        return Err(LanBeamError::Protocol("no pairing code provided".into()));
+        return Err(LanBeamError::PairCodeMissing);
     }
     let local_private = *state.identity.private_bytes();
-    // TOFU: no pinned key — the identity is learned from the handshake and the
-    // returned SAS is the out-of-band MITM check the UI surfaces.
-    let mut sess = transport::connect_unpinned(target.ip, target.port, &local_private).await?;
+    // Pin the handshake to the device the link named when we know it (the UI's
+    // `expected_id`, or the link's own `d=`); otherwise TOFU — the identity is
+    // learned from the handshake and the returned SAS is the out-of-band MITM
+    // check the UI surfaces. An `expected_id` that is not a device id at all is
+    // ignored rather than fatal: it only ever tightens the check.
+    let expected = expected_id
+        .as_deref()
+        .and_then(transport::decode_device_id)
+        .or(target.expected);
+    let mut sess = match expected {
+        Some(expected) => {
+            transport::connect(target.ip, target.port, &local_private, expected).await?
+        }
+        None => transport::connect_unpinned(target.ip, target.port, &local_private).await?,
+    };
     let sas = sess.sas().to_string();
     let device_id = URL_SAFE_NO_PAD.encode(sess.remote_static());
     // Pairing with yourself is not a pairing. Bail before the manual table (below)
@@ -291,11 +337,15 @@ pub async fn join_by_code(
     if peer.version < crate::consts::TRANSFER_V2 {
         return Err(LanBeamError::PeerTooOld("peer too old for pairing".into()));
     }
-    transfer::send_pair_request(&mut sess, &code).await?;
+    // Tell the host our own listen port so it can record us as a dialable peer
+    // (pairing is for peers discovery cannot see — in BOTH directions).
+    let my_port = state.tcp_port.load(Ordering::Relaxed);
+    transfer::send_pair_request(&mut sess, &code, Some(my_port)).await?;
     let (accept, peer_name, reason) = transfer::recv_pair_confirm(&mut sess).await?;
     if !accept {
-        // Surface the responder's reason (wrong/expired code) to the UI.
-        return Err(LanBeamError::Protocol(
+        // Its own kind, so the UI can say "wrong or expired code" instead of
+        // "the connection failed"; the host's reason token rides in the message.
+        return Err(LanBeamError::PairRejected(
             reason.unwrap_or_else(|| "pairing rejected".into()),
         ));
     }
@@ -343,8 +393,8 @@ pub async fn connect_by_addr(
     state: State<'_, AppState>,
     addr: String,
 ) -> Result<ConnectResult, LanBeamError> {
-    let target = parse_dial_target(&addr)
-        .ok_or_else(|| LanBeamError::Protocol(format!("not a valid address: {addr}")))?;
+    let target =
+        parse_dial_target(&addr).ok_or_else(|| LanBeamError::InvalidAddress(addr.trim().into()))?;
     let local_private = *state.identity.private_bytes();
     let mut sess = transport::connect_unpinned(target.ip, target.port, &local_private).await?;
     let sas = sess.sas().to_string();
@@ -389,20 +439,32 @@ pub async fn connect_by_addr(
 }
 
 /// A parsed dial target from `join_by_code` / `connect_by_addr`: the IPv4
-/// endpoint plus any pairing code embedded in a scanned link.
+/// endpoint plus whatever a pasted pair link carried along.
 struct DialTarget {
     ip: Ipv4Addr,
     port: u16,
     /// The `c=` code from a `lanbeam://pair` link, if present.
     code: Option<String>,
+    /// The `d=` Device ID from a `lanbeam://pair` link, decoded, if present and
+    /// well-formed. `join_by_code` pins the handshake to it.
+    expected: Option<[u8; 32]>,
 }
 
 /// Parse a dial target from either a plain `ip[:port]` or a `lanbeam://pair?…`
-/// deep link. `None` for anything that does not yield a valid IPv4 address.
+/// deep link. `None` for anything that does not yield a valid IPv4 address —
+/// including any OTHER `lanbeam://` command: only a pair link is an invitation
+/// (the frontend's deep-link allowlist makes the same call), so a `connect` or
+/// `inbox` link pasted here is a typo, not an address.
 /// `port` defaults to LanBeam's default TCP port when absent.
 fn parse_dial_target(input: &str) -> Option<DialTarget> {
     let s = input.trim();
-    if let Some(rest) = s.strip_prefix("lanbeam://") {
+    // The scheme is case-insensitive (an OS or chat app may re-case it).
+    if s.len() >= "lanbeam://".len() && s[.."lanbeam://".len()].eq_ignore_ascii_case("lanbeam://") {
+        let rest = &s["lanbeam://".len()..];
+        let (cmd, _) = rest.split_once('?').unwrap_or((rest, ""));
+        if !cmd.trim_end_matches('/').eq_ignore_ascii_case("pair") {
+            return None;
+        }
         return parse_pair_uri(rest);
     }
     // Plain `ip` or `ip:port`. IPv4 has no internal colons, so the last colon
@@ -416,23 +478,28 @@ fn parse_dial_target(input: &str) -> Option<DialTarget> {
         ip,
         port,
         code: None,
+        expected: None,
     })
 }
 
 /// Parse the `pair?…` tail of a `lanbeam://pair` link into a dial target.
-/// Reads `a` (IPv4), `p` (port), `c` (code); other keys (`d`, `n`) are ignored
-/// here — the joiner learns the Device ID from the handshake, not the link.
+/// Reads `a` (IPv4), `p` (port), `c` (code) and `d` (the host's Device ID, kept
+/// so the joiner can pin the handshake to it); `n` is display-only and ignored.
 fn parse_pair_uri(rest: &str) -> Option<DialTarget> {
     let query = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
     let mut ip: Option<Ipv4Addr> = None;
     let mut port = DEFAULT_TCP_PORT;
     let mut code: Option<String> = None;
+    let mut expected: Option<[u8; 32]> = None;
     for pair in query.split('&') {
         let Some((k, v)) = pair.split_once('=') else {
             continue;
         };
         match k {
             "a" => ip = percent_decode(v).parse().ok(),
+            // A malformed `d=` is simply not a pin (the handshake still learns
+            // the real identity); it never makes the link unusable.
+            "d" => expected = transport::decode_device_id(&percent_decode(v)),
             "p" => {
                 if let Ok(p) = v.parse() {
                     port = p;
@@ -447,7 +514,12 @@ fn parse_pair_uri(rest: &str) -> Option<DialTarget> {
             _ => {}
         }
     }
-    ip.map(|ip| DialTarget { ip, port, code })
+    ip.map(|ip| DialTarget {
+        ip,
+        port,
+        code,
+        expected,
+    })
 }
 
 /// Build the QR/deep-link payload `start_pairing` returns:
@@ -569,11 +641,15 @@ fn lan_ip_rank(ip: Ipv4Addr) -> u8 {
 /// Choose the pairing code: the explicitly-entered one wins; a code carried in
 /// a scanned link is the fallback. Trimmed; an empty result means "none given".
 fn pick_code(entered: String, from_link: Option<String>) -> String {
-    let entered = entered.trim().to_string();
+    // Normalized the same way the host compares it: digits only, full-width
+    // folded — a code typed as it is DISPLAYED ("482 913") must work.
+    let entered = transfer::normalize_pair_code(&entered);
     if !entered.is_empty() {
         entered
     } else {
-        from_link.unwrap_or_default()
+        from_link
+            .map(|c| transfer::normalize_pair_code(&c))
+            .unwrap_or_default()
     }
 }
 
@@ -2175,6 +2251,25 @@ mod tests {
         assert_eq!(t.ip, Ipv4Addr::new(192, 168, 1, 9));
         assert_eq!(t.port, 51999);
         assert_eq!(t.code.as_deref(), Some("482913"));
+        assert!(
+            t.expected.is_none(),
+            "a d= that is not a 32-byte id is no pin, not an error"
+        );
+
+        // The scheme is case-insensitive; the command must be `pair`.
+        assert!(parse_dial_target("LANBEAM://pair?a=192.168.1.9").is_some());
+        assert!(parse_dial_target("lanbeam://PAIR/?a=192.168.1.9").is_some());
+        assert!(
+            parse_dial_target("lanbeam://connect?a=192.168.1.9:51704").is_none(),
+            "only a pair link is an invitation"
+        );
+        assert!(parse_dial_target("lanbeam://inbox").is_none());
+
+        // A well-formed d= is decoded so the join can pin the handshake to it.
+        let id = URL_SAFE_NO_PAD.encode([7u8; 32]);
+        let t = parse_dial_target(&format!("lanbeam://pair?d={id}&a=10.0.0.2&c=111111"))
+            .expect("link parses");
+        assert_eq!(t.expected, Some([7u8; 32]));
 
         assert!(parse_dial_target("not-an-ip").is_none());
         assert!(
@@ -2733,8 +2828,8 @@ mod tests {
         assert_eq!(merged[0].address, "192.168.1.1");
     }
 
-    /// `pick_code` prefers an explicitly-entered code (trimmed), falls back to a
-    /// scanned link's code, and yields empty when neither is present.
+    /// `pick_code` prefers an explicitly-entered code (normalized), falls back
+    /// to a pasted link's code, and yields empty when neither is present.
     #[test]
     fn pick_code_prefers_entered_then_link() {
         assert_eq!(
@@ -2745,12 +2840,28 @@ mod tests {
         assert_eq!(
             pick_code("   ".into(), Some("123456".into())),
             "123456",
-            "a blank entry falls back to the scanned link's code"
+            "a blank entry falls back to the pasted link's code"
         );
         assert_eq!(
             pick_code(String::new(), None),
             "",
             "nothing entered and no link yields an empty code"
+        );
+        // Typed the way the host screen shows it, or through a CJK IME.
+        assert_eq!(
+            pick_code("482 913".into(), None),
+            "482913",
+            "the display grouping space is dropped"
+        );
+        assert_eq!(
+            pick_code("４８２９１３".into(), None),
+            "482913",
+            "full-width digits fold onto ASCII"
+        );
+        assert_eq!(
+            pick_code("abc".into(), Some("12 34 56".into())),
+            "123456",
+            "an entry with no digits at all is blank, and the link's code is normalized too"
         );
     }
 

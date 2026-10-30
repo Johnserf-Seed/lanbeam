@@ -4,7 +4,7 @@
 mod frame;
 pub mod noise;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -21,8 +21,8 @@ use crate::error::{LanBeamError, Result};
 use crate::identity::Identity;
 use crate::settings::Settings;
 use crate::state::{
-    CompletedLog, ConcurrencyGate, NetDegraded, PairingState, PendingMap, TextRateLimiter,
-    TransfersCtl,
+    CompletedLog, ConcurrencyGate, ManualPeer, NetDegraded, PairingState, PendingMap,
+    TextRateLimiter, TransfersCtl,
 };
 use crate::trust::TrustStore;
 use noise::NoiseSession;
@@ -58,6 +58,12 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// `handle_incoming` snapshots it at session start and never holds the
     /// lock across an await.
     pub download_dir: Arc<RwLock<PathBuf>>,
+    /// Manually-added peers (M7.2), shared with `AppState`: a successful
+    /// pairing records the JOINER's address here so the host can reach a
+    /// device discovery never announced (a different subnet) — until now only
+    /// the joiner remembered the host, and a cross-subnet pairing left the host
+    /// "trusted · offline" with nothing to dial.
+    pub manual_peers: Arc<Mutex<HashMap<String, ManualPeer>>>,
     /// Live settings — the hello exchange reads `device_name` at session time
     /// so a rename reaches the very next transfer (M4.2).
     pub settings: Arc<RwLock<Settings>>,
@@ -109,6 +115,7 @@ impl<R: Runtime> Clone for TransportCtx<R> {
             identity: self.identity.clone(),
             tcp_port: self.tcp_port.clone(),
             download_dir: self.download_dir.clone(),
+            manual_peers: self.manual_peers.clone(),
             settings: self.settings.clone(),
             peers: self.peers.clone(),
             pending: self.pending.clone(),
@@ -234,7 +241,9 @@ where
 {
     match tokio::time::timeout(deadline, connecting).await {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(e)) => Err(LanBeamError::Io(e.to_string())),
+        // A refused / unroutable dial is "can't reach them", never a disk error:
+        // its own kind so the UI stops blaming a file for an offline peer.
+        Ok(Err(e)) => Err(LanBeamError::Unreachable(e.to_string())),
         Err(_) => Err(LanBeamError::Timeout),
     }
 }
@@ -399,9 +408,10 @@ mod tests {
     }
 
     /// A connect error (inner `Err`, before the deadline) maps to
-    /// `LanBeamError::Io`, not `Timeout`.
+    /// `LanBeamError::Unreachable` — not `Timeout`, and not `Io` (which the UI
+    /// renders as a disk error).
     #[tokio::test]
-    async fn bounded_connect_maps_inner_error_to_io() {
+    async fn bounded_connect_maps_inner_error_to_unreachable() {
         let res = bounded_connect(
             async {
                 Err(std::io::Error::new(
@@ -412,7 +422,10 @@ mod tests {
             Duration::from_secs(5),
         )
         .await;
-        assert!(matches!(res, Err(LanBeamError::Io(_))), "got {res:?}");
+        assert!(
+            matches!(res, Err(LanBeamError::Unreachable(_))),
+            "got {res:?}"
+        );
     }
 
     /// `connect` dials, pins the peer's Device ID, and authenticates the channel

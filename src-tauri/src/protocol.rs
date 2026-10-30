@@ -112,6 +112,13 @@ pub enum AppMessage {
     /// a v1 (M4–M6) peer never receives it (see `transfer::PeerHello::version`).
     PairRequest {
         code: String,
+        /// The joiner's own TCP listen port, so the host can record the
+        /// joiner as a dialable manual peer (a cross-subnet pairing used to
+        /// leave the host with no address for the device it just trusted).
+        /// Additive + `#[serde(default)]`: an older joiner omits it and the
+        /// host falls back to the default port.
+        #[serde(default)]
+        port: Option<u16>,
     },
     /// The responder's answer to a [`AppMessage::PairRequest`] (M7.1): `accept`
     /// on a code match — carrying the responder's friendly `name` for the
@@ -414,6 +421,7 @@ mod tests {
         for m in [
             AppMessage::PairRequest {
                 code: "482913".into(),
+                port: Some(51704),
             },
             AppMessage::PairConfirm {
                 accept: true,
@@ -429,6 +437,22 @@ mod tests {
             let enc = encode_control(&m).unwrap();
             assert_eq!(enc[0], KIND_CONTROL);
             assert_eq!(decode(&enc).unwrap(), Frame::Control(m));
+        }
+    }
+
+    /// `PairRequest.port` is additive: a request written by an older joiner
+    /// (no `port` key) decodes with `port == None`, never an error.
+    #[test]
+    fn pair_request_port_is_additive() {
+        let legacy = br#"{"t":"pair_request","code":"482913"}"#;
+        let mut frame = vec![KIND_CONTROL];
+        frame.extend_from_slice(legacy);
+        match decode(&frame).unwrap() {
+            Frame::Control(AppMessage::PairRequest { code, port }) => {
+                assert_eq!(code, "482913");
+                assert_eq!(port, None, "a missing port key must default to None");
+            }
+            other => panic!("expected PairRequest, got {other:?}"),
         }
     }
 

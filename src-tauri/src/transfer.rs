@@ -113,11 +113,18 @@ pub async fn send_bye(session: &mut NoiseSession) -> Result<()> {
 /// Send a `PairRequest` presenting the pairing `code` (M7.1). v2-gated — the
 /// joiner (`join_by_code`) checks the negotiated version before calling this,
 /// so a v1 peer is never handed the variant.
-pub async fn send_pair_request(session: &mut NoiseSession, code: &str) -> Result<()> {
+/// `port` is this device's own TCP listen port, so the host can record us as a
+/// dialable manual peer; `None` only in callers that have no listener (tests).
+pub async fn send_pair_request(
+    session: &mut NoiseSession,
+    code: &str,
+    port: Option<u16>,
+) -> Result<()> {
     send_control(
         session,
         &AppMessage::PairRequest {
             code: code.to_string(),
+            port,
         },
     )
     .await
@@ -298,11 +305,17 @@ async fn initiator_hello_inner(session: &mut NoiseSession, my_name: String) -> R
 pub enum InboundOpen {
     /// The peer is sending files — the manifest is fully read.
     Files { manifest: Manifest, peer: PeerHello },
-    /// The peer redeemed a pairing code (M7.1): its `PairRequest.code`, carried
-    /// up so `handle_incoming` can match it against the active pairing session,
-    /// mutually trust on success, and reply `PairConfirm`. v2-gated — a peer
-    /// that negotiated v1 never reaches this arm.
-    Pair { code: String, peer: PeerHello },
+    /// The peer redeemed a pairing code (M7.1): its `PairRequest.code` (and the
+    /// joiner's own listen `port`, when a current build sent one), carried up
+    /// so `handle_incoming` can match it against the active pairing session and
+    /// reply `PairConfirm`. No trust is granted anywhere on this path — the UI
+    /// records it only after a human compares the SAS. v2-gated — a peer that
+    /// negotiated v1 never reaches this arm.
+    Pair {
+        code: String,
+        port: Option<u16>,
+        peer: PeerHello,
+    },
     /// The peer pushed a quick text (M7.3): its `TextSend` payload, carried up so
     /// `handle_incoming` can emit `text_received`, optionally mirror it to the
     /// clipboard, and ack. v2-gated — a peer that negotiated v1 never reaches
@@ -398,13 +411,13 @@ pub async fn open_inbound(session: &mut NoiseSession, my_name: String) -> Result
                 read_manifest_entries(session, transfer_id, total_size, file_count).await?;
             Ok(InboundOpen::Files { manifest, peer })
         }
-        AppMessage::PairRequest { code } => {
+        AppMessage::PairRequest { code, port } => {
             if peer.version < TRANSFER_V2 {
                 return Err(LanBeamError::Protocol(
                     "pair request from a peer that negotiated v1".into(),
                 ));
             }
-            Ok(InboundOpen::Pair { code, peer })
+            Ok(InboundOpen::Pair { code, port, peer })
         }
         AppMessage::TextSend { text, to_clipboard } => {
             if peer.version < TRANSFER_V2 {
@@ -2209,10 +2222,11 @@ pub async fn handle_incoming<R: Runtime>(
             return Ok(());
         }
         // A pairing redemption (M7.1) — handled and CLOSED here, BEFORE any
-        // incoming_file_request path: match the code, mutually trust on success,
-        // reply PairConfirm, and return. Never falls through to the file flow.
-        InboundOpen::Pair { code, peer } => {
-            return handle_pair_request(&mut session, ctx, &device_id, code, peer).await;
+        // incoming_file_request path: match the code, reply PairConfirm, hand
+        // the SAS to the UI, and return. Never falls through to the file flow,
+        // and never grants trust (that is the UI's call after the SAS compare).
+        InboundOpen::Pair { code, port, peer } => {
+            return handle_pair_request(&mut session, ctx, &device_id, code, port, peer).await;
         }
         // A quick text (M7.3) — handled and CLOSED here, BEFORE any file path:
         // emit `text_received`, optionally mirror to the clipboard (receiver
@@ -2721,22 +2735,27 @@ pub async fn handle_incoming<R: Runtime>(
 /// Order: (1) per-source rate gate — a source over the failure cap is DROPPED
 /// without even checking the code, so the throttle, not the 6 digits, is the
 /// real brute-force defense; (2) match the presented code against the active
-/// invitation (constant-time-ish, consumed on success); (3a) on a match,
-/// mutually trust the joiner (store it under its handshake identity + DeviceInfo
-/// name, `auto_accept` off — pairing establishes identity, not a standing
-/// prompt-free grant), reply `PairConfirm{accept:true}`, and emit `pair_joined`;
-/// (3b) on a miss, record the failure, reply `PairConfirm{accept:false}` with a
-/// reason, and change nothing. A reject is a clean `Ok(())` for the listener
-/// (like a declined file), not an error.
+/// invitation (constant-time-ish, consumed on success); (3a) on a match, record
+/// the joiner as a dialable manual peer (its source IP + the listen `port` it
+/// declared), reply `PairConfirm{accept:true}`, and emit `pair_joined` with the
+/// SAS — NO trust is written here, the UI does that once a human has compared
+/// the SAS; (3b) on a miss, record the failure, reply `PairConfirm{accept:false}`
+/// with a reason, and change nothing. A reject is a clean `Ok(())` for the
+/// listener (like a declined file), not an error.
 async fn handle_pair_request<R: Runtime>(
     session: &mut NoiseSession,
     ctx: &TransportCtx<R>,
     device_id: &str,
     code: String,
+    port: Option<u16>,
     peer: PeerHello,
 ) -> Result<()> {
     let peer_ip = session.peer_addr().map(|a| a.ip());
     let now = Instant::now();
+    // Tolerate the way a human reads a code off a screen ("482 913", full-width
+    // digits from a CJK IME): the display groups the digits, so the compare must
+    // not punish typing them that way — every miss costs rate-limit budget.
+    let code = normalize_pair_code(&code);
 
     // (1) Rate gate — atomic check-and-RESERVE under one lock hold. A limited
     // source is DROPPED (no reply): answering would hand a brute-forcer a fast,
@@ -2774,7 +2793,14 @@ async fn handle_pair_request<R: Runtime>(
     let (matched, had_session) = match ctx.pairing.session.lock() {
         Ok(mut guard) => {
             let (clear, ok, present) = match guard.as_ref() {
-                Some(sess) if now >= sess.expires => (true, false, true),
+                // Expired on EITHER clock: the monotonic one is the liveness
+                // deadline, the wall clock catches a code that slept through its
+                // ten minutes (Instant does not advance during sleep).
+                Some(sess)
+                    if now >= sess.expires || std::time::SystemTime::now() >= sess.expires_at =>
+                {
+                    (true, false, true)
+                }
                 Some(sess) if code_matches(&sess.code, &code) => (true, true, true),
                 Some(_) => (false, false, true),
                 None => (false, false, false),
@@ -2806,6 +2832,37 @@ async fn handle_pair_request<R: Runtime>(
             if let Ok(mut r) = ctx.pairing.rate.lock() {
                 r.clear(&ip);
             }
+        }
+        // Remember how to reach the joiner. Pairing exists for peers discovery
+        // cannot see; without this the host would trust a device it could never
+        // dial (the joiner records the host symmetrically in `join_by_code`).
+        // The source IP is authenticated by the TCP connection; the port is the
+        // joiner's self-declared listener, defaulting for older builds. Not
+        // trust — just an address, exactly like `connect_by_addr`.
+        if let Some(std::net::IpAddr::V4(ip)) = peer_ip {
+            if let Ok(mut manual) = ctx.manual_peers.lock() {
+                crate::state::insert_manual_peer(
+                    &mut manual,
+                    device_id.to_string(),
+                    crate::state::ManualPeer {
+                        name: joiner_name.clone(),
+                        addr: ip,
+                        port: port.unwrap_or(crate::consts::DEFAULT_TCP_PORT),
+                        last_used: Instant::now(),
+                    },
+                );
+            }
+            // The device list is replaced wholesale from this payload on the
+            // UI side, so emit the MERGED list (discovery + manual), never
+            // discovery alone.
+            let _ = ctx.app.emit(
+                "devices_updated",
+                crate::discovery::devices_payload(
+                    &ctx.peers,
+                    &ctx.manual_peers,
+                    &ctx.identity.device_id(),
+                ),
+            );
         }
         send_control(
             session,
@@ -2855,6 +2912,23 @@ async fn handle_pair_request<R: Runtime>(
         log::info!("pairing: rejected PairRequest from {device_id} (bad or expired code)");
         Ok(())
     }
+}
+
+/// Reduce a pairing code to its ASCII digits (M7.1): drops grouping spaces or
+/// dashes a human copied off a screen ("482 913"), and folds full-width digits
+/// (`４８２` from a CJK IME) onto ASCII. Shared by the joiner (`pick_code`) and
+/// the host (`handle_pair_request`), so a code typed the way it is DISPLAYED
+/// matches — and an older joiner that still sends the spaced form is accepted.
+/// Everything else is dropped, so the result is either empty or digits only.
+pub fn normalize_pair_code(raw: &str) -> String {
+    raw.chars()
+        .filter_map(|c| match c {
+            '0'..='9' => Some(c),
+            // U+FF10..=U+FF19: FULLWIDTH DIGIT ZERO..NINE
+            '\u{FF10}'..='\u{FF19}' => char::from_u32(c as u32 - 0xFF10 + '0' as u32),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Length-checked, non-short-circuiting equality for a pairing code (M7.1):

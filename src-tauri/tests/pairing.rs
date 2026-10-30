@@ -54,6 +54,7 @@ fn make_host_ctx<R: tauri::Runtime>(
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.to_path_buf())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -113,6 +114,7 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "482913".into(),
         expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -143,7 +145,7 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
         peer.version, TRANSFER_V2,
         "two current builds negotiate v2 pairing"
     );
-    send_pair_request(&mut sess, "482913").await.unwrap();
+    send_pair_request(&mut sess, "482913", None).await.unwrap();
     let (accept, host_name, reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(accept, "the right code must be accepted");
     assert_eq!(
@@ -219,6 +221,7 @@ async fn wrong_code_rejects_without_trust_and_keeps_code() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "111111".into(),
         expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -238,7 +241,7 @@ async fn wrong_code_rejects_without_trust_and_keeps_code() {
         .await
         .unwrap();
     initiator_hello(&mut sess, "Guesser".into()).await.unwrap();
-    send_pair_request(&mut sess, "999999").await.unwrap();
+    send_pair_request(&mut sess, "999999", None).await.unwrap();
     let (accept, _name, reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(!accept, "a wrong code must be declined");
     assert!(reason.is_some(), "a decline carries a reason");
@@ -295,6 +298,7 @@ async fn expired_code_rejects_and_clears() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "482913".into(),
         expires: expired,
+        expires_at: std::time::SystemTime::now() - Duration::from_secs(1),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -316,7 +320,7 @@ async fn expired_code_rejects_and_clears() {
     initiator_hello(&mut sess, "Latecomer".into())
         .await
         .unwrap();
-    send_pair_request(&mut sess, "482913").await.unwrap();
+    send_pair_request(&mut sess, "482913", None).await.unwrap();
     let (accept, _name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(
         !accept,
@@ -385,7 +389,7 @@ async fn no_session_pair_request_does_not_grow_rate_map() {
         .await
         .unwrap();
     initiator_hello(&mut sess, "Prober".into()).await.unwrap();
-    send_pair_request(&mut sess, "123456").await.unwrap();
+    send_pair_request(&mut sess, "123456", None).await.unwrap();
     let (accept, _name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(!accept, "a PairRequest at an idle host is declined");
     drop(sess);

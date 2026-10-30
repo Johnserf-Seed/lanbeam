@@ -52,6 +52,7 @@ async fn bye_only_session_leaves_no_events_or_state() {
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(tmp.clone())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(Settings::default())),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
