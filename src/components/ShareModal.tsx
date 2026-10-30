@@ -13,6 +13,7 @@ import {
 import { fmtBytes } from "../lib/format";
 import { copyText, errText, pickFiles } from "../lib/sendops";
 import { showToast, useOverlays, type SendFile } from "../lib/store";
+import { useEscape } from "../lib/useEscape";
 import Qr from "./Qr";
 import { ModalHead } from "./ui";
 
@@ -284,8 +285,6 @@ export default function ShareModal() {
     });
   }, [shareOpen, link?.token]);
 
-  if (!shareOpen) return null;
-
   /** Dismiss the panel. The share stays live — that is the design (a link you
    *  handed someone shouldn't die because you closed the panel you copied it
    *  from) — but it used to be a SILENT one, and silence is what turned it into a
@@ -295,6 +294,10 @@ export default function ShareModal() {
     if (link) showToast(t("share.keptToast"), undefined, 7000);
     setShare(false);
   };
+  // Escape closes an open dropdown first, then the panel.
+  useEscape(shareOpen, () => (menu !== null ? setMenu(null) : close()));
+
+  if (!shareOpen) return null;
 
   // Subtitle: the server's authoritative file count + size once the share
   // exists, else the pending selection so the header isn't blank while loading.

@@ -153,6 +153,19 @@ describe("ConflictModal choices", () => {
     expect(useOverlays.getState().conflict).toBeNull();
   });
 
+  it("Escape declines like 取消接收 — exactly once, and not an IME's Escape", () => {
+    seedConflict();
+    renderUI(<ConflictModal />);
+
+    fireEvent.keyDown(window, { key: "Escape", isComposing: true });
+    expect(api.replyFileRequest).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(api.replyFileRequest).toHaveBeenCalledTimes(1);
+    expect(api.replyFileRequest).toHaveBeenCalledWith("sess-1", false);
+    expect(useOverlays.getState().conflict).toBeNull();
+  });
+
   it("a positive choice applies the deferred trust for the peer", () => {
     seedConflict(undefined, /* wantTrust */ true);
     renderUI(<ConflictModal />);

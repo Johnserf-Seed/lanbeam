@@ -17,6 +17,7 @@ import type { UITransfer } from "../lib/store";
 import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
 import { pickFiles, sendToDevice } from "../lib/sendops";
+import { useEscape } from "../lib/useEscape";
 import { ExtChip, ModalHead } from "./ui";
 
 type WaitState = "waiting" | "ok" | "failed";
@@ -130,6 +131,16 @@ export default function SendModal() {
     );
   }, [allOk, waitCount, firstWaitName, closeSend, t]);
 
+  /** A click outside (or Escape) — easily a slip. The selection is kept, so
+   *  reopening the send resumes at this step (the store's dismissSend); once
+   *  requests are out there is nothing left to keep. */
+  const onDismiss = () => {
+    if (useOverlays.getState().send?.step === "waiting")
+      showToast(t("send.canceledToast"));
+    dismissSend();
+  };
+  useEscape(!!send, onDismiss);
+
   if (!send) return null;
 
   const step = send.step;
@@ -183,13 +194,6 @@ export default function SendModal() {
   const onClose = () => {
     if (step === "waiting") showToast(t("send.canceledToast"));
     closeSend();
-  };
-  /** A click outside — easily a slip. The selection is kept, so reopening the
-   *  send resumes at this step (the store's dismissSend); once requests are out
-   *  there is nothing left to keep. */
-  const onDismiss = () => {
-    if (step === "waiting") showToast(t("send.canceledToast"));
-    dismissSend();
   };
 
   const toggleSel = (key: string) =>
