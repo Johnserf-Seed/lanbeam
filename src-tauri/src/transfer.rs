@@ -3768,6 +3768,22 @@ mod tests {
         );
     }
 
+    /// A code typed the way the host DISPLAYS it ("482 913"), with a dash, or
+    /// through a CJK input method (full-width digits) reduces to the six ASCII
+    /// digits the host compares against; anything that is not a digit is gone.
+    #[test]
+    fn normalize_pair_code_reads_a_code_the_way_people_type_it() {
+        assert_eq!(normalize_pair_code("482 913"), "482913");
+        assert_eq!(normalize_pair_code(" 482-913 "), "482913");
+        assert_eq!(normalize_pair_code("４８２９１３"), "482913");
+        assert_eq!(normalize_pair_code("４８２ 913"), "482913");
+        assert_eq!(normalize_pair_code("abc"), "", "no digits, no code");
+        assert_eq!(normalize_pair_code(""), "");
+        // Other scripts' digits are not codes: only ASCII and full-width count.
+        assert_eq!(normalize_pair_code("٤٨٢"), "");
+        assert!(code_matches("482913", &normalize_pair_code("482 913")));
+    }
+
     // ── quick text (M7.3) ─────────────────────────────────────────────────
 
     /// The receiver's clamp (M7.3) trims an over-long text to `MAX_TEXT_BYTES`
