@@ -28,13 +28,15 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
 // Same for the clipboard plugin the (isTauri) paste path reads through.
 vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
   readText: vi.fn().mockResolvedValue(""),
+  writeText: vi.fn().mockResolvedValue(undefined),
 }));
 
 import * as api from "../bridge/api";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
   beginSend,
+  copyText,
   errText,
   isNotFound,
   newTransferId,
@@ -226,6 +228,13 @@ describe("sendToDevice", () => {
     await flush();
     expect(useToast.getState().msg).toBeNull();
   });
+
+  it("stays silent on the user's own cancel — the cancel button said so (M21)", async () => {
+    vi.mocked(api.sendFiles).mockRejectedValue({ kind: "Cancelled" });
+    sendToDevice(device, [file()], true);
+    await flush();
+    expect(useToast.getState().msg).toBeNull();
+  });
 });
 
 describe("newTransferId", () => {
@@ -319,6 +328,19 @@ describe("isNotFound", () => {
     expect(isNotFound({ kind: "Io", message: "x" })).toBe(false);
     expect(isNotFound(new Error("boom"))).toBe(false);
     expect(isNotFound(null)).toBe(false);
+  });
+});
+
+describe("copyText (M24)", () => {
+  it("writes through the Tauri clipboard plugin and says it worked", async () => {
+    vi.mocked(writeText).mockResolvedValue(undefined);
+    await expect(copyText("hello")).resolves.toBe(true);
+    expect(writeText).toHaveBeenCalledWith("hello");
+  });
+
+  it("says so when the write fails — callers stop claiming 已复制", async () => {
+    vi.mocked(writeText).mockRejectedValue(new Error("denied"));
+    await expect(copyText("hello")).resolves.toBe(false);
   });
 });
 

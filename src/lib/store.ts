@@ -1,7 +1,9 @@
 import { create } from "zustand";
 import {
+  createJSONStorage,
   persist,
   type PersistStorage,
+  type StateStorage,
   type StorageValue,
 } from "zustand/middleware";
 import * as api from "../bridge/api";
@@ -19,6 +21,57 @@ import { baseName, extOf } from "./format";
 import type { FileCat } from "./filecat";
 import { fileCat } from "./filecat";
 import { playSound, type SoundKind } from "./sound";
+
+/* ── persistence ────────────────────────────────────────────────────────── */
+
+/** localStorage, minus the ways it throws (M23). A write past the origin's
+ *  quota throws QuotaExceededError, and a persisted store writes INSIDE `set` —
+ *  so the throw came out of whoever called it: an event handler adding a
+ *  received text, which then skipped everything after it (its toast, the
+ *  history row). Saving is best-effort; the app carrying on is not. */
+const safeLocalStorage: StateStorage = {
+  getItem: (name) => {
+    try {
+      return localStorage.getItem(name);
+    } catch {
+      return null;
+    }
+  },
+  setItem: (name, value) => {
+    try {
+      localStorage.setItem(name, value);
+    } catch (e) {
+      console.warn(`[persist] could not save ${name}`, e);
+    }
+  },
+  removeItem: (name) => {
+    try {
+      localStorage.removeItem(name);
+    } catch {
+      // nothing saved, nothing to remove
+    }
+  },
+};
+
+/** How many characters of quick-text bodies one store writes to disk (M23):
+ *  about half a megabyte as localStorage counts (UTF-16), so the inbox and the
+ *  history together stay well inside the ~5 MB an origin gets. */
+export const KEPT_TEXT_CHARS = 256 * 1024;
+
+/** `rows` (newest first) as they are written to disk: each quick text keeps its
+ *  full body while the running total fits KEPT_TEXT_CHARS, and the older ones
+ *  are saved without it — their preview (`name`) stays. A text can be 60 KiB,
+ *  the inbox holds 500 and history 200: saved whole they outgrow localStorage
+ *  long before either cap. Only what is SAVED is trimmed; this run keeps every
+ *  text it has. */
+export function keepRecentTexts<T extends { text?: string }>(rows: T[]): T[] {
+  let used = 0;
+  return rows.map((r) => {
+    if (r.text === undefined) return r;
+    used += r.text.length;
+    return used <= KEPT_TEXT_CHARS ? r : { ...r, text: undefined };
+  });
+}
 
 /* ── preferences (persisted UI settings; backend-owned ones live in useData) */
 
@@ -93,7 +146,10 @@ export const usePrefs = create<PrefsState>()(
       uiZoom: 1,
       set: (p) => set(p),
     }),
-    { name: "lanbeam.prefs" },
+    {
+      name: "lanbeam.prefs",
+      storage: createJSONStorage(() => safeLocalStorage),
+    },
   ),
 );
 
@@ -297,7 +353,13 @@ export async function setVisibility(v: Visibility): Promise<void> {
 
 export type TrustRecord = {
   deviceId: string;
+  /** what the device calls itself — refreshed by every discovery and every
+   *  transfer it sends, and what the fingerprint-changed check compares */
   name: string;
+  /** the user's own name for it (a rename): shown instead of `name`, and kept
+   *  apart from it so those refreshes can't undo the rename (M7). Local to this
+   *  machine. */
+  alias?: string;
   trusted: boolean;
   autoAccept: boolean;
   addedAt: number;
@@ -305,6 +367,11 @@ export type TrustRecord = {
   /** free-mode position on the 640×430 base canvas */
   pos?: { x: number; y: number };
 };
+
+/** The name to show for a remembered device: the user's rename, else its own. */
+export function trustName(r: TrustRecord | undefined): string | undefined {
+  return r?.alias || r?.name || undefined;
+}
 
 /** A trust-page row: union of remembered records and live discoveries. */
 export type TrustDevice = {
@@ -370,6 +437,7 @@ export const useTrust = create<TrustState>()(
         const rec: TrustRecord = {
           deviceId: d.deviceId,
           name: prev?.name ?? d.name,
+          alias: prev?.alias,
           trusted,
           // Trusting a device also turns on auto-accept by default — "these are
           // my devices, stop nagging me". A device that was ALREADY trusted keeps
@@ -424,21 +492,30 @@ export const useTrust = create<TrustState>()(
         set((s) => ({ records: { ...s.records, [rec.deviceId]: rec } }));
         if (rec.trusted) pushTrust(rec.deviceId, rec.name, rec.autoAccept);
       },
-      rename: (id, name) => {
+      // A rename is an alias, local to this machine (M7). It used to overwrite
+      // `name` — which the next discovery event or received transfer refreshed
+      // straight back to whatever the device calls itself. It is not written to
+      // the backend either: the backend's name is the device's own, and the
+      // backend rewrites it on every transfer that device sends. Renaming back
+      // to the device's own name clears the alias.
+      rename: (id, alias) => {
         const prev = get().records[id];
-        const rec: TrustRecord = prev
-          ? { ...prev, name }
-          : {
-              deviceId: id,
-              name,
-              trusted: false,
-              autoAccept: false,
-              addedAt: Date.now(),
-              lastSeen: Date.now(),
-            };
+        const own =
+          prev?.name ??
+          useData.getState().devices.find((d) => d.deviceId === id)?.name ??
+          alias;
+        const rec: TrustRecord = {
+          ...(prev ?? {
+            deviceId: id,
+            trusted: false,
+            autoAccept: false,
+            addedAt: Date.now(),
+            lastSeen: Date.now(),
+          }),
+          name: own,
+          alias: alias === own ? undefined : alias,
+        };
         set((s) => ({ records: { ...s.records, [id]: rec } }));
-        // rename = set_trusted with the new name; untrusted memos stay local.
-        if (rec.trusted) pushTrust(id, name, rec.autoAccept);
       },
       setPos: (id, pos) =>
         set((s) => {
@@ -469,6 +546,8 @@ export const useTrust = create<TrustState>()(
             records[p.deviceId] = {
               deviceId: p.deviceId,
               name: p.name,
+              // the user's rename is local, never backend state (M7)
+              alias: prev?.alias,
               trusted: true,
               autoAccept: p.autoAccept,
               // backend stamps are unix seconds; the UI works in epoch ms
@@ -485,7 +564,10 @@ export const useTrust = create<TrustState>()(
           return { records };
         }),
     }),
-    { name: "lanbeam.trust" },
+    {
+      name: "lanbeam.trust",
+      storage: createJSONStorage(() => safeLocalStorage),
+    },
   ),
 );
 
@@ -563,7 +645,7 @@ export function trustList(
     const r = records[d.deviceId];
     out.push({
       deviceId: d.deviceId,
-      name: r?.name || d.name,
+      name: trustName(r) || d.name,
       trusted: r?.trusted ?? false,
       autoAccept: r?.autoAccept ?? false,
       online: true,
@@ -596,7 +678,7 @@ export function trustList(
         : undefined;
     out.push({
       deviceId: r.deviceId,
-      name: r.name,
+      name: trustName(r) ?? r.name,
       trusted: r.trusted,
       autoAccept: r.autoAccept,
       online: false,
@@ -810,11 +892,17 @@ function terminalDiffStorage(): PersistStorage<PersistedTransfers> {
   let lastRecords: UITransfer[] | null = null;
   return {
     getItem: (name) => {
-      const str = localStorage.getItem(name);
-      return str ? (JSON.parse(str) as StorageValue<PersistedTransfers>) : null;
+      const str = safeLocalStorage.getItem(name) as string | null;
+      if (!str) return null;
+      try {
+        return JSON.parse(str) as StorageValue<PersistedTransfers>;
+      } catch {
+        return null; // a corrupt blob is no history, not a crash
+      }
     },
     setItem: (name, value) => {
-      const records = Object.values(value.state.transfers);
+      const entries = Object.entries(value.state.transfers);
+      const records = entries.map(([, r]) => r);
       if (
         lastRecords &&
         lastRecords.length === records.length &&
@@ -823,11 +911,30 @@ function terminalDiffStorage(): PersistStorage<PersistedTransfers> {
         return; // nothing terminal changed — skip serialize + write
       }
       lastRecords = records;
-      localStorage.setItem(name, JSON.stringify(value));
+      // partialize ordered the rows newest first; texts past the budget are
+      // saved without their bodies (M23). After the identity check above, so
+      // the copies it makes never defeat it.
+      const kept = keepRecentTexts(records);
+      const transfers = Object.fromEntries(
+        entries.map(([key], i) => [key, kept[i]]),
+      );
+      safeLocalStorage.setItem(
+        name,
+        JSON.stringify({ ...value, state: { transfers } }),
+      );
     },
-    removeItem: (name) => localStorage.removeItem(name),
+    removeItem: (name) => {
+      // The next write must not be skipped as "unchanged" — there is nothing on
+      // disk to be unchanged from.
+      lastRecords = null;
+      safeLocalStorage.removeItem(name);
+    },
   };
 }
+
+/** When this run of the app started: what tells the transfers it finishes from
+ *  the history restored at launch (M22). */
+const SESSION_START = Date.now();
 
 export const useTransfers = create<TransfersState>()(
   persist(
@@ -1075,13 +1182,19 @@ export const useTransfers = create<TransfersState>()(
         }),
       // partialize only trims on the next WRITE, so without this an expired row
       // lingers in the live list until something else happens to persist. Run at
-      // startup and whenever 历史记录保留 changes. 「不保留」 is deliberately a
-      // no-op here — it means "don't KEEP them", not "delete the ones you are
-      // watching right now".
+      // startup and whenever 历史记录保留 changes.
+      //
+      // 「不保留」 means "don't KEEP them", not "delete the ones you are watching
+      // right now": what it drops is the history restored from earlier runs. It
+      // used to return before doing anything — so the old history stayed on
+      // disk until some transfer happened to finish, and came back on every
+      // restart until then (M22). Now that history goes, and the `set` below
+      // rewrites the saved copy through partialize — empty under 「不保留」 —
+      // whether or not anything on screen changed.
       pruneHistory: () => {
         const win = histWindowMs(usePrefs.getState().histKeep);
-        if (win === 0 || !Number.isFinite(win)) return;
-        const cutoff = Date.now() - win;
+        if (!Number.isFinite(win)) return;
+        const cutoff = win === 0 ? SESSION_START : Date.now() - win;
         set((s) => {
           const kept = Object.entries(s.transfers).filter(
             ([, t]) =>
@@ -1207,7 +1320,14 @@ export const useInbox = create<InboxState>()(
         set((s) => ({ items: s.items.filter((i) => !ids.includes(i.id)) })),
       clearUnread: () => set({ unread: 0 }),
     }),
-    { name: "lanbeam.inbox" },
+    {
+      name: "lanbeam.inbox",
+      storage: createJSONStorage(() => safeLocalStorage),
+      partialize: (s) => ({
+        items: keepRecentTexts(s.items),
+        unread: s.unread,
+      }),
+    },
   ),
 );
 
@@ -1282,7 +1402,10 @@ export const useRecents = create<RecentsState>()(
           return { items: [...files, ...rest].slice(0, 8) };
         }),
     }),
-    { name: "lanbeam.recents" },
+    {
+      name: "lanbeam.recents",
+      storage: createJSONStorage(() => safeLocalStorage),
+    },
   ),
 );
 

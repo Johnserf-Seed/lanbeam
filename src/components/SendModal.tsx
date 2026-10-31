@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { cancelTransfer } from "../bridge/api";
 import {
   showToast,
   shortFp,
@@ -194,6 +195,20 @@ export default function SendModal() {
   const onClose = () => {
     if (step === "waiting") showToast(t("send.canceledToast"));
     closeSend();
+  };
+
+  /** 取消未确认的请求 — what it says (M20): every request a receiver has not
+   *  accepted yet is cancelled, which also takes its prompt off their screen.
+   *  It used to be the × under another name — the requests stayed out there,
+   *  and the toast even said so. Accepted ones are streaming; they stay. */
+  const cancelWaiting = () => {
+    for (const p of send.pending) {
+      const tr = p.sessionId ? transfers[p.sessionId] : undefined;
+      if (p.sessionId && !p.failed && !tr?.accepted && tr?.status !== "error")
+        void cancelTransfer(p.sessionId);
+    }
+    closeSend();
+    showToast(t("send.waitingCanceledToast"));
   };
 
   const toggleSel = (key: string) =>
@@ -1038,7 +1053,7 @@ export default function SendModal() {
                 type="button"
                 className="btn"
                 style={{ height: 32, padding: "0 18px", fontSize: 12.5 }}
-                onClick={onClose}
+                onClick={cancelWaiting}
               >
                 {t("send.cancelWaiting")}
               </button>

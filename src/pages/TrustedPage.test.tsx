@@ -98,7 +98,7 @@ describe("TrustedPage", () => {
     expect(screen.getByText(shortFp(id))).toBeInTheDocument();
   });
 
-  it("renames the selected peer, updating its trust record", () => {
+  it("renames the selected peer as a local alias its own name can't undo (M7)", () => {
     seed([dev("d1", "Alice")], { d1: rec({ deviceId: "d1", name: "Alice" }) });
     renderUI(<TrustedPage />);
 
@@ -107,9 +107,14 @@ describe("TrustedPage", () => {
     fireEvent.change(input, { target: { value: "Alice Renamed" } });
     fireEvent.blur(input);
 
-    expect(useTrust.getState().records.d1.name).toBe("Alice Renamed");
-    // The renamed trusted record is written through to the backend store.
-    expect(api.setTrusted).toHaveBeenCalledWith("d1", "Alice Renamed", false);
+    expect(useTrust.getState().records.d1).toMatchObject({
+      name: "Alice",
+      alias: "Alice Renamed",
+    });
+    expect(screen.getAllByText("Alice Renamed").length).toBeGreaterThan(0);
+    // Not written to the backend: the name there is the device's own, and
+    // every transfer from it rewrites it — which is how renames got undone.
+    expect(api.setTrusted).not.toHaveBeenCalled();
   });
 
   it("toggles auto-accept for the selected trusted peer", () => {

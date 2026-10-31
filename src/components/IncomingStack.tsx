@@ -8,6 +8,7 @@ import {
   notify,
   shortFp,
   showToast,
+  trustName,
   useData,
   useOverlays,
   useTransfers,
@@ -70,7 +71,7 @@ export default function IncomingStack() {
   // Display name: the user's rename wins, then the name the sender declared
   // for this session (M4.2), then discovery, then the fingerprint.
   const nameOf = (r: IncomingRequest): string =>
-    records[r.deviceId]?.name ||
+    trustName(records[r.deviceId]) ||
     r.senderName ||
     devices.find((d) => d.deviceId === r.deviceId)?.name ||
     shortFp(r.deviceId);

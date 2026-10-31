@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { copyText, readClipboardText } from "../lib/sendops";
+import { showToast } from "../lib/store";
 
 /** Replaces the WebView's default (browser) right-click menu app-wide. Every
  *  `contextmenu` is prevented — so the app never shows the browser's
@@ -94,12 +95,18 @@ export default function InputContextMenu() {
   const readOnly = el.readOnly;
   const selected = () => el.value.slice(start, end);
 
-  const copy = () => {
-    if (hasSel) copyText(selected());
+  const copy = async () => {
+    if (hasSel && !(await copyText(selected())))
+      showToast(t("common.copyFailed"));
   };
-  const cut = () => {
+  // Cut removes the text only once it is safely on the clipboard (M24) — it
+  // used to delete it whether or not the copy had worked.
+  const cut = async () => {
     if (!hasSel || readOnly) return;
-    copyText(selected());
+    if (!(await copyText(selected()))) {
+      showToast(t("common.copyFailed"));
+      return;
+    }
     setNativeValue(el, el.value.slice(0, start) + el.value.slice(end));
     el.focus();
     el.setSelectionRange(start, start);

@@ -150,8 +150,11 @@ const InboxRow = memo(function InboxRow({
   const isTxt = it.kind === "txt";
   const showCk = selMode || hovered;
   const showActs = hovered && !selMode;
+  // A text from an earlier run may have been saved without its body (M23).
   const sizeStr = isTxt
-    ? t("inbox.charCount", { n: (it.text ?? "").length })
+    ? it.text === undefined
+      ? t("inbox.previewOnly")
+      : t("inbox.charCount", { n: it.text.length })
     : fmtBytes(it.sizeBytes);
   return (
     // biome-ignore lint/a11y/useSemanticElements: keep the row as a div (a native <button> can't nest the checkbox/action controls and would restyle it); keyboard-operable via role + tabIndex + onKeyDown
@@ -437,8 +440,15 @@ export default function InboxPage() {
   );
 
   const doCopy = useCallback(
-    (it: InboxItem) => {
-      copyText(it.text ?? "");
+    async (it: InboxItem) => {
+      if (it.text === undefined) {
+        showToast(t("inbox.textNotKept"));
+        return;
+      }
+      if (!(await copyText(it.text))) {
+        showToast(t("common.copyFailed"));
+        return;
+      }
       setCopiedIds((cur) => (cur.includes(it.id) ? cur : [...cur, it.id]));
       showToast(t("inbox.copiedText"));
     },
@@ -506,6 +516,10 @@ export default function InboxPage() {
 
   const fwdItem = (it: InboxItem, d: DiscoveredDevice) => {
     setMenu(null);
+    if (it.kind === "txt" && it.text === undefined) {
+      showToast(t("inbox.textNotKept"));
+      return;
+    }
     if (it.kind === "txt") {
       // Forward over the real text channel (M7.3), recording a sent-text entry
       // in the transfer history. alsoClipboard=true mirrors QuickTextModal's
@@ -549,14 +563,17 @@ export default function InboxPage() {
     const queued = paths.length
       ? sendToDevice(d, paths.map(sendFileFromPath))
       : true;
+    // A text saved without its body (M23) has nothing to forward.
+    const sendable = txts.filter((i) => i.text !== undefined);
     const sent = await Promise.allSettled(
-      txts.map((it) =>
+      sendable.map((it) =>
         sendTextTracked(d.deviceId, d.name, it.text ?? "", true),
       ),
     );
     const rejected = sent.filter((r) => r.status === "rejected");
+    const lost = txts.length - sendable.length;
     const total = files.length + txts.length;
-    const ok = total - rejected.length - (queued ? 0 : files.length);
+    const ok = total - rejected.length - lost - (queued ? 0 : files.length);
     if (ok === total) {
       showToast(t("inbox.fwdBatchToast", { n: total, device: d.name }));
       return;
@@ -566,7 +583,11 @@ export default function InboxPage() {
       t("inbox.fwdBatchPartial", {
         ok,
         n: total,
-        err: first ? errText(first.reason) : t("errors.generic"),
+        err: first
+          ? errText(first.reason)
+          : lost
+            ? t("inbox.textNotKept")
+            : t("errors.generic"),
       }),
       undefined,
       7000,

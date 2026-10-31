@@ -71,8 +71,10 @@ export function beginSend(
     // the backend said anything about it (offline peer, unreadable file, …).
     useTransfers.getState().dropOutgoing(sessionId);
     // A decline is already narrated by the transfer_error handler (M4.5
-    // code "declined") — a second generic failure toast would clobber it.
-    if ((e as { kind?: string } | null)?.kind !== "Rejected") {
+    // code "declined") — a second generic failure toast would clobber it. A
+    // cancel is this user's own doing, already confirmed by the button (M21).
+    const kind = (e as { kind?: string } | null)?.kind;
+    if (kind !== "Rejected" && kind !== "Cancelled") {
       showToast(
         i18n.t("send.sendFailedToast", {
           name: d.name,
@@ -252,14 +254,26 @@ export async function pickFiles(title: string): Promise<SendFile[]> {
   return paths.map(sendFileFromPath);
 }
 
-/** Best-effort copy to the system clipboard. The (rare) rejection is swallowed;
- *  callers pair this with their own confirmation toast. One implementation so the
- *  swallowed-rejection handling lives in a single place. */
-export function copyText(text: string): void {
+/** Copy to the system clipboard, resolving to whether it worked (M24). In the
+ *  packaged app this goes through the Tauri clipboard plugin, like
+ *  `readClipboardText`: a DOM write can be refused, and WebKitGTK may have no
+ *  `navigator.clipboard` at all. It used to be a fire-and-forget DOM write whose
+ *  failure nobody saw — every caller toasted 「已复制」 regardless, and 剪切 cut
+ *  the text even when nothing had been copied. Callers confirm only on `true`. */
+export async function copyText(text: string): Promise<boolean> {
   try {
-    void navigator.clipboard?.writeText(text);
+    if (api.isTauri) {
+      const { writeText } = await import(
+        "@tauri-apps/plugin-clipboard-manager"
+      );
+      await writeText(text);
+      return true;
+    }
+    if (!navigator.clipboard) return false;
+    await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    /* clipboard unavailable */
+    return false;
   }
 }
 

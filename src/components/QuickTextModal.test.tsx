@@ -8,7 +8,7 @@ import userEvent from "@testing-library/user-event";
 import i18n from "../i18n";
 import type { DiscoveredDevice } from "../bridge/api";
 import { useData, useOverlays } from "../lib/store";
-import { renderUI, screen, waitFor } from "../test/render";
+import { act, renderUI, screen, waitFor } from "../test/render";
 import QuickTextModal from "./QuickTextModal";
 
 // Spy on the send path; errText is only hit on failure — keep a plain passthrough.
@@ -133,5 +133,43 @@ describe("QuickTextModal", () => {
 
     // still open — nothing sent
     expect(useOverlays.getState().qtOpen).toBe(true);
+  });
+
+  it("a device that goes offline is not swapped for another one (M26)", async () => {
+    const user = userEvent.setup();
+    const studio = device();
+    const laptop = device({ deviceId: "dev-2", name: "Laptop" });
+    useData.setState({ devices: [studio, laptop] });
+    useOverlays.setState({ qtOpen: true });
+    renderUI(<QuickTextModal />);
+    await user.type(
+      screen.getByPlaceholderText(i18n.t("qt.placeholder")),
+      "for the studio",
+    );
+
+    // The device on screen drops off the list.
+    act(() => useData.setState({ devices: [laptop] }));
+    expect(
+      await screen.findByText(
+        i18n.t("qt.targetOffline", { name: "Studio Mac" }),
+      ),
+    ).toBeInTheDocument();
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(
+      "dev-1",
+    );
+    await user.click(screen.getByRole("button", { name: i18n.t("qt.send") }));
+    expect(sendTextTracked).not.toHaveBeenCalled();
+
+    // Back on the list: sendable again, to the same device.
+    act(() => useData.setState({ devices: [studio, laptop] }));
+    await user.click(screen.getByRole("button", { name: i18n.t("qt.send") }));
+    await waitFor(() =>
+      expect(sendTextTracked).toHaveBeenCalledWith(
+        "dev-1",
+        "Studio Mac",
+        "for the studio",
+        true,
+      ),
+    );
   });
 });

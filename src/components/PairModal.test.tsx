@@ -47,7 +47,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
 // Spy on copyText but keep the rest of sendops (errText etc.) real.
 vi.mock("../lib/sendops", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/sendops")>();
-  return { ...actual, copyText: vi.fn() };
+  return { ...actual, copyText: vi.fn().mockResolvedValue(true) };
 });
 
 const T = (k: string, o?: Record<string, unknown>) => i18n.t(k, o);
@@ -169,15 +169,28 @@ describe("PairModal", () => {
 
       fireEvent.click(copy(T("pair.addrLabel")));
       expect(sendops.copyText).toHaveBeenLastCalledWith("192.168.1.20:51704");
-      expect(useToast.getState().msg).toBe(T("pair.addrCopied"));
+      await waitFor(() =>
+        expect(useToast.getState().msg).toBe(T("pair.addrCopied")),
+      );
 
       fireEvent.click(copy(T("pair.codeLabel")));
       expect(sendops.copyText).toHaveBeenLastCalledWith("482913");
-      expect(useToast.getState().msg).toBe(T("pair.codeCopied"));
+      await waitFor(() =>
+        expect(useToast.getState().msg).toBe(T("pair.codeCopied")),
+      );
 
       fireEvent.click(screen.getByRole("button", { name: T("pair.copyLink") }));
       expect(sendops.copyText).toHaveBeenLastCalledWith(LINK);
-      expect(useToast.getState().msg).toBe(T("pair.linkCopied"));
+      await waitFor(() =>
+        expect(useToast.getState().msg).toBe(T("pair.linkCopied")),
+      );
+
+      // A copy that didn't happen doesn't say it did (M24).
+      vi.mocked(sendops.copyText).mockResolvedValueOnce(false);
+      fireEvent.click(copy(T("pair.codeLabel")));
+      await waitFor(() =>
+        expect(useToast.getState().msg).toBe(T("common.copyFailed")),
+      );
     });
 
     it("with no LAN address, says so — and offers no link that couldn't work", async () => {

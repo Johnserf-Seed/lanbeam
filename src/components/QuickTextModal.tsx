@@ -17,7 +17,11 @@ export default function QuickTextModal() {
 
   const [text, setText] = useState("");
   const [clip, setClip] = useState(true);
-  const [target, setTarget] = useState("");
+  // The device the text goes to, pinned once the picker shows one (M26). The
+  // name is kept so a device that drops off the list can still be named.
+  const [target, setTarget] = useState<{ id: string; name: string } | null>(
+    null,
+  );
   const [sending, setSending] = useState(false);
   // True only when the pointer went down on the scrim itself; a drag that
   // starts inside the modal (e.g. selecting textarea text) and ends on the
@@ -35,21 +39,32 @@ export default function QuickTextModal() {
       setText(prefill ?? "");
       if (prefill) useOverlays.setState({ qtPrefill: null });
       setClip(true);
-      setTarget("");
+      setTarget(null);
       setSending(false);
     }
   }, [qtOpen]);
+
+  // Pin the first device as soon as there is one to show — so that the device
+  // on screen is the device the text goes to. A target that vanished from the
+  // list used to be silently replaced by whichever device sorted first, and
+  // ⌘⏎ sent the text there (M26).
+  useEffect(() => {
+    if (qtOpen && !target && devices[0])
+      setTarget({ id: devices[0].deviceId, name: devices[0].name });
+  }, [qtOpen, target, devices]);
 
   useEscape(qtOpen, () => setQt(false));
 
   if (!qtOpen) return null;
   const close = () => setQt(false);
-  const targetId = devices.some((d) => d.deviceId === target)
-    ? target
-    : (devices[0]?.deviceId ?? "");
-  const targetName =
-    devices.find((d) => d.deviceId === targetId)?.name ?? targetId;
-  const canSend = !!text.trim() && !!targetId && !sending;
+  const live = target
+    ? devices.find((d) => d.deviceId === target.id)
+    : undefined;
+  const targetId = target?.id ?? "";
+  const targetName = live?.name ?? target?.name ?? "";
+  // Gone offline: say so and wait — never send somewhere else instead.
+  const offline = !!target && !live;
+  const canSend = !!text.trim() && !!live && !sending;
 
   const send = async () => {
     if (!canSend) return;
@@ -101,15 +116,34 @@ export default function QuickTextModal() {
             style={{ flex: 1 }}
             value={targetId}
             disabled={!devices.length}
-            onChange={(e) => setTarget(e.target.value)}
+            onChange={(e) => {
+              const d = devices.find((x) => x.deviceId === e.target.value);
+              if (d) setTarget({ id: d.deviceId, name: d.name });
+            }}
           >
             {devices.map((d) => (
               <option key={d.deviceId} value={d.deviceId}>
                 {d.name}
               </option>
             ))}
+            {offline && (
+              <option value={targetId} disabled>
+                {t("qt.offlineOption", { name: targetName })}
+              </option>
+            )}
           </select>
         </div>
+        {offline && (
+          <div
+            style={{
+              padding: "6px 20px 0 20px",
+              fontSize: 11.5,
+              color: "var(--danger)",
+            }}
+          >
+            {t("qt.targetOffline", { name: targetName })}
+          </div>
+        )}
         <textarea
           value={text}
           placeholder={t("qt.placeholder")}
