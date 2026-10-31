@@ -106,8 +106,9 @@ pub enum AppMessage {
     },
     /// In-band pairing request (M7.1), gated on `TRANSFER_V2`: the initiator that
     /// redeemed a pairing code presents it so the responder can match it against
-    /// the code it minted, after which both sides store each other's fingerprint
-    /// in the trust store. Only ever sent to a peer whose `Hello` advertised 2 —
+    /// the code it minted. The exchange itself trusts no one: each side records
+    /// the other in its trust store only once a person there has compared the
+    /// SAS. Only ever sent to a peer whose `Hello` advertised 2 —
     /// a v1 (M4–M6) peer never receives it (see `transfer::PeerHello::version`).
     PairRequest {
         code: String,

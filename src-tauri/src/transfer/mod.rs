@@ -2037,10 +2037,12 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
         Ok(()) => {
             // Commit overwrite files: the whole transfer succeeded (and every
             // hashed file verified), so replace each real target with the temp we
-            // streamed into. `rename` won't clobber an existing file on Windows,
-            // so fall back to remove-then-rename; a crash in that tiny window
-            // leaves the fully-synced new bytes at the temp (a "(1)" sibling) —
-            // never nothing, and the original was never touched until here.
+            // streamed into. `rename` replaces the target in one step on every
+            // platform (std asks Windows to replace an existing file), but it
+            // can still be refused — a read-only target, say — so fall back to
+            // remove-then-rename; a crash in that tiny window leaves the
+            // fully-synced new bytes at the temp (a "(1)" sibling) — never
+            // nothing, and the original was never touched until here.
             // `remove_file` never follows a symlink, so containment holds.
             for (temp, target) in &overwrite_renames {
                 let committed = std::fs::rename(temp, target).or_else(|_| {
