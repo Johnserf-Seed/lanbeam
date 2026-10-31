@@ -484,7 +484,7 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<SasEvent>("sas_code", (p) => {
-        // connect_device emits sas_code without a sessionId — no transfer.
+        // Every sas_code names its send; one without is nothing to attach to.
         if (!p.sessionId) return;
         useTransfers.getState().attachSas(p.sessionId, p.sas, p.deviceId);
       }),

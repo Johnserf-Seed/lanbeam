@@ -973,7 +973,7 @@ fn render_landing(token: &str, files: &[(String, u64)], lang: Lang) -> String {
             r##"<li><a href="/s/{token}/{i}" download><span class="chip">{ext}</span><span class="meta"><span class="name">{nm}</span><span class="size">{sz}</span></span>{DL_ICON}</a></li>"##,
             ext = ext_label(name),
             nm = html_escape(name),
-            sz = human_size(*size),
+            sz = crate::transfer::human_size(*size),
         ));
     }
     page_shell(
@@ -1024,22 +1024,6 @@ fn html_escape(s: &str) -> String {
         }
     }
     out
-}
-
-/// A compact human-readable byte size (`1.5 MB`, `812 B`). Binary units, one
-/// decimal above bytes.
-fn human_size(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
-    if bytes < 1024 {
-        return format!("{bytes} B");
-    }
-    let mut size = bytes as f64;
-    let mut unit = 0;
-    while size >= 1024.0 && unit < UNITS.len() - 1 {
-        size /= 1024.0;
-        unit += 1;
-    }
-    format!("{size:.1} {}", UNITS[unit])
 }
 
 #[cfg(test)]
@@ -1869,10 +1853,10 @@ mod tests {
     /// Byte-size formatting and RFC 5987 disposition encoding are stable.
     #[test]
     fn helpers_format_size_and_disposition() {
-        assert_eq!(human_size(0), "0 B");
-        assert_eq!(human_size(512), "512 B");
-        assert_eq!(human_size(1536), "1.5 KB");
-        assert_eq!(human_size(5 * 1024 * 1024), "5.0 MB");
+        assert_eq!(crate::transfer::human_size(0), "0 B");
+        assert_eq!(crate::transfer::human_size(512), "512 B");
+        assert_eq!(crate::transfer::human_size(1536), "1.5 KB");
+        assert_eq!(crate::transfer::human_size(5 * 1024 * 1024), "5.0 MB");
 
         let cd = content_disposition("naïve rapport.pdf");
         assert!(

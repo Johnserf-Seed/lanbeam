@@ -2,7 +2,6 @@
 //! `kind(1) || body`: CONTROL = JSON `AppMessage`, FILE_CHUNK = `index:u32 BE || bytes`.
 //! The file manifest is PAGED ([FIX-4]) so a large file list never overflows one frame.
 //! DESIGN §1.3–1.4. Wired into the send/receive loops in M3-B.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -121,8 +120,9 @@ pub enum AppMessage {
         port: Option<u16>,
     },
     /// The responder's answer to a [`AppMessage::PairRequest`] (M7.1): `accept`
-    /// on a code match — carrying the responder's friendly `name` for the
-    /// initiator's trust entry — or a decline with an optional human `reason`.
+    /// on a code match — carrying the responder's friendly `name`, for the trust
+    /// entry the initiator records once a person has compared the SAS — or a
+    /// decline with an optional human `reason`.
     /// Also gated on `TRANSFER_V2`.
     PairConfirm {
         accept: bool,
@@ -171,10 +171,6 @@ pub enum AppMessage {
         /// Additive.
         #[serde(default)]
         reason: Option<String>,
-    },
-    Error {
-        code: String,
-        message: String,
     },
     Bye,
 }

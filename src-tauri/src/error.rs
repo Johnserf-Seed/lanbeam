@@ -1,7 +1,6 @@
 //! Crate-wide error type. Serializes with a `{kind, message}` shape so a failed
 //! `#[tauri::command]` surfaces a structured, readable error on the JS side.
 //! `message`s are internal diagnostics for logs/UI — never a user-facing contract.
-#![allow(dead_code)] // several variants land in later milestones (M2–M4)
 
 use serde::Serialize;
 

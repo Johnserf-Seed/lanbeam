@@ -49,7 +49,8 @@ function CloseBtn({ onClick }: { onClick: () => void }) {
  *
  *  That flow dialled the new key, showed the resulting SAS, and told the user
  *  「两台设备屏幕应显示一致」. The other device showed NOTHING — `connect_device`
- *  hands the SAS back to the caller and the far end just swallows a Bye. So the
+ *  (since removed) handed the SAS back to the caller and the far end just
+ *  swallowed a Bye. So the
  *  number had nothing to be compared against, and pressing 「一致」 migrated trust
  *  onto the very key the alert existed to make you suspicious of. A code only one
  *  side can read is not a check; it is a formality that ends in a yes.

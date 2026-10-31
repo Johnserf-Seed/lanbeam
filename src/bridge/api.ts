@@ -224,7 +224,7 @@ export type TransferEvent = {
   /** the peer — on a queued send (M25), the first event the row gets */
   deviceId?: string;
 };
-/** connect_device (fingerprint re-verify) emits sas_code without a session. */
+/** The SAS of an outgoing send, emitted once the connection is up (H10). */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };
 /** Silent network degradations surfaced by the backend (M4.6).
  *  Known kinds: "udp_recv_fallback" | "tcp_port_fallback"; future kinds must
@@ -707,12 +707,6 @@ export const listDiscoveredDevices = () =>
           port: 52637,
         })),
       );
-
-// M2: open an authenticated Noise channel to a peer; returns the SAS.
-export const connectDevice = (deviceId: string) =>
-  isTauri
-    ? invoke<string>("connect_device", { deviceId })
-    : Promise.resolve("483921");
 
 // M2: loopback self-test of the encrypted handshake; returns the SAS.
 

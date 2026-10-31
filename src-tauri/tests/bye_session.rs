@@ -1,4 +1,4 @@
-//! Integration test: a Bye-only session (what `connect_device`'s identity
+//! Integration test: a Bye-only session (what `connect_by_addr`'s identity
 //! round-trip produces) through the REAL `handle_incoming` must end cleanly
 //! and leave zero trace — no UI events, `pending`/`completed` untouched.
 //!
@@ -78,7 +78,7 @@ async fn bye_only_session_leaves_no_events_or_state() {
         handle_incoming(sess, &ctx2).await
     });
 
-    // Mirror connect_device: hello exchange, then a deliberate Bye.
+    // Mirror connect_by_addr: hello exchange, then a deliberate Bye.
     let prober_priv = *generate_identity().unwrap().private_bytes();
     let stream = TcpStream::connect(addr).await.unwrap();
     let mut s = NoiseSession::handshake_initiator(stream, &prober_priv, None)
