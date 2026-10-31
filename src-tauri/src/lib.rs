@@ -58,17 +58,16 @@ use tauri::Emitter;
 use tauri::Manager;
 
 use commands::{
-    cancel_pairing, cancel_transfer, connect_by_addr, connect_device, discard_partials,
-    export_diagnostics, forget_device, get_download_dir, get_listen_port, get_log_dir,
-    get_my_identity, get_net_status, get_network_info, get_settings, join_by_code,
-    list_discovered_devices, list_partials, list_shares, list_trusted, open_local_path,
-    pause_transfer, remove_trusted, reply_file_request, reset_identity, resume_transfer,
-    reveal_received, send_files, send_text, set_auto_open, set_autostart, set_clip_share,
-    set_conflict_policy, set_device_name, set_discoverable, set_download_dir, set_hotkey,
-    set_hotkey_enabled, set_iface_filter, set_listen_port, set_log_level, set_max_concurrent,
-    set_notif_system, set_organize, set_rate_limit, set_recv_policy, set_strip_exif,
-    set_tray_close, set_trusted, set_ui_zoom, set_verify_hash, start_pairing, start_share,
-    stop_share, take_pending_deep_link, update_share,
+    cancel_pairing, cancel_transfer, connect_by_addr, discard_partials, export_diagnostics,
+    forget_device, get_download_dir, get_listen_port, get_log_dir, get_my_identity, get_net_status,
+    get_network_info, get_settings, join_by_code, list_discovered_devices, list_partials,
+    list_shares, list_trusted, open_local_path, pause_transfer, remove_trusted, reply_file_request,
+    reset_identity, resume_transfer, reveal_received, send_files, send_text, set_auto_open,
+    set_autostart, set_clip_share, set_conflict_policy, set_device_name, set_discoverable,
+    set_download_dir, set_hotkey, set_hotkey_enabled, set_iface_filter, set_listen_port,
+    set_log_level, set_max_concurrent, set_notif_system, set_organize, set_rate_limit,
+    set_recv_policy, set_strip_exif, set_tray_close, set_trusted, set_ui_zoom, set_verify_hash,
+    start_pairing, start_share, stop_share, take_pending_deep_link, update_share,
 };
 use discovery::{DiscoveryCtx, PeerTable};
 use identity::Identity;
@@ -342,12 +341,16 @@ pub(crate) fn register_summon_hotkey<R: tauri::Runtime>(
 /// `tray_close` setting keeps the app running in the background, EXCEPT when
 /// a quit is explicitly in progress (tray 退出, `reset_identity`'s restart) —
 /// intercepting those would make the app unquittable (M5.3).
-fn should_hide_on_close(tray_close: bool, quitting: bool) -> bool {
-    tray_close && !quitting
+fn should_hide_on_close(tray_close: bool, quitting: bool, tray_up: bool) -> bool {
+    tray_close && !quitting && tray_up
 }
 
-/// Synchronously flush the trust and partials stores before a deliberate exit.
-/// WHY: both stores normally persist fire-and-forget on the blocking pool
+/// Whether the tray icon exists this run. Hiding the window into a tray that
+/// failed to appear would leave nothing on screen to bring it back (L9).
+static TRAY_UP: AtomicBool = AtomicBool::new(false);
+
+/// Synchronously flush the settings, trust and partials stores before a
+/// deliberate exit. WHY: all three normally persist fire-and-forget on the blocking pool
 /// (`persist_async`), which `app.exit(0)` does NOT drain — so a pairing/trust or
 /// discard-partials decision made moments before quitting could be lost inside
 /// the fsync+rename window. Snapshot under each read guard, drop the guard, then
@@ -356,7 +359,12 @@ fn should_hide_on_close(tray_close: bool, quitting: bool) -> bool {
 /// (highest) seq, so it wins. A poisoned lock degrades to a skipped flush rather
 /// than blocking the quit. `reset_identity` already awaits its own trust persist
 /// for the same reason.
-pub(crate) fn flush_persistence(state: &AppState) {
+pub(crate) fn flush_persistence(app: &tauri::AppHandle, state: &AppState) {
+    // Settings first: a toggle flipped just before quitting is the likeliest
+    // write still in flight (L14). Its stamp is the newest, so it wins.
+    if let Ok(s) = state.settings.read().map(|s| s.clone()) {
+        settings::save_now(app, &s);
+    }
     if let Some(snap) = state.trusted.read().ok().and_then(|t| t.snapshot()) {
         snap.persist();
     }
@@ -385,7 +393,6 @@ pub fn run() {
         }));
     }
     let builder = builder
-        .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         // Quick text (M7.3): mirror an incoming text to the local clipboard when
@@ -807,8 +814,23 @@ pub fn run() {
             // back into a hidden window AND the only reliable way out: its 退出
             // flips the quitting flag the close interception honors. See `tray`
             // for why every OTHER item is delegated to the webview.
+            // No tray is a degraded run, not a failed launch (L9): `?` here took
+            // the whole app down over a missing AppIndicator. Without one, a
+            // close quits instead of hiding into a tray nobody can see.
             #[cfg(desktop)]
-            tray::build(app)?;
+            match tray::build(app) {
+                Ok(()) => TRAY_UP.store(true, Ordering::Relaxed),
+                Err(e) => log::error!("no tray icon ({e}); closing the window will quit"),
+            }
+
+            // Clear the scratch copies a crashed run left behind (L18).
+            {
+                let root = commands::send_scratch_root(app.handle());
+                let started = std::time::SystemTime::now();
+                tauri::async_runtime::spawn_blocking(move || {
+                    commands::sweep_send_scratch(&root, started)
+                });
+            }
 
             // Autostart reconcile (M5.5): the persisted setting is the source
             // of truth. The OS entry can drift behind our back (removed via
@@ -930,7 +952,11 @@ pub fn run() {
                     .map(|state| {
                         let tray_close =
                             state.settings.read().map(|s| s.tray_close).unwrap_or(false);
-                        should_hide_on_close(tray_close, state.quitting.load(Ordering::Relaxed))
+                        should_hide_on_close(
+                            tray_close,
+                            state.quitting.load(Ordering::Relaxed),
+                            TRAY_UP.load(Ordering::Relaxed),
+                        )
                     })
                     .unwrap_or(false);
                 if hide {
@@ -971,7 +997,6 @@ pub fn run() {
             get_network_info,
             get_listen_port,
             list_discovered_devices,
-            connect_device,
             connect_by_addr,
             start_pairing,
             cancel_pairing,
@@ -1013,7 +1038,7 @@ pub fn run() {
                 tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
             ) {
                 if let Some(state) = app.try_state::<AppState>() {
-                    flush_persistence(&state);
+                    flush_persistence(app, &state);
                 }
             }
             // macOS: a click on the Dock icon (or opening the app again from
@@ -1032,17 +1057,23 @@ mod tests {
     use super::*;
 
     /// The close-interception matrix (M5.3): hide-to-tray ONLY when the user
-    /// wants it AND no quit is in progress. The quitting override is what
-    /// keeps tray-退出 (and `reset_identity`'s restart) able to actually end
-    /// the process instead of hiding its own teardown.
+    /// wants it AND no quit is in progress AND there is a tray to hide into.
+    /// The quitting override is what keeps tray-退出 (and `reset_identity`'s
+    /// restart) able to actually end the process instead of hiding its own
+    /// teardown; the tray check is what keeps a run without one (L9) from
+    /// hiding the only window for good.
     #[test]
     fn close_hides_only_when_enabled_and_not_quitting() {
-        assert!(should_hide_on_close(true, false));
+        assert!(should_hide_on_close(true, false, true));
         assert!(
-            !should_hide_on_close(true, true),
+            !should_hide_on_close(true, true, true),
             "quit intent must beat tray_close"
         );
-        assert!(!should_hide_on_close(false, false));
-        assert!(!should_hide_on_close(false, true));
+        assert!(!should_hide_on_close(false, false, true));
+        assert!(!should_hide_on_close(false, true, true));
+        assert!(
+            !should_hide_on_close(true, false, false),
+            "no tray, nothing to hide into"
+        );
     }
 }

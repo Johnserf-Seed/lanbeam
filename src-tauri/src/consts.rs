@@ -28,6 +28,17 @@ pub const DISCOVERY_PORT: u16 = 51703;
 pub const MULTICAST_TTL: u32 = 1; // link-local; do not route
 pub const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(2);
 pub const PEER_EXPIRY: Duration = Duration::from_secs(8); // ~4 missed announces
+/// Devices the discovery table holds at once (L13). A real LAN has a handful;
+/// without a bound, a host announcing made-up ids could grow it for as long as
+/// it liked. Past it, the device heard from longest ago makes room.
+pub const MAX_DISCOVERED_PEERS: usize = 512;
+/// The discovery receive buffer. An announce is a small JSON object; anything
+/// longer than this is truncated and fails to parse.
+pub const DISCOVERY_RECV_BUF: usize = 2048;
+/// The longest device name, in characters — our own (`set_device_name`) and a
+/// peer's self-declared one alike, so a hostile peer can't grow the device
+/// list, the trust file or a notification title without bound.
+pub const MAX_NAME_CHARS: usize = 63;
 
 // Transfer (TCP)
 pub const DEFAULT_TCP_PORT: u16 = 51704;
@@ -130,7 +141,7 @@ pub const MAX_MANIFEST_NAME_BYTES: usize = 4096;
 /// with frame-limit names would materialize ~650 MB in the files Vec.
 pub const MAX_MANIFEST_NAME_TOTAL: usize = 4 * 1024 * 1024;
 /// Outbound TCP dial deadline. Without it a black-holed peer (stale discovery
-/// entry, firewall drop) hangs `send_files`/`connect_device` for the OS TCP
+/// entry, firewall drop) hangs `send_files`/`connect_by_addr` for the OS TCP
 /// timeout, which can be minutes.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Per-frame deadline during the Noise handshake, both roles. A stranger can
@@ -165,11 +176,15 @@ pub const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// `transfer::wait_while_paused`.
 pub const MAX_PAUSE_PARK: Duration = Duration::from_secs(50);
 /// Sender's wait for the receiver's accept/decline `FileSendReply`. Must
-/// exceed the receiver's 120s accept-prompt window so a human answering at
+/// exceed the receiver's [`PROMPT_TIMEOUT`] window so a human answering at
 /// the deadline is never misreported as a timeout — only a peer that vanished
 /// silently (sleep, power loss, WiFi drop with no RST) hits this, and idle
 /// keepalive-free TCP would otherwise never notice.
 pub const REPLY_TIMEOUT: Duration = Duration::from_secs(150);
+/// How long an accept prompt waits for an answer before declining (or, for an
+/// auto-accepted transfer's collision question, keeping both). Must stay under
+/// [`REPLY_TIMEOUT`], the sender's wait for that answer.
+pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// BASE of the sender's wait for the final `TransferAck` — the receiver may
 /// still be flushing/syncing (later: hashing) large files after the last
 /// chunk lands. The actual deadline scales with the transfer size at

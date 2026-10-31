@@ -1,7 +1,6 @@
 //! File transfer over an authenticated Noise channel. Sender streams a paged manifest
 //! then chunked file bytes; receiver sanitizes every name, writes under the download
 //! root, and acks. DESIGN §1.4, §3.5. App wiring (events/commands) is in M3-B's lib/commands.
-#![allow(dead_code)] // some helpers are wired by commands.rs / transport listener
 
 use std::collections::HashSet;
 use std::io::SeekFrom;
@@ -104,7 +103,7 @@ fn device_info_msg(name: String) -> AppMessage {
 }
 
 /// Say goodbye explicitly. WHY a dedicated frame instead of just closing:
-/// `connect_device`'s identity check must end in a way the responder can tell
+/// an identity check (`connect_by_addr`) must end in a way the responder can tell
 /// apart from a crashed peer — a `Bye` is swallowed silently (no prompt, no
 /// events), a bare close is an error.
 pub async fn send_bye(session: &mut NoiseSession) -> Result<()> {
@@ -241,17 +240,19 @@ async fn initiator_hello_inner(session: &mut NoiseSession, my_name: String) -> R
     // Send both introduction frames, then wait for the peer's first reply.
     // WHY the error mapping: a v1 responder expects the manifest as the FIRST
     // control message, so our `Hello` makes it error out and drop the link —
-    // anywhere in this stretch, a broken/closed channel means "the peer does
-    // not speak the version handshake", which the UI must present as "update
-    // the other device" (code `peer_too_old`), not as a generic failure.
+    // once the Hello is out, a broken/closed channel means "the peer does not
+    // speak the version handshake", which the UI must present as "update the
+    // other device" (code `peer_too_old`), not as a generic failure. A Hello
+    // that could not even be SENT says nothing about the peer's version: the
+    // connection was already gone (L10), and that is what it reports.
+    send_control(
+        session,
+        &AppMessage::Hello {
+            versions: protocol::SUPPORTED_VERSIONS.to_vec(),
+        },
+    )
+    .await?;
     let first: Result<AppMessage> = async {
-        send_control(
-            session,
-            &AppMessage::Hello {
-                versions: protocol::SUPPORTED_VERSIONS.to_vec(),
-            },
-        )
-        .await?;
         send_control(session, &device_info_msg(my_name)).await?;
         recv_control(session).await
     }
@@ -327,7 +328,7 @@ pub enum InboundOpen {
         to_clipboard: Option<bool>,
         peer: PeerHello,
     },
-    /// The peer only wanted the identity/SAS round-trip (`connect_device`)
+    /// The peer only wanted the identity/SAS round-trip (`connect_by_addr`)
     /// and said `Bye` — close cleanly: no error, no prompt, no events.
     Bye,
 }
@@ -1050,11 +1051,7 @@ pub fn file_event_sink<R: Runtime>(
                 last_index = index;
                 last_pct = -1;
             }
-            let pct = if total == 0 {
-                100
-            } else {
-                ((done as u128 * 100) / total as u128) as i64
-            };
+            let pct = whole_percent(done, total);
             if pct != last_pct {
                 last_pct = pct;
                 let _ = app.emit(
@@ -1471,9 +1468,19 @@ async fn read_manifest_entries(
             return Err(LanBeamError::Protocol("manifest overran file_count".into()));
         }
     }
+    // The total is the sum of the entries (L17). The declared one is what the
+    // accept prompt and the notification show, and nothing tied it to the
+    // entries: a sender could ask for "1 KB" and list gigabytes. The per-file
+    // sizes are what the receive actually enforces, so they are the truth.
+    let listed = files.iter().fold(0u64, |sum, f| sum.saturating_add(f.size));
+    if listed != total_size {
+        log::warn!(
+            "manifest {transfer_id}: declares {total_size} bytes, its files add up to {listed}"
+        );
+    }
     Ok(Manifest {
         transfer_id,
-        total_size,
+        total_size: listed,
         files,
     })
 }
@@ -1485,6 +1492,9 @@ pub(crate) const REPLY_DECLINED: &str = "declined";
 pub(crate) const REPLY_BUSY: &str = "busy";
 pub(crate) const REPLY_UNSAFE_NAME: &str = "unsafe filename";
 pub(crate) const REPLY_DUPLICATE_ID: &str = "duplicate transfer id";
+/// The receiver accepted, then cancelled while the transfer waited for a
+/// concurrency slot (L15). An older sender reads it as a plain refusal.
+pub(crate) const REPLY_CANCELLED: &str = "cancelled";
 
 /// What a receiver's "no" means on the sending side (H6). Only a person
 /// declining is `Rejected` — the UI then drops the row and says "they
@@ -1500,6 +1510,7 @@ pub(crate) fn peer_reply_error(reason: Option<&str>) -> LanBeamError {
         Some(REPLY_DUPLICATE_ID) => {
             LanBeamError::Protocol("the receiver already has a transfer with this id".into())
         }
+        Some(REPLY_CANCELLED) => LanBeamError::PeerCancelled,
         _ => LanBeamError::Rejected,
     }
 }
@@ -1735,11 +1746,14 @@ pub async fn run_receive<F: FnMut(u64, u64)>(
 /// deleted, matching the pre-M6.4 all-or-nothing cleanup. The caller reads the
 /// pruned accumulator to persist exactly those partials.
 ///
-/// `opened` is a NON-pruned out-accumulator of every file's identity actually
-/// opened this session, in open order. The caller uses it as the `remove` set
-/// when clearing stale partial records on the error path — scoped to files this
-/// session reached, so a still-valid partial for a file the session never got
-/// to is left intact rather than wiped (finding-1).
+/// `opened` is a NON-pruned out-accumulator of every file's identity this
+/// session reached — tried to open — in order. The caller uses it as the
+/// `remove` set when clearing stale partial records on the error path — scoped
+/// to files this session reached, so a still-valid partial for a file the
+/// session never got to is left intact rather than wiped (finding-1). A file
+/// whose open FAILED is in it too (L16): a partial that can't be reopened kept
+/// its record, so every retry offered to resume it, failed the same way, and
+/// never got past it.
 ///
 /// `rate_limit` throttles the read loop (M6.7, `None` = unlimited) and `on_file`
 /// receives a [`FileEvent`] as each file streams and verifies (M6.8).
@@ -1792,6 +1806,9 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                 sha256: f.sha256.clone(),
             };
             let hashed = f.sha256.is_some();
+            // Reached: on any failure from here, this file's partial record is
+            // dropped and the next attempt starts it fresh (L16).
+            opened.push(identity.clone());
 
             // Open per the plan. Resume reopens the exact recorded partial; a
             // fresh file resolves its collision (rename de-dupes, overwrite
@@ -1884,10 +1901,6 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
             };
 
             let mut out = tokio::fs::File::from_std(std_file);
-            // Record the opened identity in the NON-pruned accumulator so the
-            // caller's error-path `remove` set is scoped to files this session
-            // reached (finding-1), even if this one is later deleted on cleanup.
-            opened.push(identity.clone());
             // Track progress for this file BEFORE the first byte, so an
             // interruption right after open still records the partial (M6.4).
             progress.push(FileProgress {
@@ -2148,6 +2161,30 @@ async fn fold_prefix(file: &mut tokio::fs::File, n: u64, hasher: &mut Sha256) ->
     Ok(())
 }
 
+/// The name to show for a peer: what it called itself, trimmed, if that is
+/// anything; else `fallback` (the discovery table's name, say); else the first
+/// eight characters of its device id — never empty.
+pub(crate) fn peer_display_name(
+    declared: Option<&str>,
+    device_id: &str,
+    fallback: impl FnOnce() -> Option<String>,
+) -> String {
+    declared
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map(String::from)
+        .or_else(fallback)
+        .unwrap_or_else(|| device_id.chars().take(8).collect())
+}
+
+/// The name the discovery table has for `device_id`, if it is there.
+fn discovered_name<R: Runtime>(ctx: &TransportCtx<R>, device_id: &str) -> Option<String> {
+    ctx.peers
+        .lock()
+        .ok()
+        .and_then(|t| t.get(device_id).map(|p| p.name.clone()))
+}
+
 /// The file-request throttle (M18): a device in the trust store passes; anyone
 /// else is counted against its source address. A poisoned lock admits — the
 /// throttle is a nuisance guard, and failing it closed would stop every
@@ -2372,10 +2409,11 @@ fn reveal_if_asked<R: Runtime>(_ctx: &TransportCtx<R>, _path: Option<&std::path:
 #[cfg(not(desktop))]
 fn notify_system<R: Runtime>(_ctx: &TransportCtx<R>, _title: &str, _body: &str) {}
 
-/// Human-readable byte size ("824 B", "1.2 MB", "40 GB"), 1024-based. Feeds
-/// the OS notification body, so it stays symbols + numbers — see
-/// [`notify_system`] for the locale-neutrality contract.
-fn human_size(bytes: u64) -> String {
+/// Human-readable byte size ("824 B", "1.2 MB", "40 GB"), 1024-based, one
+/// decimal under 10. Feeds the OS notification body and the share landing page,
+/// so it stays symbols + numbers — see [`notify_system`] for the
+/// locale-neutrality contract.
+pub(crate) fn human_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
     let mut value = bytes as f64;
     let mut unit = 0;
@@ -2411,7 +2449,7 @@ pub async fn handle_incoming<R: Runtime>(
         };
     let device_id = URL_SAFE_NO_PAD.encode(session.remote_static());
     let (manifest, peer) = match opened {
-        // `connect_device`'s identity/SAS round-trip ends here by design:
+        // `connect_by_addr`'s identity/SAS round-trip ends here by design:
         // the peer introduced itself and said Bye — nothing user-visible
         // happened, so the UI sees no prompt, no events, no state.
         InboundOpen::Bye => {
@@ -2448,19 +2486,9 @@ pub async fn handle_incoming<R: Runtime>(
     // DeviceInfo name is best (it exists even for peers absent from the
     // discovery table), the table name is next, and the shortened device id
     // always exists. The negotiated version is what later capabilities gate on.
-    let sender_name = peer
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            ctx.peers
-                .lock()
-                .ok()
-                .and_then(|t| t.get(&device_id).map(|p| p.name.clone()))
-        })
-        .unwrap_or_else(|| device_id.chars().take(8).collect());
+    let sender_name = peer_display_name(peer.name.as_deref(), &device_id, || {
+        discovered_name(ctx, &device_id)
+    });
     log::info!(
         "inbound session {session_id} from {sender_name:?} ({device_id}, proto v{})",
         peer.version
@@ -2477,27 +2505,25 @@ pub async fn handle_incoming<R: Runtime>(
         return Ok(());
     }
 
-    // Reject unsafe manifests before involving the user.
-    if let Err(e) = validate_manifest(&manifest) {
-        let _ = send_reply(
-            &mut session,
-            &session_id,
-            false,
-            Some(REPLY_UNSAFE_NAME.into()),
-        )
-        .await;
-        let _ = ctx.app.emit(
-            "transfer_error",
-            json!({ "sessionId": session_id, "error": e.to_string(), "code": e.ui_code() }),
-        );
-        return Err(e);
-    }
-
     // Whole-lifetime duplicate guard: claimed BEFORE any event fires and held
     // until this function returns, so a reused sender-chosen id is politely
     // refused whether the live session is auto-accepted, prompting, or already
-    // mid-transfer — see `InFlightGuard`.
-    let Some(_in_flight) = InFlightGuard::claim(&ctx.in_flight, &session_id) else {
+    // mid-transfer — see `InFlightGuard`. An id one of OUR transfers is using
+    // is refused the same way (L12): the peer we are sending to learns that id
+    // from our manifest, and an inbound session under it would land its events
+    // — a failure, a prompt — on our send's row. (Sending to ourselves is
+    // refused at the dial, so this is never the same transfer seen twice.)
+    let ours = ctx
+        .transfers_ctl
+        .lock()
+        .map(|m| m.contains_key(&session_id))
+        .unwrap_or(true);
+    let claimed = if ours {
+        None
+    } else {
+        InFlightGuard::claim(&ctx.in_flight, &session_id)
+    };
+    let Some(_in_flight) = claimed else {
         log::warn!(
             "rejecting inbound transfer from {device_id}: id {session_id} is already in flight"
         );
@@ -2514,6 +2540,23 @@ pub async fn handle_incoming<R: Runtime>(
             "duplicate transfer id {session_id}"
         )));
     };
+
+    // Reject unsafe manifests before involving the user — after the claim, so
+    // the event below can only ever name a session that is this one (L12).
+    if let Err(e) = validate_manifest(&manifest) {
+        let _ = send_reply(
+            &mut session,
+            &session_id,
+            false,
+            Some(REPLY_UNSAFE_NAME.into()),
+        )
+        .await;
+        let _ = ctx.app.emit(
+            "transfer_error",
+            json!({ "sessionId": session_id, "error": e.to_string(), "code": e.ui_code() }),
+        );
+        return Err(e);
+    }
 
     // Receive policy (M4.4): decide BEFORE parking a prompt whether this peer
     // skips it — "all" auto-accepts anyone on the LAN, "trusted" only peers
@@ -2700,7 +2743,7 @@ pub async fn handle_incoming<R: Runtime>(
         // failed. `closed` reads nothing, so the answer winning leaves the stream
         // untouched for the reply.
         let answer = tokio::select! {
-            r = tokio::time::timeout(Duration::from_secs(120), rx) => r,
+            r = tokio::time::timeout(crate::consts::PROMPT_TIMEOUT, rx) => r,
             () = session.closed() => {
                 remove_pending_if_owner(&ctx.pending, &session_id, generation);
                 let e = LanBeamError::ConnectionLost("the sender hung up before an answer".into());
@@ -2842,6 +2885,9 @@ pub async fn handle_incoming<R: Runtime>(
             tokio::select! {
                 biased;
                 _ = ctl.cancel.cancelled() => {
+                    // Say so (L15): the sender is still waiting for the reply,
+                    // and a dropped connection read there as "connection lost".
+                    let _ = send_reply(&mut session, &session_id, false, Some(REPLY_CANCELLED.into())).await;
                     let _ = ctx.app.emit(
                         "transfer_error",
                         json!({ "sessionId": session_id, "error": LanBeamError::Cancelled.to_string(), "code": LanBeamError::Cancelled.ui_code() }),
@@ -3008,7 +3054,7 @@ async fn handle_pair_request<R: Runtime>(
     // source is DROPPED (no reply): answering would hand a brute-forcer a fast,
     // cheap accept/reject oracle. The join side surfaces the dropped connection as
     // a plain failure. Reserving the attempt here (rather than a read-only check
-    // now and a `record_failure` later) is what closes the concurrent-burst race:
+    // now and a failure recorded later) is what closes the concurrent-burst race:
     // N simultaneous PairRequests from one IP each see the reservations of the
     // ones before them, so at most MAX_PAIR_FAILURES pass within a window instead
     // of all N reading a stale count-0. A poisoned lock fails open, as before. The
@@ -3068,13 +3114,7 @@ async fn handle_pair_request<R: Runtime>(
         // sole defence against a machine-in-the-middle, and a code nobody read is
         // not a check. `pair_joined` hands the UI the SAS; the UI records trust
         // (`set_trusted`) once the user confirms it matches the other screen.
-        let joiner_name = peer
-            .name
-            .as_deref()
-            .map(str::trim)
-            .filter(|n| !n.is_empty())
-            .map(String::from)
-            .unwrap_or_else(|| device_id.chars().take(8).collect());
+        let joiner_name = peer_display_name(peer.name.as_deref(), device_id, || None);
         if let Some(ip) = peer_ip {
             if let Ok(mut r) = ctx.pairing.rate.lock() {
                 r.clear(&ip);
@@ -3274,19 +3314,9 @@ async fn handle_text_received<R: Runtime>(
     // Friendly sender name: the peer's DeviceInfo name (present even for peers
     // absent from discovery), then the discovery table, then the short device
     // id — the same precedence the file-accept prompt uses.
-    let sender_name = peer
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(String::from)
-        .or_else(|| {
-            ctx.peers
-                .lock()
-                .ok()
-                .and_then(|t| t.get(device_id).map(|p| p.name.clone()))
-        })
-        .unwrap_or_else(|| device_id.chars().take(8).collect());
+    let sender_name = peer_display_name(peer.name.as_deref(), device_id, || {
+        discovered_name(ctx, device_id)
+    });
 
     // Receiver consent: mirror to the clipboard only when the user enabled
     // clip_share AND the sender requested it. Read the setting at fire time so a
@@ -3510,6 +3540,15 @@ where
     t.format("%Y-%m-%d").to_string()
 }
 
+/// `done` of `total` as a whole percent; an empty total is complete.
+fn whole_percent(done: u64, total: u64) -> i64 {
+    if total == 0 {
+        100
+    } else {
+        ((done as u128 * 100) / total as u128) as i64
+    }
+}
+
 /// Throttled progress emit — only fires on a whole-percent change.
 pub fn emit_progress<R: Runtime>(
     app: &AppHandle<R>,
@@ -3519,11 +3558,7 @@ pub fn emit_progress<R: Runtime>(
     total: u64,
     last_pct: &mut i64,
 ) {
-    let pct = if total == 0 {
-        100
-    } else {
-        ((done as u128 * 100) / total as u128) as i64
-    };
+    let pct = whole_percent(done, total);
     if pct != *last_pct {
         *last_pct = pct;
         let _ = app.emit(
@@ -4538,6 +4573,52 @@ mod tests {
         }
     }
 
+    /// L17: the manifest's total is what its files add up to, whatever the
+    /// sender declared — a "1 KB" request listing gigabytes reads as gigabytes.
+    #[tokio::test]
+    async fn manifest_total_is_the_sum_of_its_files() {
+        let a_priv = priv_key();
+        let b_priv = priv_key();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut s = NoiseSession::handshake_responder(stream, &b_priv)
+                .await
+                .unwrap();
+            read_manifest(&mut s).await
+        });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
+            .await
+            .unwrap();
+        let entry = |name: &str, size: u64| AppMessage::FileListEntry {
+            file: FileMeta {
+                name: name.into(),
+                size,
+                mtime: 0,
+                mode: 0,
+                sha256: None,
+            },
+        };
+        for msg in [
+            AppMessage::FileListBegin {
+                transfer_id: "t-total".into(),
+                total_size: 1024,
+                file_count: 2,
+            },
+            entry("a.bin", 3 << 30),
+            entry("b.bin", 5),
+            AppMessage::FileListEnd {
+                transfer_id: "t-total".into(),
+            },
+        ] {
+            send_control(&mut s, &msg).await.unwrap();
+        }
+        let m = receiver.await.unwrap().expect("a well-formed manifest");
+        assert_eq!(m.total_size, (3 << 30) + 5);
+    }
+
     /// Entries that each pass the per-name cap must still trip the CUMULATIVE
     /// name-byte budget — the count clamp alone would admit ~40 MB of names.
     #[tokio::test]
@@ -5332,6 +5413,9 @@ mod tests {
         assert!(matches!(res, Err(LanBeamError::Rejected)), "{res:?}");
         let (res, _) = send_against(Script::Refuse(None), "legacy").await;
         assert!(matches!(res, Err(LanBeamError::Rejected)), "{res:?}");
+        // L15: accepted, then cancelled while it queued for a slot.
+        let (res, _) = send_against(Script::Refuse(Some(REPLY_CANCELLED)), "queued-cancel").await;
+        assert!(matches!(res, Err(LanBeamError::PeerCancelled)), "{res:?}");
     }
 
     /// The sender reports "accepted" when the receiver accepted — after the
@@ -5922,13 +6006,13 @@ mod tests {
 
     /// `loopback_planned`, for a transfer expected to FAIL: the send's own
     /// error is ignored, and the receive's result comes back with what it left
-    /// in its progress accumulator.
+    /// in its progress and reached-files accumulators.
     async fn loopback_failing(
         items: Vec<SendItem>,
         transfer_id: &'static str,
         dl: PathBuf,
         plan: Vec<FileDisposition>,
-    ) -> (Result<Vec<PathBuf>>, Vec<FileProgress>) {
+    ) -> (Result<Vec<PathBuf>>, Vec<FileProgress>, Vec<FileIdentity>) {
         let a_priv = priv_key();
         let b_priv = priv_key();
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -5954,7 +6038,7 @@ mod tests {
                 |_, _| {},
             )
             .await;
-            (res, progress)
+            (res, progress, opened)
         });
         let stream = TcpStream::connect(addr).await.unwrap();
         let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
@@ -6004,7 +6088,7 @@ mod tests {
                 conflict: ConflictAction::Overwrite,
             },
         ];
-        let (res, _) = loopback_failing(items, "t-m1", dl_dir.clone(), plan).await;
+        let (res, _, _) = loopback_failing(items, "t-m1", dl_dir.clone(), plan).await;
         assert!(matches!(res, Err(LanBeamError::Integrity(_))), "{res:?}");
         assert_eq!(
             std::fs::read(dl_dir.join("first.bin")).unwrap(),
@@ -6012,6 +6096,41 @@ mod tests {
             "the finished file that replaced nothing stays"
         );
         assert!(!dl_dir.join("second.bin").exists(), "the corrupt one goes");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// L16: a partial that can't be reopened as recorded (here: it shrank on
+    /// disk) counts as reached, so the caller drops its record and the next
+    /// attempt starts the file fresh — instead of offering the same doomed
+    /// resume on every retry.
+    #[tokio::test]
+    async fn a_partial_that_cannot_be_reopened_loses_its_record() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-l16-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        let src_file = src_dir.join("r.bin");
+        std::fs::write(&src_file, vec![1u8; 1000]).unwrap();
+        // The record says 100 bytes; only 50 are there now.
+        std::fs::write(dl_dir.join("r.bin"), vec![1u8; 50]).unwrap();
+
+        let items = build_send_list(std::slice::from_ref(&src_file), true).unwrap();
+        let plan = vec![FileDisposition::Resume {
+            disk_rel: PathBuf::from("r.bin"),
+            offset: 100,
+            commit_name: None,
+        }];
+        let (res, progress, opened) = loopback_failing(items, "t-l16", dl_dir, plan).await;
+        assert!(res.is_err(), "the drifted partial fails the receive");
+        assert!(progress.is_empty(), "nothing kept for a resume");
+        assert_eq!(
+            opened.iter().map(|o| o.rel.as_str()).collect::<Vec<_>>(),
+            ["r.bin"],
+            "reached, so its stale record is removed"
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

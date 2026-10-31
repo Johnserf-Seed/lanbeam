@@ -25,7 +25,9 @@ use lanbeam_lib::error::LanBeamError;
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
-use lanbeam_lib::state::{CompletedLog, ConcurrencyGate, PairingState, TransferControl};
+use lanbeam_lib::state::{
+    CompletedLog, ConcurrencyGate, PairingState, TransferControl, TransferCtlGuard,
+};
 use lanbeam_lib::transfer::{build_send_list, handle_incoming, initiator_hello, run_send};
 use lanbeam_lib::transport::noise::NoiseSession;
 use lanbeam_lib::transport::TransportCtx;
@@ -300,6 +302,47 @@ async fn a_full_prompt_queue_declines_busy() {
     receiver.await.unwrap().unwrap();
     assert!(requests.lock().unwrap().is_empty(), "no prompt parked");
     assert_eq!(ctx.pending.lock().unwrap().len(), MAX_PENDING_PROMPTS);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// L12: an inbound session under the id of one of OUR live transfers is refused
+/// before anything reaches the UI. The peer we send to reads that id in our
+/// manifest; a session of its own under it would land its events — a failed
+/// manifest, a prompt — on our send's row.
+#[tokio::test]
+async fn an_inbound_session_cannot_borrow_one_of_our_transfer_ids() {
+    let tmp = std::env::temp_dir().join(format!("lanbeam-borrow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let file = tmp.join("a.bin");
+    std::fs::write(&file, b"payload").unwrap();
+
+    let app = tauri::test::mock_app();
+    let ctx = ctx(app.handle().clone(), &tmp, "all");
+    let requests = capture(app.handle(), "incoming_file_request");
+    let errors = capture(app.handle(), "transfer_error");
+    // One of our sends is live under this id.
+    let (_ours, _ctl) = TransferCtlGuard::register(&ctx.transfers_ctl, "ours");
+
+    let (addr, receiver) = spawn_receiver(&ctx).await;
+    // Even with a name the receiver would refuse, no event may name "ours".
+    let res = send(
+        &generate_identity().unwrap(),
+        addr,
+        &file,
+        "",
+        "ours",
+        &TransferControl::neutral(),
+    )
+    .await;
+    assert!(matches!(res, Err(LanBeamError::Protocol(_))), "{res:?}");
+    assert!(receiver.await.unwrap().is_err());
+    assert!(requests.lock().unwrap().is_empty());
+    assert!(
+        errors.lock().unwrap().is_empty(),
+        "nothing lands on our row"
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
