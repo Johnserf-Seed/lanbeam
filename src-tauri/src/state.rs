@@ -34,14 +34,24 @@ pub struct NetDegraded {
     pub detail: String,
 }
 
-/// Incoming prompts awaiting a UI answer: session_id → (park generation,
-/// decision sender). The generation is stamped at park time so the post-prompt
-/// cleanup only removes its OWN entry — a successor session that re-parked the
-/// same sender-chosen id in the interim must survive. See
-/// `transfer::park_pending`. The payload is a [`ReplyDecision`] (not a bare
-/// `bool`) so the ConflictModal (M6.5) can fold its collision choice into the
-/// same single ordered answer per prompt.
-pub type PendingMap = HashMap<String, (u64, oneshot::Sender<ReplyDecision>)>;
+/// Incoming prompts awaiting a UI answer, by session id. See
+/// `transfer::park_pending`.
+pub type PendingMap = HashMap<String, Parked>;
+
+/// One prompt waiting for the UI's answer.
+pub struct Parked {
+    /// Stamped at park time so the post-prompt cleanup only removes its OWN
+    /// entry — a successor session that re-parked the same sender-chosen id in
+    /// the interim must survive.
+    pub generation: u64,
+    /// Where the answer goes: a [`ReplyDecision`] (not a bare `bool`) so the
+    /// ConflictModal (M6.5) can fold its collision choice into the same single
+    /// ordered answer per prompt.
+    pub reply: oneshot::Sender<ReplyDecision>,
+    /// The `incoming_file_request` payload the prompt went out with — so a
+    /// window that loaded after the event can still show it (L23).
+    pub request: serde_json::Value,
+}
 
 /// How the receiver resolves a name that collides with an existing file on
 /// disk (M6.5). Chosen once per transfer — from the `conflict` setting, or,

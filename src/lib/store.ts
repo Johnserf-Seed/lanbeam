@@ -1170,7 +1170,14 @@ export const useTransfers = create<TransfersState>()(
             },
           };
         }),
-      pushIncoming: (r) => set((s) => ({ incomings: [...s.incomings, r] })),
+      // Once per session: a request fetched at startup (L23) can also arrive
+      // as its event.
+      pushIncoming: (r) =>
+        set((s) =>
+          s.incomings.some((x) => x.sessionId === r.sessionId)
+            ? s
+            : { incomings: [...s.incomings, r] },
+        ),
       shiftIncoming: () => set((s) => ({ incomings: s.incomings.slice(1) })),
       removeIncoming: (sessionId) =>
         set((s) =>

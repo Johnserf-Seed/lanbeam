@@ -758,6 +758,13 @@ export const resumeTransfer = (sessionId: string) =>
 
 // M6.4: discard the persisted resume state for a peer (forget every partial and
 // delete the half-written files). The counterpart to letting a transfer resume.
+/** Requests still waiting for an answer (L23): a window that loaded after
+ *  their `incoming_file_request` events missed them. */
+export const pendingRequests = (): Promise<IncomingRequest[]> =>
+  isTauri
+    ? invoke<IncomingRequest[]>("pending_requests")
+    : Promise.resolve([] as IncomingRequest[]);
+
 /** One interrupted receive still holding bytes in the download folder. Not
  *  `Partial`: that name shadowed TypeScript's own `Partial<T>` (L28). */
 export type PartialFile = {

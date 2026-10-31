@@ -77,6 +77,31 @@ function peerNameOf(deviceId: string, senderName?: string): string {
   return dev?.name ?? shortFp(deviceId);
 }
 
+/** An incoming request. The accept-or-prompt decision moved into the backend
+ *  (M4.4): `autoAccepted: true` means the receive policy already said yes and
+ *  no reply is expected — replying would go nowhere. The UI only narrates it. */
+function onIncomingRequest(r: IncomingRequest): void {
+  const peerName = peerNameOf(r.deviceId, r.senderName);
+  if (r.autoAccepted) {
+    // Auto-accept answered "do I want this", not "what about my existing
+    // file". If the user set 冲突策略 = 每次询问, that question is still
+    // theirs — the backend parks a prompt and waits for this reply. (It
+    // used to answer "rename" for them on exactly this path, which under
+    // the default settings is the ONLY path, so the modal never appeared.)
+    if (r.conflicts?.length && r.conflictPolicy === "ask") {
+      useOverlays
+        .getState()
+        .setConflict({ request: r, peerName, wantTrust: false });
+    } else {
+      useTransfers.getState().acceptMeta(r, peerName);
+      showToast(i18n.t("incoming.acceptToast", { name: peerName }));
+    }
+  } else {
+    useTransfers.getState().pushIncoming(r);
+  }
+  notify();
+}
+
 /** Push the tray's whole localized snapshot. Reads live state through getState(),
  *  so an event handler can call it too — muda flips a CheckMenuItem's tick
  *  OPTIMISTICALLY on click, and only a re-push can un-lie it if the toggle then
@@ -387,34 +412,29 @@ export default function AppShell() {
     [],
   );
 
-  // Incoming request. The accept-or-prompt decision moved into the backend
-  // (M4.4): `autoAccepted: true` means the receive policy already said yes and
-  // no reply is expected — replying would go nowhere. The UI only narrates it.
-  useEffect(
-    () =>
-      api.onEvent<IncomingRequest>("incoming_file_request", (r) => {
-        const peerName = peerNameOf(r.deviceId, r.senderName);
-        if (r.autoAccepted) {
-          // Auto-accept answered "do I want this", not "what about my existing
-          // file". If the user set 冲突策略 = 每次询问, that question is still
-          // theirs — the backend parks a prompt and waits for this reply. (It
-          // used to answer "rename" for them on exactly this path, which under
-          // the default settings is the ONLY path, so the modal never appeared.)
-          if (r.conflicts?.length && r.conflictPolicy === "ask") {
-            useOverlays
+  // Incoming request (see onIncomingRequest). Requests that came in before
+  // this window was up are fetched once it is (L23): their events went to
+  // nobody, and unanswered they would time out with the prompt never shown.
+  useEffect(() => {
+    const off = api.onEvent<IncomingRequest>(
+      "incoming_file_request",
+      onIncomingRequest,
+    );
+    void api
+      .pendingRequests()
+      .then((list) => {
+        for (const r of list) {
+          const shown =
+            useTransfers
               .getState()
-              .setConflict({ request: r, peerName, wantTrust: false });
-          } else {
-            useTransfers.getState().acceptMeta(r, peerName);
-            showToast(i18n.t("incoming.acceptToast", { name: peerName }));
-          }
-        } else {
-          useTransfers.getState().pushIncoming(r);
+              .incomings.some((x) => x.sessionId === r.sessionId) ||
+            useOverlays.getState().conflict?.request.sessionId === r.sessionId;
+          if (!shown) onIncomingRequest(r);
         }
-        notify();
-      }),
-    [],
-  );
+      })
+      .catch(() => {});
+    return off;
+  }, []);
 
   // Quick text arrived (M7.3): drop a text item into the inbox, toast who sent
   // it with a 查看 action that jumps there. Whether it was also placed on this

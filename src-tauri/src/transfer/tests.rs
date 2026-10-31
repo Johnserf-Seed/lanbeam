@@ -801,20 +801,21 @@ async fn duplicate_transfer_id_refused_and_first_prompt_survives() {
     let (tx2, rx2) = oneshot::channel();
 
     assert!(
-        park_pending(&pending, "t-dup", tx1).is_some(),
+        park_pending(&pending, "t-dup", tx1, serde_json::Value::Null).is_some(),
         "first park must win the slot"
     );
     assert!(
-        park_pending(&pending, "t-dup", tx2).is_none(),
+        park_pending(&pending, "t-dup", tx2, serde_json::Value::Null).is_none(),
         "duplicate must be refused"
     );
 
     // The FIRST prompt is still answerable through the map…
-    let (_, survivor) = pending
+    let survivor = pending
         .lock()
         .unwrap()
         .remove("t-dup")
-        .expect("first entry survives");
+        .expect("first entry survives")
+        .reply;
     survivor.send(ReplyDecision::plain(true)).unwrap();
     assert!(
         rx1.await.unwrap().accept,
@@ -832,35 +833,39 @@ async fn duplicate_transfer_id_refused_and_first_prompt_survives() {
 async fn stale_cleanup_cannot_remove_successors_reparked_prompt() {
     let pending: Mutex<PendingMap> = Mutex::new(PendingMap::new());
     let (tx1, _rx1) = oneshot::channel();
-    let gen1 = park_pending(&pending, "t-gen", tx1).expect("first park");
+    let gen1 = park_pending(&pending, "t-gen", tx1, serde_json::Value::Null).expect("first park");
 
     // reply_file_request answers session 1: unconditional remove-and-send.
-    let (_, answered) = pending
+    let answered = pending
         .lock()
         .unwrap()
         .remove("t-gen")
-        .expect("entry parked");
+        .expect("entry parked")
+        .reply;
     let _ = answered.send(ReplyDecision::plain(true));
 
     // Before session 1's task wakes, a successor reuses the id.
     let (tx2, rx2) = oneshot::channel();
-    let gen2 = park_pending(&pending, "t-gen", tx2).expect("successor parks the vacant slot");
+    let gen2 = park_pending(&pending, "t-gen", tx2, serde_json::Value::Null)
+        .expect("successor parks the vacant slot");
     assert_ne!(gen1, gen2, "generations must be unique");
 
     // Session 1's cleanup runs with ITS generation: a no-op now.
     remove_pending_if_owner(&pending, "t-gen", gen1);
     // The successor's prompt is intact and still answerable…
-    let (_, survivor) = pending
+    let survivor = pending
         .lock()
         .unwrap()
         .remove("t-gen")
-        .expect("successor's entry must survive the stale cleanup");
+        .expect("successor's entry must survive the stale cleanup")
+        .reply;
     survivor.send(ReplyDecision::plain(true)).unwrap();
     assert!(rx2.await.unwrap().accept, "successor receives ITS answer");
 
     // …and the owner's cleanup DOES remove when the generation matches.
     let (tx3, _rx3) = oneshot::channel();
-    let gen3 = park_pending(&pending, "t-gen", tx3).expect("slot free again");
+    let gen3 =
+        park_pending(&pending, "t-gen", tx3, serde_json::Value::Null).expect("slot free again");
     remove_pending_if_owner(&pending, "t-gen", gen3);
     assert!(
         !pending.lock().unwrap().contains_key("t-gen"),

@@ -26,7 +26,7 @@ use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
 use lanbeam_lib::state::{
-    CompletedLog, ConcurrencyGate, PairingState, TransferControl, TransferCtlGuard,
+    CompletedLog, ConcurrencyGate, PairingState, Parked, TransferControl, TransferCtlGuard,
 };
 use lanbeam_lib::transfer::{build_send_list, handle_incoming, initiator_hello, run_send};
 use lanbeam_lib::transport::noise::NoiseSession;
@@ -170,6 +170,18 @@ async fn prompt_shows_sanitized_names_and_is_withdrawn_when_the_sender_hangs_up(
         assert_eq!(reqs[0]["autoAccepted"], false);
     }
     assert_eq!(ctx.pending.lock().unwrap().len(), 1, "the prompt is parked");
+    // …with the very payload its event carried, for a window that loads later
+    // to fetch (L23).
+    {
+        let parked: Vec<serde_json::Value> = ctx
+            .pending
+            .lock()
+            .unwrap()
+            .values()
+            .map(|p| p.request.clone())
+            .collect();
+        assert_eq!(parked, vec![requests.lock().unwrap()[0].clone()]);
+    }
 
     // The sender cancels while the prompt is up.
     cancel.cancel();
@@ -281,10 +293,14 @@ async fn a_full_prompt_queue_declines_busy() {
     let mut parked = Vec::new();
     for i in 0..MAX_PENDING_PROMPTS {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        ctx.pending
-            .lock()
-            .unwrap()
-            .insert(format!("waiting-{i}"), (i as u64, tx));
+        ctx.pending.lock().unwrap().insert(
+            format!("waiting-{i}"),
+            Parked {
+                generation: i as u64,
+                reply: tx,
+                request: serde_json::Value::Null,
+            },
+        );
         parked.push(rx);
     }
 

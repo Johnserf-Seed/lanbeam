@@ -28,7 +28,9 @@ use crate::partials::{FileIdentity, PartialRecord};
 use crate::protocol::{self, AppMessage, FileMeta, Frame, ResumeOffset};
 use crate::sanitize::{self, Decision};
 use crate::settings::Settings;
-use crate::state::{ConflictAction, PendingMap, ReplyDecision, TransferControl, TransferCtlGuard};
+use crate::state::{
+    ConflictAction, Parked, PendingMap, ReplyDecision, TransferControl, TransferCtlGuard,
+};
 use crate::transport::noise::NoiseSession;
 use crate::transport::TransportCtx;
 use crate::trust;
@@ -2252,7 +2254,8 @@ static PENDING_GENERATION: AtomicU64 = AtomicU64::new(0);
 fn park_pending(
     pending: &Mutex<PendingMap>,
     transfer_id: &str,
-    tx: oneshot::Sender<ReplyDecision>,
+    reply: oneshot::Sender<ReplyDecision>,
+    request: serde_json::Value,
 ) -> Option<u64> {
     let Ok(mut map) = pending.lock() else {
         return None;
@@ -2261,7 +2264,11 @@ fn park_pending(
         std::collections::hash_map::Entry::Occupied(_) => None,
         std::collections::hash_map::Entry::Vacant(slot) => {
             let generation = PENDING_GENERATION.fetch_add(1, Ordering::Relaxed);
-            slot.insert((generation, tx));
+            slot.insert(Parked {
+                generation,
+                reply,
+                request,
+            });
             Some(generation)
         }
     }
@@ -2275,7 +2282,10 @@ fn park_pending(
 /// and force-decline its prompt without any user input (M4.5).
 fn remove_pending_if_owner(pending: &Mutex<PendingMap>, transfer_id: &str, generation: u64) {
     if let Ok(mut map) = pending.lock() {
-        if map.get(transfer_id).is_some_and(|(g, _)| *g == generation) {
+        if map
+            .get(transfer_id)
+            .is_some_and(|p| p.generation == generation)
+        {
             map.remove(transfer_id);
         }
     }
@@ -2706,7 +2716,8 @@ pub async fn handle_incoming<R: Runtime>(
         // The in-flight guard above already rejected duplicates, so a `None`
         // here means the pending lock is poisoned — decline defensively.
         let (tx, rx) = oneshot::channel();
-        let Some(generation) = park_pending(&ctx.pending, &session_id, tx) else {
+        let Some(generation) = park_pending(&ctx.pending, &session_id, tx, request_payload.clone())
+        else {
             log::warn!(
                 "rejecting inbound transfer from {device_id}: cannot park prompt for {session_id}"
             );

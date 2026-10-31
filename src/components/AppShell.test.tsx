@@ -39,6 +39,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
         : actual.getSettings(),
     ),
     setDiscoverable: vi.fn(actual.setDiscoverable),
+    pendingRequests: vi.fn(actual.pendingRequests),
   };
 });
 import * as api from "../bridge/api";
@@ -95,6 +96,29 @@ describe("AppShell · transfer events", () => {
       peerId: "dev-studio",
       peerName: "Studio",
     });
+  });
+
+  it("a request that came in before the window was up is shown once it is (L23)", async () => {
+    const early = {
+      sessionId: "early",
+      deviceId: "dev-studio",
+      sas: "123456",
+      totalSize: 1,
+      fileCount: 1,
+      files: [{ name: "a.bin", size: 1 }],
+      senderName: "Studio",
+      autoAccepted: false,
+    } as IncomingRequest;
+    vi.mocked(api.pendingRequests).mockResolvedValueOnce([early]);
+    await mount();
+    await waitFor(() =>
+      expect(useTransfers.getState().incomings.map((r) => r.sessionId)).toEqual(
+        ["early"],
+      ),
+    );
+    // Its event landing as well doesn't show it twice.
+    fire("incoming_file_request", early);
+    expect(useTransfers.getState().incomings).toHaveLength(1);
   });
 
   it("a transfer_done for a session nobody knows makes no row (L22)", async () => {

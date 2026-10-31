@@ -911,9 +911,23 @@ pub fn reply_file_request(
         };
         pending.remove(&session_id)
     };
-    if let Some((_, tx)) = taken {
-        let _ = tx.send(ReplyDecision { accept, conflict });
+    if let Some(parked) = taken {
+        let _ = parked.reply.send(ReplyDecision { accept, conflict });
     }
+}
+
+/// The requests still waiting for an answer, as their `incoming_file_request`
+/// payloads (L23). A request that arrived before the window had loaded — at
+/// login, with LanBeam starting minimized — emitted its event to nobody; the
+/// window asks for these once it is up, or the prompt would never show and
+/// the request would time out unanswered.
+#[tauri::command]
+pub fn pending_requests(state: State<'_, AppState>) -> Vec<serde_json::Value> {
+    state
+        .pending
+        .lock()
+        .map(|m| m.values().map(|p| p.request.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// One interrupted file still on disk, waiting to be resumed or discarded.

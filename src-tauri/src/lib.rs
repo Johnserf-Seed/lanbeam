@@ -61,13 +61,13 @@ use commands::{
     cancel_pairing, cancel_transfer, connect_by_addr, discard_partials, export_diagnostics,
     forget_device, get_download_dir, get_listen_port, get_log_dir, get_my_identity, get_net_status,
     get_network_info, get_settings, join_by_code, list_discovered_devices, list_partials,
-    list_shares, list_trusted, open_local_path, pause_transfer, remove_trusted, reply_file_request,
-    reset_identity, resume_transfer, reveal_received, send_files, send_text, set_auto_open,
-    set_autostart, set_clip_share, set_conflict_policy, set_device_name, set_discoverable,
-    set_download_dir, set_hotkey, set_hotkey_enabled, set_iface_filter, set_listen_port,
-    set_log_level, set_max_concurrent, set_notif_system, set_organize, set_rate_limit,
-    set_recv_policy, set_strip_exif, set_tray_close, set_trusted, set_ui_zoom, set_verify_hash,
-    start_pairing, start_share, stop_share, take_pending_deep_link, update_share,
+    list_shares, list_trusted, open_local_path, pause_transfer, pending_requests, remove_trusted,
+    reply_file_request, reset_identity, resume_transfer, reveal_received, send_files, send_text,
+    set_auto_open, set_autostart, set_clip_share, set_conflict_policy, set_device_name,
+    set_discoverable, set_download_dir, set_hotkey, set_hotkey_enabled, set_iface_filter,
+    set_listen_port, set_log_level, set_max_concurrent, set_notif_system, set_organize,
+    set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_trusted, set_ui_zoom,
+    set_verify_hash, start_pairing, start_share, stop_share, take_pending_deep_link, update_share,
 };
 use discovery::{DiscoveryCtx, PeerTable};
 use identity::Identity;
@@ -1009,6 +1009,7 @@ pub fn run() {
             stop_share,
             list_shares,
             reply_file_request,
+            pending_requests,
             cancel_transfer,
             pause_transfer,
             resume_transfer,
