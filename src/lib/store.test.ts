@@ -10,6 +10,7 @@ import type {
 } from "../bridge/api";
 import {
   displayIp,
+  fpChangedRecordFor,
   histWindowMs,
   inboxFromText,
   inboxFromTransfer,
@@ -168,6 +169,28 @@ describe("useTransfers.addShareDownload", () => {
     addShareDownload({ name: "a.png", size: 1, peerIp: "10.0.0.1" });
     addShareDownload({ name: "a.png", size: 1, peerIp: "10.0.0.1" });
     expect(Object.keys(useTransfers.getState().transfers)).toHaveLength(2);
+  });
+});
+
+describe("fpChangedRecordFor", () => {
+  it("names the remembered record a new key is wearing — and nothing else", () => {
+    // M19: the drop handler asks this before sending, as a click already did.
+    const devices: DiscoveredDevice[] = [
+      { deviceId: "NEW", name: "Mini", address: "1.1.1.1", port: 1 },
+      { deviceId: "OK", name: "Nas", address: "1.1.1.2", port: 1 },
+    ];
+    const rec = (deviceId: string, name: string): TrustRecord => ({
+      deviceId,
+      name,
+      trusted: true,
+      autoAccept: true,
+      addedAt: 1,
+      lastSeen: 1,
+    });
+    const records = { OLD: rec("OLD", "Mini"), OK: rec("OK", "Nas") };
+    expect(fpChangedRecordFor("NEW", devices, records)).toBe("OLD");
+    expect(fpChangedRecordFor("OK", devices, records)).toBeUndefined();
+    expect(fpChangedRecordFor("GONE", devices, records)).toBeUndefined();
   });
 });
 
@@ -483,22 +506,47 @@ describe("useTransfers.registerOutgoing + attachSas (pendingSend keying)", () =>
     ...over,
   });
 
-  it("consumes queued metas FIFO, one per sas_code, and drops the empty key", () => {
+  it("attaches each record to exactly its own session, in any order", () => {
+    // H11: keyed by the session id the UI chose, not queued per device — two
+    // sends to one device can no longer swap (or inherit) each other's files.
     const t = useTransfers.getState();
-    t.registerOutgoing("dev1", meta({ name: "f1.txt", paths: ["/f1.txt"] }));
-    t.registerOutgoing("dev1", meta({ name: "f2.txt", paths: ["/f2.txt"] }));
-    expect(useTransfers.getState().pendingSend.dev1).toHaveLength(2);
-
-    t.attachSas("s1", "111", "dev1");
-    expect(useTransfers.getState().transfers.s1.name).toBe("f1.txt");
-    expect(useTransfers.getState().transfers.s1.sas).toBe("111");
-    expect(useTransfers.getState().transfers.s1.peerId).toBe("dev1");
-    expect(useTransfers.getState().pendingSend.dev1).toHaveLength(1);
+    t.registerOutgoing("s1", meta({ name: "f1.txt", paths: ["/f1.txt"] }));
+    t.registerOutgoing("s2", meta({ name: "f2.txt", paths: ["/f2.txt"] }));
 
     t.attachSas("s2", "222", "dev1");
-    expect(useTransfers.getState().transfers.s2.name).toBe("f2.txt");
-    // queue drained → key removed
-    expect(useTransfers.getState().pendingSend.dev1).toBeUndefined();
+    expect(useTransfers.getState().transfers.s2).toMatchObject({
+      name: "f2.txt",
+      paths: ["/f2.txt"],
+      sas: "222",
+      peerId: "dev1",
+    });
+    t.attachSas("s1", "111", "dev1");
+    expect(useTransfers.getState().transfers.s1.name).toBe("f1.txt");
+    expect(useTransfers.getState().pendingSend).toEqual({});
+  });
+
+  it("a queued send's row shows what it is — the queued event takes the record", () => {
+    useTransfers.getState().registerOutgoing("s1", meta({ name: "big.zip" }));
+    useTransfers.getState().upsert({
+      sessionId: "s1",
+      direction: "send",
+      status: "queued",
+    });
+    expect(useTransfers.getState().transfers.s1).toMatchObject({
+      status: "queued",
+      name: "big.zip",
+      peerName: "Dev One",
+      direction: "send",
+    });
+    expect(useTransfers.getState().pendingSend).toEqual({});
+  });
+
+  it("dropOutgoing forgets a record no event will claim", () => {
+    useTransfers.getState().registerOutgoing("s1", meta({}));
+    useTransfers.getState().dropOutgoing("s1");
+    expect(useTransfers.getState().pendingSend).toEqual({});
+    // Unknown ids are a no-op.
+    useTransfers.getState().dropOutgoing("nope");
   });
 
   it("still attaches a sas with no matching pending meta", () => {

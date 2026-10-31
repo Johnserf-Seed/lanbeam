@@ -608,6 +608,21 @@ export function trustList(
   return out;
 }
 
+/** The remembered record a live device may be impersonating: the id of the
+ *  trust record whose name it reappeared under with a DIFFERENT key (see
+ *  `trustList`'s `fpChanged`), or undefined. Every way of sending to a device
+ *  must ask this first — a click does (the devices page opens the fingerprint
+ *  alert), and so must a drop (M19). */
+export function fpChangedRecordFor(
+  deviceId: string,
+  devices: DiscoveredDevice[],
+  records: Record<string, TrustRecord>,
+): string | undefined {
+  return trustList(devices, records).find(
+    (r) => r.fpChanged?.newDeviceId === deviceId,
+  )?.deviceId;
+}
+
 /* ── transfers ──────────────────────────────────────────────────────────── */
 
 // "queued" = accepted/started but parked on the concurrency gate (M6.7); a
@@ -636,8 +651,12 @@ export type UITransfer = {
   errorCode?: TransferErrorCode;
   sas?: string;
   savedNames?: string[];
-  /** transfer_started arrived (peer accepted / channel open) */
+  /** transfer_started arrived (the connection is open — NOT that the peer
+   *  accepted; on a send the receiver's prompt may still be up) */
   started?: boolean;
+  /** SEND only: the receiver accepted (`transfer_accepted`). Until then the row
+   *  is waiting on a person, and the SAS is what both screens should show. */
+  accepted?: boolean;
   peerId?: string;
   peerName?: string;
   /** display name: first file (+ n more handled by the page) */
@@ -683,11 +702,13 @@ export type OutgoingMeta = {
 interface TransfersState {
   transfers: Record<string, UITransfer>;
   incomings: IncomingRequest[];
-  /** deviceId → FIFO queue of metas for sends we just initiated (each consumed
-   *  by the matching sas_code). A per-device queue (not a single slot) so a
-   *  second send to the same device before the first's sas_code arrives — easy
-   *  when the first parks on the concurrency gate — can't clobber the first. */
-  pendingSend: Record<string, OutgoingMeta[]>;
+  /** sessionId → what the UI sent under it (H11). The UI chooses the id and
+   *  hands it to send_files, so the record joins exactly that session's row on
+   *  its first event — queued, SAS or started. It used to be a FIFO per device,
+   *  taken by the next sas_code: a send that failed before one (peer offline,
+   *  unreadable file, cancelled while queued) left its record for the NEXT send
+   *  to that device, and 再次发送 on that row resent the wrong files. */
+  pendingSend: Record<string, OutgoingMeta>;
   /** sessionId → meta for an accepted incoming request */
   pendingRecv: Record<
     string,
@@ -712,7 +733,9 @@ interface TransfersState {
   fileProgress: (sessionId: string, fileIndex: number, percent: number) => void;
   /** mark a per-file completion (M6.8); `verified` shows the ✓ tick */
   fileDone: (sessionId: string, fileIndex: number, verified: boolean) => void;
-  registerOutgoing: (deviceId: string, meta: OutgoingMeta) => void;
+  registerOutgoing: (sessionId: string, meta: OutgoingMeta) => void;
+  /** Forget a send's record that no event will claim (the send failed first). */
+  dropOutgoing: (sessionId: string) => void;
   attachSas: (sessionId: string, sas: string, deviceId?: string) => void;
   pushIncoming: (r: IncomingRequest) => void;
   shiftIncoming: () => void;
@@ -729,6 +752,19 @@ interface TransfersState {
 // record's sessionId can never collide with a backend transfer_id (a UUID) or
 // with another text record minted in the same millisecond.
 let textRecordSeq = 0;
+
+/** The row fields a send's record fills in when its session's first event
+ *  arrives. */
+function outgoingFields(m: OutgoingMeta): Partial<UITransfer> {
+  return {
+    peerId: m.peerId,
+    peerName: m.peerName,
+    name: m.name,
+    ext: m.ext,
+    files: m.files,
+    paths: m.paths,
+  };
+}
 
 /** Persisted shape of useTransfers (see partialize below): terminal rows only. */
 type PersistedTransfers = { transfers: Record<string, UITransfer> };
@@ -813,6 +849,15 @@ export const useTransfers = create<TransfersState>()(
             startedAt: Date.now(),
           };
           const merged = { ...prev, ...t };
+          // A send we started: its first event carries what we sent (H11) —
+          // a queued row included, which used to sit there nameless.
+          const om = s.pendingSend[t.sessionId];
+          let pendingSend = s.pendingSend;
+          if (om) {
+            Object.assign(merged, outgoingFields(om), { direction: "send" });
+            pendingSend = { ...pendingSend };
+            delete pendingSend[t.sessionId];
+          }
           // Attach pending receive meta when a receive transfer starts.
           const rm = s.pendingRecv[t.sessionId];
           if (rm && !merged.peerName) {
@@ -826,7 +871,10 @@ export const useTransfers = create<TransfersState>()(
             merged.doneAt = Date.now();
             merged.speedBps = 0;
           }
-          return { transfers: { ...s.transfers, [t.sessionId]: merged } };
+          return {
+            transfers: { ...s.transfers, [t.sessionId]: merged },
+            ...(om ? { pendingSend } : {}),
+          };
         }),
       addTextTransfer: ({ direction, peerId, peerName, text }) =>
         set((s) => {
@@ -955,26 +1003,23 @@ export const useTransfers = create<TransfersState>()(
             transfers: { ...s.transfers, [sessionId]: { ...prev, fileStat } },
           };
         }),
-      registerOutgoing: (deviceId, meta) =>
-        set((s) => ({
-          pendingSend: {
-            ...s.pendingSend,
-            [deviceId]: [...(s.pendingSend[deviceId] ?? []), meta],
-          },
-        })),
+      registerOutgoing: (sessionId, meta) =>
+        set((s) => ({ pendingSend: { ...s.pendingSend, [sessionId]: meta } })),
+      dropOutgoing: (sessionId) =>
+        set((s) => {
+          if (!s.pendingSend[sessionId]) return s;
+          const pendingSend = { ...s.pendingSend };
+          delete pendingSend[sessionId];
+          return { pendingSend };
+        }),
       attachSas: (sessionId, sas, deviceId) =>
         set((s) => {
-          const queue = deviceId ? s.pendingSend[deviceId] : undefined;
-          const meta = queue?.[0];
-          // Consume the OLDEST pending meta (FIFO) so a later stray sas_code for
-          // the same device can't attach stale file info to an unrelated
-          // session; drop the key once its queue empties.
+          // Exactly this session's record, if the UI started it (H11).
+          const meta = s.pendingSend[sessionId];
           let pendingSend = s.pendingSend;
-          if (queue && deviceId) {
-            const rest = queue.slice(1);
+          if (meta) {
             pendingSend = { ...pendingSend };
-            if (rest.length) pendingSend[deviceId] = rest;
-            else delete pendingSend[deviceId];
+            delete pendingSend[sessionId];
           }
           const prev: UITransfer = s.transfers[sessionId] ?? {
             sessionId,
@@ -994,15 +1039,7 @@ export const useTransfers = create<TransfersState>()(
                 ...prev,
                 sas,
                 peerId: deviceId ?? prev.peerId,
-                ...(meta
-                  ? {
-                      peerName: meta.peerName,
-                      name: meta.name,
-                      ext: meta.ext,
-                      files: meta.files,
-                      paths: meta.paths,
-                    }
-                  : {}),
+                ...(meta ? outgoingFields(meta) : {}),
               },
             },
           };

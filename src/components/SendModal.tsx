@@ -16,7 +16,7 @@ import {
 import type { UITransfer } from "../lib/store";
 import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
-import { pickFiles, sendToDevice } from "../lib/sendops";
+import { beginSend, pickFiles } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
 import { ExtChip, ModalHead } from "./ui";
 
@@ -74,8 +74,6 @@ export default function SendModal() {
   const stripExif = usePrefs((s) => s.stripExif);
   const setPrefs = usePrefs((s) => s.set);
   const transfers = useTransfers((s) => s.transfers);
-  /** epoch ms when startSend fired — matches live transfers to pending rows */
-  const flowStart = useRef(0);
   // Guard against a slip-off press (mousedown inside, mouseup on scrim) closing
   // the modal — matches the other four modals. (A real click outside no longer
   // costs the selection either: it is kept as a draft, see onDismiss.)
@@ -100,20 +98,22 @@ export default function SendModal() {
   }[] =
     send?.step === "waiting"
       ? send.pending.map((p) => {
-          let best: UITransfer | undefined;
-          for (const tr of Object.values(transfers)) {
-            if (tr.direction !== "send" || tr.peerId !== p.deviceId) continue;
-            if (tr.startedAt < flowStart.current - 1000) continue;
-            if (!best || tr.startedAt > best.startedAt) best = tr;
-          }
+          // Exactly the session this row started (H11) — not the newest send
+          // to the same device, which could be another one.
+          const tr: UITransfer | undefined = p.sessionId
+            ? transfers[p.sessionId]
+            : undefined;
+          // "ok" means the receiver ACCEPTED (H10). The connection opening —
+          // transfer_started — used to count, so this step closed while the
+          // receiver's prompt was still up and the SAS was never seen here.
           const state: WaitState = p.failed
             ? "failed"
-            : best?.status === "error"
+            : tr?.status === "error"
               ? "failed"
-              : best?.started
+              : tr?.accepted
                 ? "ok"
                 : "waiting";
-          return { deviceId: p.deviceId, name: p.name, sas: best?.sas, state };
+          return { deviceId: p.deviceId, name: p.name, sas: tr?.sas, state };
         })
       : [];
   const allOk = waitRows.length > 0 && waitRows.every((r) => r.state === "ok");
@@ -234,12 +234,15 @@ export default function SendModal() {
 
   const startSend = () => {
     if (!selFiles.length || !targets.length) return;
-    let ok = false;
     // Pass the confirm dialog's live "抹除图片元数据" choice (M9.1) explicitly,
-    // rather than letting sendToDevice fall back to the persisted default.
-    for (const d of targets) ok = sendToDevice(d, selFiles, stripExif) || ok;
-    if (!ok) {
-      // No real paths / no backend — sendToDevice already toasted honestly.
+    // rather than letting beginSend fall back to the persisted default.
+    const sessions = new Map<string, string>();
+    for (const d of targets) {
+      const id = beginSend(d, selFiles, stripExif);
+      if (id) sessions.set(d.deviceId, id);
+    }
+    if (!sessions.size) {
+      // No real paths / no backend — beginSend already toasted honestly.
       closeSend();
       return;
     }
@@ -257,12 +260,12 @@ export default function SendModal() {
       );
       return;
     }
-    flowStart.current = Date.now();
     patchSend({
       step: "waiting",
       pending: untrusted.map((d) => ({
         deviceId: d.deviceId,
         name: d.name,
+        sessionId: sessions.get(d.deviceId),
         ok: false,
       })),
       startedTrusted: trusted.length,

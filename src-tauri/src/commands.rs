@@ -704,11 +704,37 @@ pub async fn send_files(
     device_id: String,
     paths: Vec<String>,
     strip_exif: bool,
+    transfer_id: Option<String>,
 ) -> Result<String, LanBeamError> {
     let (addr, port, expected) = resolve_peer(&state, &device_id)?;
     // One id up front: it names the cancel/pause controls, the events, AND the
     // per-transfer scratch dir the metadata strip writes temp copies into.
-    let transfer_id = uuid::Uuid::new_v4().to_string();
+    //
+    // The UI chooses it (H11), so its own record of what it sent — names,
+    // sizes, the paths behind 再次发送 — is tied to exactly this session. It
+    // used to be matched to the first `sas_code` for the same device, and every
+    // send that failed before one (offline peer, unreadable file, cancel while
+    // queued) left its record queued for the NEXT send to that device. A caller
+    // that sends none gets one minted here.
+    let transfer_id = match transfer_id {
+        // Canonical lowercase-hyphenated — what crypto.randomUUID() produces, so
+        // the events carry the very string the UI keyed its record by.
+        Some(id) => uuid::Uuid::parse_str(&id)
+            .map_err(|_| LanBeamError::Protocol("transfer id is not a UUID".into()))?
+            .hyphenated()
+            .to_string(),
+        None => uuid::Uuid::new_v4().to_string(),
+    };
+    // A live id must not be reused: the control registry keeps the FIRST owner,
+    // so a second send under it could never be cancelled or paused.
+    if state
+        .transfers_ctl
+        .lock()
+        .map(|m| m.contains_key(&transfer_id))
+        .unwrap_or(false)
+    {
+        return Err(LanBeamError::Protocol("transfer id already in use".into()));
+    }
     // Snapshot the integrity setting NOW (M6.3): if on, the build hashes every
     // file, so the whole build — the directory walk, the hashing, and the M9.1
     // metadata strip — runs on the blocking pool to keep large reads/writes off
@@ -726,6 +752,9 @@ pub async fn send_files(
         .join("send-scratch")
         .join(&transfer_id);
     let (items, _scratch) = tauri::async_runtime::spawn_blocking(move || {
+        // Refuse what the receiver would refuse — too many files, a name it
+        // can't save — BEFORE hashing a single file (H7).
+        transfer::check_send_selection(&paths)?;
         transfer::build_send_list_scoped(&paths, verify_hash, strip_exif, scratch_base)
     })
     .await
@@ -733,8 +762,10 @@ pub async fn send_files(
     // `_scratch` lives to the end of this command (all exit paths below), so the
     // stripped temp copies are cleaned up whether the send succeeds, errors, or
     // is cancelled — a temp copy of the user's photo never lingers on disk.
+    // The pre-check already said NoFiles for an empty selection; files can still
+    // vanish between that walk and this one.
     if items.is_empty() {
-        return Err(LanBeamError::Protocol("no files to send".into()));
+        return Err(LanBeamError::NoFiles);
     }
     let total: u64 = items.iter().map(|i| i.meta.size).sum();
 
@@ -1683,6 +1714,11 @@ pub struct SettingsDto {
     /// camelCase; defaults 3, range 1..=8.
     #[serde(rename = "maxConcurrent")]
     pub max_concurrent: u32,
+    // H12: the one field that went out snake_case. The UI reads `uiZoom`, got
+    // undefined, and its first Ctrl+= stepped DOWN (stepZoom(undefined) lands on
+    // the 0.9 notch); the zoom select showed nothing. A contract test in
+    // src/lib/dtoContract.test.ts now holds every field to the UI's type.
+    #[serde(rename = "uiZoom")]
     pub ui_zoom: f64,
     /// Per-transfer throughput cap (M6.7): `"unlimited"` or MB/s. Additive
     /// camelCase; defaults `"unlimited"`.

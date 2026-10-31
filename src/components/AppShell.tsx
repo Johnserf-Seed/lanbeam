@@ -36,6 +36,7 @@ import {
   notify,
   resolvedTheme,
   setVisibility,
+  fpChangedRecordFor,
   shortFp,
   showToast,
   syncTrustFromBackend,
@@ -497,6 +498,20 @@ export default function AppShell() {
     [],
   );
 
+  // The receiver accepted a send (H10). Until this the row is waiting on a
+  // person — not "started", which only meant the connection was open.
+  useEffect(
+    () =>
+      api.onEvent<TransferEvent>("transfer_accepted", (p) => {
+        useTransfers.getState().upsert({
+          sessionId: p.sessionId,
+          direction: "send",
+          accepted: true,
+        });
+      }),
+    [],
+  );
+
   // A transfer parked on the concurrency gate (M6.7): mark the row "queued" so
   // it reads as waiting-for-a-slot, not stuck at 0%. The subsequent
   // transfer_started (send: queued→started; receive: the first progress tick)
@@ -685,6 +700,18 @@ export default function AppShell() {
               .getState()
               .devices.find((d) => d.deviceId === targetId);
             if (dev) {
+              // A device that carries a remembered name under a NEW key is the
+              // impersonation case: clicking it opens the fingerprint alert,
+              // and dropping files on it must too, never send (M19).
+              const oldId = fpChangedRecordFor(
+                dev.deviceId,
+                useData.getState().devices,
+                useTrust.getState().records,
+              );
+              if (oldId) {
+                ov.setFpAlert({ deviceId: oldId });
+                return;
+              }
               if (sendToDevice(dev, files))
                 showToast(
                   i18n.t("devices.startSendToast", {

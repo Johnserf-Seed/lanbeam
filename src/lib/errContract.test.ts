@@ -91,6 +91,19 @@ describe("the backend error contract", () => {
     expect(keys.filter((k) => !ZH.has(k))).toEqual([]);
   });
 
+  it("the 'too many files' line states the backend's real cap", () => {
+    const consts = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/consts.rs"),
+      "utf8",
+    );
+    const cap = /pub const MAX_MANIFEST_FILES: u32 = ([\d_]+);/
+      .exec(consts)?.[1]
+      .replace(/_/g, "");
+    expect(cap).toBeTruthy();
+    for (const text of [en.errors.tooManyFiles, zh.errors.tooManyFiles])
+      expect(text.replace(/\D/g, "")).toContain(cap);
+  });
+
   it("the two languages carry exactly the same keys", () => {
     expect([...EN].filter((k) => !ZH.has(k))).toEqual([]);
     expect([...ZH].filter((k) => !EN.has(k))).toEqual([]);

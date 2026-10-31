@@ -34,8 +34,10 @@ import * as api from "../bridge/api";
 import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import {
+  beginSend,
   errText,
   isNotFound,
+  newTransferId,
   openDir,
   openFile,
   readClipboardText,
@@ -145,12 +147,13 @@ describe("sendToDevice", () => {
       file({ path: "/tmp/b.png", name: "b.png", ext: "PNG" }),
     ];
 
-    const ok = sendToDevice(device, files, true);
+    const id = beginSend(device, files, true);
 
-    expect(ok).toBe(true);
-    const queue = useTransfers.getState().pendingSend[device.deviceId];
-    expect(queue).toHaveLength(1);
-    expect(queue[0]).toMatchObject({
+    // The UI chose the session id and keyed what it sent by it (H11).
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    expect(useTransfers.getState().pendingSend[id as string]).toMatchObject({
       peerId: device.deviceId,
       peerName: device.name,
       name: "photo.jpg",
@@ -161,7 +164,10 @@ describe("sendToDevice", () => {
       device.deviceId,
       ["/tmp/photo.jpg", "/tmp/b.png"],
       true,
+      id,
     );
+    // sendToDevice is the same thing, for callers that only need a yes/no.
+    expect(sendToDevice(device, files, true)).toBe(true);
   });
 
   it("passes the explicit stripExif choice through to sendFiles", () => {
@@ -171,16 +177,39 @@ describe("sendToDevice", () => {
       device.deviceId,
       ["/tmp/photo.jpg"],
       false,
+      expect.any(String),
     );
+  });
+
+  it("a send that fails before any event leaves NO record for the next one (H11)", async () => {
+    // The record used to sit in a per-device queue until the next sas_code —
+    // the NEXT send to that device then wore this one's files and paths.
+    vi.mocked(api.sendFiles).mockRejectedValueOnce({ kind: "PeerNotFound" });
+    const failed = beginSend(device, [
+      file({ name: "old.jpg", path: "/old.jpg" }),
+    ]);
+    await flush();
+    expect(useTransfers.getState().pendingSend).toEqual({});
+
+    vi.mocked(api.sendFiles).mockResolvedValue("s");
+    const next = beginSend(device, [
+      file({ name: "new.jpg", path: "/new.jpg" }),
+    ]);
+    expect(next).not.toBe(failed);
+    useTransfers
+      .getState()
+      .attachSas(next as string, "111222", device.deviceId);
+    expect(useTransfers.getState().transfers[next as string]).toMatchObject({
+      name: "new.jpg",
+      paths: ["/new.jpg"],
+    });
   });
 
   it("returns false and toasts (no transfer) when no file has a path", () => {
     const ok = sendToDevice(device, [file({ path: undefined })], true);
     expect(ok).toBe(false);
     expect(api.sendFiles).not.toHaveBeenCalled();
-    expect(
-      useTransfers.getState().pendingSend[device.deviceId],
-    ).toBeUndefined();
+    expect(useTransfers.getState().pendingSend).toEqual({});
     expect(useToast.getState().msg).toBeTruthy();
   });
 
@@ -196,6 +225,36 @@ describe("sendToDevice", () => {
     sendToDevice(device, [file()], true);
     await flush();
     expect(useToast.getState().msg).toBeNull();
+  });
+});
+
+describe("newTransferId", () => {
+  it("is a fresh lowercase v4 UUID — what the backend accepts as an id", () => {
+    const a = newTransferId();
+    const b = newTransferId();
+    expect(a).not.toBe(b);
+    for (const id of [a, b])
+      expect(id).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+  });
+
+  it("still makes one on a WebView without crypto.randomUUID", () => {
+    const real = globalThis.crypto.randomUUID;
+    Object.defineProperty(globalThis.crypto, "randomUUID", {
+      value: undefined,
+      configurable: true,
+    });
+    try {
+      expect(newTransferId()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+      );
+    } finally {
+      Object.defineProperty(globalThis.crypto, "randomUUID", {
+        value: real,
+        configurable: true,
+      });
+    }
   });
 });
 

@@ -21,7 +21,12 @@ const RESERVED: &[&str] = &[
     "CONIN$", "CONOUT$", "CLOCK$",
 ];
 const MAX_COMPONENTS: usize = 16;
-const MAX_COMPONENT_LEN: usize = 200;
+/// Per path segment, in UTF-8 BYTES. File systems cap a name at 255 (bytes on
+/// ext4/APFS, UTF-16 units on NTFS — never more than the UTF-8 byte count), and
+/// a collision appends at most " (10000)" (8 bytes, see
+/// [`dedupe_on_collision`]), so 240 always fits once de-duped. It was 200:
+/// about 66 CJK characters, which real document titles exceed.
+const MAX_COMPONENT_LEN: usize = 240;
 const MAX_TOTAL_LEN: usize = 4096;
 
 #[derive(Debug, PartialEq)]
@@ -64,8 +69,17 @@ pub fn validate(name: &str) -> Decision {
     if b[0] == b'/' || b[0] == b'\\' {
         return Decision::Reject(AbsolutePath); // also UNC \\ and //
     }
-    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        return Decision::Reject(DrivePrefix); // "C:\x" AND "C:x"
+    // A drive: "C:", "C:\x", "C:/x". Not "a:b.txt" — a legal name on macOS and
+    // Linux that this used to refuse outright. A colon can never reach the disk
+    // anyway (`clean_component` maps every ':' to '_', which is also what defeats
+    // NTFS alternate streams), so "C:x" is accepted as "C_x", never as a
+    // drive-relative path.
+    if b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+    {
+        return Decision::Reject(DrivePrefix);
     }
 
     // Step 2 — split on BOTH separators; drop "", ".", ".."; sanitize each survivor.
@@ -391,7 +405,12 @@ mod tests {
         assert_eq!(reject("/x"), AbsolutePath);
         assert_eq!(reject("/etc/passwd"), AbsolutePath);
         assert_eq!(reject("C:\\x"), DrivePrefix);
-        assert_eq!(reject("C:x"), DrivePrefix);
+        assert_eq!(reject("C:/x"), DrivePrefix);
+        assert_eq!(reject("C:"), DrivePrefix);
+        // Letter-colon without a separator is a NAME, and its colon is cleaned
+        // away — never a drive-relative path.
+        assert_eq!(accept_path("C:x"), "C_x");
+        assert_eq!(accept_path("a:b.txt"), "a_b.txt");
         assert_eq!(reject("\\\\host\\share\\x"), AbsolutePath);
         // Trailing dot/space (SAN-15..16)
         assert_eq!(accept_path("evil.bat."), "evil.bat");
@@ -588,6 +607,18 @@ mod tests {
         // A component exactly at the per-component limit is accepted.
         let at_comp_limit = "b".repeat(MAX_COMPONENT_LEN);
         assert_eq!(accept_path(&at_comp_limit), at_comp_limit);
+    }
+
+    /// The per-segment cap leaves room for the longest de-dupe suffix, so a name
+    /// accepted here still fits a 255-byte file-system limit after a collision.
+    #[test]
+    fn component_cap_leaves_room_for_the_dedupe_suffix() {
+        const { assert!(MAX_COMPONENT_LEN + " (10000)".len() <= 255) };
+        // 80 CJK characters (3 bytes each) — a real document title — fit.
+        let title = "文".repeat(80);
+        assert_eq!(title.len(), 240);
+        assert_eq!(accept_path(&title), title);
+        assert_eq!(reject(&"文".repeat(81)), RejectReason::TooLong);
     }
 
     // Too-many-components gate (line 88): 17 survivors exceed MAX_COMPONENTS = 16.
