@@ -592,6 +592,15 @@ export default function AppShell() {
     () =>
       api.onEvent<TransferEvent>("transfer_done", (p) => {
         const st = useTransfers.getState();
+        // A session this window knows nothing about — no row, no record of a
+        // send or an accept — has nothing to finish (L22). Upserting it made a
+        // nameless, sizeless history row; transfer_error already declined to.
+        if (
+          !st.transfers[p.sessionId] &&
+          !st.pendingSend[p.sessionId] &&
+          !st.pendingRecv[p.sessionId]
+        )
+          return;
         st.upsert({
           sessionId: p.sessionId,
           savedNames: p.savedNames,
@@ -749,7 +758,7 @@ export default function AppShell() {
               if (sendToDevice(dev, files))
                 showToast(
                   i18n.t("devices.startSendToast", {
-                    n: files.length,
+                    count: files.length,
                     name: dev.name,
                   }),
                 );

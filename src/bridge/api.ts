@@ -758,8 +758,9 @@ export const resumeTransfer = (sessionId: string) =>
 
 // M6.4: discard the persisted resume state for a peer (forget every partial and
 // delete the half-written files). The counterpart to letting a transfer resume.
-/** One interrupted receive still holding bytes in the download folder. */
-export type Partial = {
+/** One interrupted receive still holding bytes in the download folder. Not
+ *  `Partial`: that name shadowed TypeScript's own `Partial<T>` (L28). */
+export type PartialFile = {
   deviceId: string;
   name: string;
   written: number;
@@ -770,8 +771,8 @@ export type Partial = {
  *  `holiday.mp4`, 1.2 GB of 4 GB — so the download folder shows something that
  *  looks perfectly normal and plays for thirty seconds. The backend has always
  *  known about them (it is what makes resume work); nothing ever asked. */
-export const listPartials = (): Promise<Partial[]> =>
-  isTauri ? invoke<Partial[]>("list_partials") : Promise.resolve([]);
+export const listPartials = (): Promise<PartialFile[]> =>
+  isTauri ? invoke<PartialFile[]>("list_partials") : Promise.resolve([]);
 
 export const discardPartials = (deviceId: string) =>
   isTauri ? invoke<void>("discard_partials", { deviceId }) : Promise.resolve();

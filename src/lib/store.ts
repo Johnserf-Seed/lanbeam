@@ -848,6 +848,9 @@ function outgoingFields(m: OutgoingMeta): Partial<UITransfer> {
   };
 }
 
+/** The shortest stretch a speed sample spans (L26). */
+const SPEED_SAMPLE_MS = 250;
+
 /** Persisted shape of useTransfers (see partialize below): terminal rows only. */
 type PersistedTransfers = { transfers: Record<string, UITransfer> };
 
@@ -1053,11 +1056,20 @@ export const useTransfers = create<TransfersState>()(
           const total = totalSize ?? prev.totalSize;
           let speedBps = prev.speedBps;
           let hist = prev.hist;
-          if (prev._tm && prev._pm !== undefined && percent > prev._pm) {
-            const dBytes = (total * (percent - prev._pm)) / 100;
-            const dt = Math.max(now - prev._tm, 1) / 1000;
-            speedBps = dBytes / dt;
-            hist = [...hist.slice(-39), speedBps / 1048576];
+          // Speed is measured over at least SPEED_SAMPLE_MS (L26). Progress
+          // comes per whole percent, and a burst of events can land in one
+          // task a millisecond apart — dividing by that millisecond made
+          // spikes, and 「峰值」 figures, of gigabytes a second.
+          let mark = { _pm: prev._pm, _tm: prev._tm };
+          if (prev._tm === undefined || prev._pm === undefined) {
+            mark = { _pm: percent, _tm: now };
+          } else if (now - prev._tm >= SPEED_SAMPLE_MS) {
+            if (percent > prev._pm) {
+              const dBytes = (total * (percent - prev._pm)) / 100;
+              speedBps = dBytes / ((now - prev._tm) / 1000);
+              hist = [...hist.slice(-39), speedBps / 1048576];
+            }
+            mark = { _pm: percent, _tm: now };
           }
           return {
             transfers: {
@@ -1069,8 +1081,7 @@ export const useTransfers = create<TransfersState>()(
                 status: "active",
                 speedBps,
                 hist,
-                _pm: percent,
-                _tm: now,
+                ...mark,
               },
             },
           };
@@ -1079,8 +1090,16 @@ export const useTransfers = create<TransfersState>()(
         set((s) => {
           const prev = s.transfers[sessionId];
           if (!prev) return s;
+          // Paused moves nothing: no speed, so no ETA (L26). Resuming starts a
+          // fresh sample, or the first one after would average in the pause.
+          const speed = paused
+            ? { speedBps: 0 }
+            : { _pm: prev.percent, _tm: Date.now() };
           return {
-            transfers: { ...s.transfers, [sessionId]: { ...prev, paused } },
+            transfers: {
+              ...s.transfers,
+              [sessionId]: { ...prev, paused, ...speed },
+            },
           };
         }),
       fileProgress: (sessionId, fileIndex, percent) =>

@@ -167,6 +167,7 @@ export function ModalHead({
   onClose: () => void;
   pad?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       style={{
@@ -188,6 +189,9 @@ export function ModalHead({
       </div>
       <button
         type="button"
+        // A bare × has no name a screen reader can say (L27).
+        aria-label={t("common.close")}
+        title={t("common.close")}
         onClick={onClose}
         style={{
           width: 28,

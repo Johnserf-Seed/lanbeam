@@ -93,7 +93,7 @@ describe("ConflictModal rendering", () => {
     });
     renderUI(<ConflictModal />);
     expect(
-      screen.getByText(t("conflict.subMulti", { n: 1 })),
+      screen.getByText(t("conflict.subMulti", { count: 1 })),
     ).toBeInTheDocument();
   });
 });

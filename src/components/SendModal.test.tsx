@@ -308,7 +308,9 @@ describe("SendModal · closing keeps or drops the selection", () => {
     useOverlays.getState().patchSend({ sel: ["beta.pdf"], step: "device" });
     renderUI(<SendModal />);
 
-    fireEvent.click(screen.getByRole("button", { name: "×" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("common.close") }),
+    );
     expect(useOverlays.getState().send).toBeNull();
     expect(useOverlays.getState().sendDraft).toBeNull();
 

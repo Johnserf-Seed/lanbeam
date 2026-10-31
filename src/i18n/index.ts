@@ -28,4 +28,12 @@ i18n
     },
   });
 
+// The page's language follows the app's (L27): <html lang> stayed "zh-CN"
+// in English, so a screen reader read English text with Chinese rules.
+const htmlLang = (lng: string) => (lng.startsWith("zh") ? "zh-CN" : "en");
+document.documentElement.lang = htmlLang(i18n.language ?? "en");
+i18n.on("languageChanged", (lng) => {
+  document.documentElement.lang = htmlLang(lng);
+});
+
 export default i18n;

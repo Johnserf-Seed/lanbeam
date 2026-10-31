@@ -157,7 +157,9 @@ describe("PairModal", () => {
         screen.getByText("…a=192.168.1.20&p=51704&c=482913"),
       ).toBeInTheDocument();
       // No QR: LanBeam has no scanner, and a phone can't pair.
-      expect(screen.queryByRole("img", { name: "QR" })).toBeNull();
+      expect(
+        screen.queryByRole("img", { name: i18n.t("common.qrCode") }),
+      ).toBeNull();
       expect(api.startPairing).toHaveBeenCalledTimes(1);
     });
 
@@ -521,7 +523,9 @@ describe("PairModal", () => {
       // Walking away is a "no". The dangerous version of this bug is the quiet
       // one: the user closes the box believing they paired.
       await joinToCompare();
-      fireEvent.click(screen.getByRole("button", { name: "×" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: i18n.t("common.close") }),
+      );
       expect(useTrust.getState().records[PEER.deviceId]).toBeUndefined();
       expect(useToast.getState().msg).toBe(T("pair.unconfirmedToast"));
     });
@@ -591,7 +595,9 @@ describe("PairModal", () => {
       await screen.findByText("482 913");
       expect(h.listeners.get("pair_joined")?.size).toBe(1);
 
-      fireEvent.click(screen.getByRole("button", { name: "×" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: i18n.t("common.close") }),
+      );
       expect(useOverlays.getState().pairOpen).toBe(false);
       expect(api.cancelPairing).toHaveBeenCalledTimes(1);
       expect(h.listeners.get("pair_joined")?.size).toBe(0);

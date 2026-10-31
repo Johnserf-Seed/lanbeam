@@ -104,7 +104,7 @@ describe("ShareModal", () => {
     expect(screen.getByText(i18n.t("share.lanNote"))).toBeInTheDocument();
     // The live download count starts at zero and is shown with the link.
     expect(
-      screen.getByText(i18n.t("share.dlCount", { n: 0 })),
+      screen.getByText(i18n.t("share.dlCount", { count: 0 })),
     ).toBeInTheDocument();
     // The demo/no-server note must NOT show on a successful create.
     expect(screen.queryByText(i18n.t("share.demoNote"))).toBeNull();
@@ -198,7 +198,9 @@ describe("ShareModal", () => {
     it("says the link is still live when you close the panel", async () => {
       await renderWithLink();
 
-      fireEvent.click(screen.getByRole("button", { name: "×" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: i18n.t("common.close") }),
+      );
 
       expect(useOverlays.getState().shareOpen).toBe(false);
       // Not silence. The user closed a box, not a share.

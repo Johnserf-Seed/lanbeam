@@ -145,6 +145,29 @@ describe("InboxPage category filter", () => {
     expect(screen.queryByText("vacation.png")).not.toBeInTheDocument();
     expect(screen.getByText("remember the milk")).toBeInTheDocument();
   });
+
+  it("counts characters the way a person does — an emoji is one (L27)", () => {
+    useInbox.setState({
+      items: [textItem({ text: "👍👍 ok", name: "👍👍 ok" })],
+      unread: 0,
+    });
+    renderUI(<InboxPage />);
+    expect(
+      screen.getByText(new RegExp(t("inbox.charCount", { count: 5 }))),
+    ).toBeInTheDocument();
+  });
+
+  it("a filter drops hidden rows from the selection — and so from 删除 (L25)", () => {
+    useInbox.setState({ items: [fileItem(), textItem()], unread: 0 });
+    renderUI(<InboxPage />);
+    fireEvent.click(screen.getByText("vacation.png"), { ctrlKey: true });
+    fireEvent.click(screen.getByText("remember the milk"), { ctrlKey: true });
+
+    fireEvent.click(screen.getByRole("button", { name: t("inbox.filterTxt") }));
+    fireEvent.click(screen.getByText(t("inbox.barDelete")));
+    // The photo was out of sight; it used to go too.
+    expect(useInbox.getState().items.map((i) => i.id)).toEqual(["f1"]);
+  });
 });
 
 describe("InboxPage row actions", () => {

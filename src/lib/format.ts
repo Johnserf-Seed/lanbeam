@@ -20,7 +20,8 @@ export function fmtSas(v: string | undefined | null): string {
   return groups.join(" · ");
 }
 
-/** `m:ss` clock of remaining time — callers wrap it in a translated 剩余 string. */
+/** `m:ss` clock of remaining time, `h:mm:ss` from an hour up (L26: 2 h read
+ *  "120:00") — callers wrap it in a translated 剩余 string. */
 export function etaClock(
   totalBytes: number,
   percent: number,
@@ -29,7 +30,10 @@ export function etaClock(
   if (speedBps <= 0) return "";
   const remain = (totalBytes * (100 - percent)) / 100;
   const sec = Math.max(1, Math.round(remain / speedBps));
-  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const ss = String(sec % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
 
 /** Trailing segment of a `客厅 · Mac mini` style name, ellipsized to 7 chars. */

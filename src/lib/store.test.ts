@@ -455,6 +455,26 @@ describe("useTransfers.progress", () => {
     expect(t.hist).toEqual([10]);
     expect(t.percent).toBe(20);
   });
+
+  it("a burst of ticks a millisecond apart is not a speed (L26)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    useTransfers.getState().upsert({ sessionId: "p", direction: "receive" });
+    useTransfers.getState().progress("p", 10, 104857600);
+    // Two more ticks in the next 2 ms: no sample — 10 % in 1 ms read as ~10 GB/s.
+    vi.setSystemTime(2_000_001);
+    useTransfers.getState().progress("p", 20);
+    vi.setSystemTime(2_000_002);
+    useTransfers.getState().progress("p", 30);
+    expect(useTransfers.getState().transfers.p.speedBps).toBe(0);
+    expect(useTransfers.getState().transfers.p.percent).toBe(30);
+    // A second after the first tick: 30 % of 100 MB over that second.
+    vi.setSystemTime(2_001_000);
+    useTransfers.getState().progress("p", 40);
+    const t = useTransfers.getState().transfers.p;
+    expect(t.speedBps).toBeCloseTo(31457280, 0);
+    expect(t.hist).toEqual([30]);
+  });
 });
 
 describe("useTransfers.setPaused", () => {
@@ -465,6 +485,20 @@ describe("useTransfers.setPaused", () => {
     const before = useTransfers.getState().transfers;
     useTransfers.getState().setPaused("ghost", true);
     expect(useTransfers.getState().transfers).toBe(before);
+  });
+
+  it("a paused transfer moves nothing — no speed, so no ETA (L26)", () => {
+    useTransfers.getState().upsert({
+      sessionId: "p",
+      direction: "send",
+      speedBps: 5_000_000,
+      percent: 40,
+    });
+    useTransfers.getState().setPaused("p", true);
+    expect(useTransfers.getState().transfers.p.speedBps).toBe(0);
+    useTransfers.getState().setPaused("p", false);
+    // Resuming starts a fresh sample from where it is.
+    expect(useTransfers.getState().transfers.p._pm).toBe(40);
   });
 });
 

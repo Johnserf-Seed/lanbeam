@@ -97,6 +97,12 @@ describe("AppShell · transfer events", () => {
     });
   });
 
+  it("a transfer_done for a session nobody knows makes no row (L22)", async () => {
+    await mount();
+    fire("transfer_done", { sessionId: "ghost", direction: "receive" });
+    expect(useTransfers.getState().transfers.ghost).toBeUndefined();
+  });
+
   it("the user's own cancel isn't reported as a failure; the peer's is (M21)", async () => {
     await mount();
     for (const id of ["mine", "theirs"])

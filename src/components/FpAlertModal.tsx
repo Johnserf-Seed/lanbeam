@@ -19,9 +19,12 @@ function fpFull(deviceId: string): string {
 }
 
 function CloseBtn({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
   return (
     <button
       type="button"
+      aria-label={t("common.close")}
+      title={t("common.close")}
       onClick={onClick}
       style={{
         width: 28,

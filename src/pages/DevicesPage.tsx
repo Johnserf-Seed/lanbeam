@@ -1031,7 +1031,7 @@ export default function DevicesPage() {
                   whiteSpace: "nowrap",
                 }}
               >
-                {t("devices.aggCount", { n: running.length })}
+                {t("devices.aggCount", { count: running.length })}
               </span>
               {nOut > 0 && (
                 <span
