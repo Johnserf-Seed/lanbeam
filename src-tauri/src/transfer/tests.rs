@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::consts::{NOISE_PARAMS, TRANSFER_V1, TRANSFER_V2};
 use snow::Builder;
