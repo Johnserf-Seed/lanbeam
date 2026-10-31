@@ -91,6 +91,19 @@ impl NoiseSession {
         &self.remote_static
     }
 
+    /// Resolves once the peer has closed the connection, or it failed — without
+    /// reading a byte, so it can race anything: whichever side of a `select!`
+    /// wins, the stream is exactly as it was. Bytes that arrive instead are not a
+    /// hang-up; they are left for the next read, and this never resolves.
+    pub async fn closed(&self) {
+        let mut probe = [0u8; 1];
+        match self.stream.peek(&mut probe).await {
+            Ok(0) | Err(_) => {}
+            // `peek` would return at once, forever — park instead.
+            Ok(_) => std::future::pending::<()>().await,
+        }
+    }
+
     /// The remote socket address of the underlying TCP stream — the source IP
     /// the pairing throttle keys on (M7.1). `None` when the peer address is
     /// unavailable (the connection was already torn down).

@@ -140,8 +140,8 @@ in Settings).
 - **Auto‑organize** received files by sending device or by date.
 - **Concurrency cap & rate limiting**, plus per‑file progress.
 - **Browser receive** — publish an explicit file set over a one‑shot HTTP share: an
-  unguessable token URL with a TTL, a **per‑file** download cap (a K‑file share's budget is
-  cap × K), and instant stop — LAN‑only, files addressed by index (no path/traversal
+  unguessable token URL with a TTL, a **per‑file** download cap (each file counts its own
+  downloads), and instant stop — LAN‑only, files addressed by index (no path/traversal
   surface). Every share — including a single‑file one — gets a branded landing page that
   renders in **their** language (from `Accept-Language`), and every download
   comes straight back to you: a toast with the downloader's IP, a row in the transfer

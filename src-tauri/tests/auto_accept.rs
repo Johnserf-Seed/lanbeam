@@ -88,9 +88,10 @@ async fn trusted_auto_accept_skips_prompt_and_refreshes_trust() {
         trusted: Arc::new(RwLock::new(TrustStore::load(trust_path))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(tmp.join("partials.json")))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing: Arc::new(PairingState::default()),
         text_rate: Default::default(),
+        file_rate: Default::default(),
     };
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

@@ -96,6 +96,22 @@ pub const TEXT_RATE_WINDOW: Duration = Duration::from_secs(60);
 /// source addresses cannot grow the throttle's memory without limit.
 pub const MAX_TEXT_TRACKED_IPS: usize = 1024;
 
+/// How many file requests one source IP may open inside [`FILE_REQUEST_WINDOW`]
+/// (M18). Every request costs a disk check per listed file (up to 10,000) before
+/// the prompt, and a prompt brings a system notification; without a cap any
+/// host on the LAN could keep both coming. Devices the user paired with are not
+/// counted. A person sending batch after batch stays far below it.
+pub const MAX_FILE_REQUESTS_PER_WINDOW: u32 = 20;
+/// Sliding window the per-source file-request rate is measured over.
+pub const FILE_REQUEST_WINDOW: Duration = Duration::from_secs(60);
+/// Source IPs the file-request throttle tracks at once — bounded for the same
+/// reason as [`MAX_TEXT_TRACKED_IPS`].
+pub const MAX_FILE_REQUEST_TRACKED_IPS: usize = 1024;
+/// Accept prompts that may wait for an answer at once (M18). Past this a new
+/// request that would prompt is declined "busy": nobody answers that many, and
+/// each one is another notification.
+pub const MAX_PENDING_PROMPTS: usize = 16;
+
 // Transfer hardening (M4.5) — every wire wait is bounded so a stalled, dead or
 // malicious peer can never pin a socket/task forever, and attacker-declared
 // sizes can never force large allocations before any trust decision.

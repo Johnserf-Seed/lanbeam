@@ -21,8 +21,8 @@ use crate::error::{LanBeamError, Result};
 use crate::identity::Identity;
 use crate::settings::Settings;
 use crate::state::{
-    CompletedLog, ConcurrencyGate, ManualPeer, NetDegraded, PairingState, PendingMap,
-    TextRateLimiter, TransfersCtl,
+    CompletedLog, ConcurrencyGate, FileRequestRateLimiter, ManualPeer, NetDegraded, PairingState,
+    PendingMap, TextRateLimiter, TransfersCtl,
 };
 use crate::trust::TrustStore;
 use noise::NoiseSession;
@@ -104,6 +104,9 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// is what stops one LAN peer from flooding the inbox with `text_received`
     /// events. See [`TextRateLimiter`].
     pub text_rate: Arc<Mutex<TextRateLimiter>>,
+    /// Per-source-IP inbound file-request throttle (M18). Listener-only too.
+    /// See [`FileRequestRateLimiter`].
+    pub file_rate: Arc<Mutex<FileRequestRateLimiter>>,
 }
 
 // Manual impl: `#[derive(Clone)]` would demand `R: Clone`, which the mock
@@ -127,6 +130,7 @@ impl<R: Runtime> Clone for TransportCtx<R> {
             concurrency: self.concurrency.clone(),
             pairing: self.pairing.clone(),
             text_rate: self.text_rate.clone(),
+            file_rate: self.file_rate.clone(),
         }
     }
 }

@@ -165,6 +165,11 @@ fn is_bidi_or_zero_width(c: char) -> bool {
 /// [`resolve_and_open_resumable`], [`resolve_and_open_overwrite`]): it proves no
 /// real ancestor and the (created) parent resolves OUTSIDE the root before any
 /// file is opened, so a pre-planted junction/symlink cannot redirect the write.
+///
+/// Only an escape is `UnsafePath`. A folder that can't be created or resolved
+/// (no permission, a full disk, the download folder gone) is `Io` (M10): as
+/// "unsafe path" it reached the sender as a broken connection, and nobody
+/// thought to check the disk.
 fn ensure_parent_in_root(candidate: &Path, base: &Path) -> Result<()> {
     if let Some(parent) = candidate.parent() {
         // [red-team #1] Check the DEEPEST EXISTING ancestor's real path BEFORE creating
@@ -180,16 +185,16 @@ fn ensure_parent_in_root(candidate: &Path, base: &Path) -> Result<()> {
         if exists_nofollow(&anc) {
             let real = anc
                 .canonicalize()
-                .map_err(|e| LanBeamError::UnsafePath(format!("canonicalize ancestor: {e}")))?;
+                .map_err(|e| LanBeamError::Io(format!("canonicalize ancestor: {e}")))?;
             if !real.starts_with(base) {
                 return Err(LanBeamError::UnsafePath("escapes download root".into()));
             }
         }
         std::fs::create_dir_all(parent)
-            .map_err(|e| LanBeamError::UnsafePath(format!("create dirs: {e}")))?;
+            .map_err(|e| LanBeamError::Io(format!("create dirs: {e}")))?;
         let real_parent = parent
             .canonicalize()
-            .map_err(|e| LanBeamError::UnsafePath(format!("canonicalize parent: {e}")))?;
+            .map_err(|e| LanBeamError::Io(format!("canonicalize parent: {e}")))?;
         if !real_parent.starts_with(base) {
             return Err(LanBeamError::UnsafePath("escapes download root".into()));
         }
@@ -209,7 +214,7 @@ fn opened_inside_root(target: &Path, base: &Path) -> bool {
 pub fn resolve_and_open(rel: &Path, download_root: &Path) -> Result<(PathBuf, File)> {
     let base = download_root
         .canonicalize()
-        .map_err(|e| LanBeamError::UnsafePath(format!("download root: {e}")))?;
+        .map_err(|e| LanBeamError::Io(format!("download root: {e}")))?;
     let candidate = download_root.join(rel);
     ensure_parent_in_root(&candidate, &base)?;
 
@@ -290,7 +295,7 @@ pub fn resolve_and_open_resumable(
 ) -> Result<(PathBuf, File, u64)> {
     let base = download_root
         .canonicalize()
-        .map_err(|e| LanBeamError::UnsafePath(format!("download root: {e}")))?;
+        .map_err(|e| LanBeamError::Io(format!("download root: {e}")))?;
     let target = download_root.join(disk_rel);
     ensure_parent_in_root(&target, &base)?;
 
@@ -494,6 +499,39 @@ mod tests {
         assert_ne!(p1, p2);
         assert!(p2.file_name().unwrap().to_string_lossy().contains("(1)"));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // M10: a folder the receive cannot create, or a download folder that is
+    // gone, is a disk problem (`Io`) — not an unsafe name. Either used to come
+    // out as UnsafePath, which the sender read as "the connection failed".
+    #[test]
+    fn io_failures_are_io_not_unsafe_path() {
+        let root = std::env::temp_dir().join(format!("lanbeam-sanio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // `docs` exists as a FILE, so `docs/report.txt` needs a folder that can't be made.
+        std::fs::write(root.join("docs"), b"x").unwrap();
+        let rel = match validate("docs/report.txt") {
+            Decision::Accept(p) => p,
+            _ => panic!(),
+        };
+        assert!(
+            matches!(resolve_and_open(&rel, &root), Err(LanBeamError::Io(_))),
+            "an uncreatable folder is Io"
+        );
+        let gone = root.join("no-such-folder");
+        assert!(
+            matches!(resolve_and_open(&rel, &gone), Err(LanBeamError::Io(_))),
+            "a missing download folder is Io"
+        );
+        assert!(
+            matches!(
+                resolve_and_open_resumable(&gone, &rel, 0),
+                Err(LanBeamError::Io(_))
+            ),
+            "for a resume too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

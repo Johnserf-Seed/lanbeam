@@ -114,16 +114,15 @@ pub struct Share {
     created: Instant,
     /// How long past `created` the share stays serveable.
     ttl: Duration,
-    /// The PER-FILE download cap, or `None` for unlimited. [`check`] scales it
-    /// by the file count: "N 次" means each shared file may be fetched N times,
-    /// so a share's total budget is `N × files.len()` — a single-file share is
-    /// therefore unchanged (`N × 1`).
+    /// The PER-FILE download cap, or `None` for unlimited: "N 次" means each
+    /// shared file may be fetched N times.
     max_downloads: Option<u32>,
-    /// Raw count of individual file fetches so far — every served file bumps it
-    /// by one, under the registry lock at the START of the serve (see
-    /// [`download`]). Compared against the scaled budget in [`check`]; a HEAD
-    /// probe never bumps it (it delivers no bytes).
-    downloads: u32,
+    /// How many times each file has been fetched, by index — a served file bumps
+    /// its OWN count, under the registry lock at the START of the serve (see
+    /// [`download`]); a HEAD probe never does (it delivers no bytes). Per file
+    /// (M3): one pooled tally against `N × files.len()` let a single file of a
+    /// three-file "once each" share be fetched three times.
+    fetches: Vec<u32>,
     /// Cleared by [`stop_share`]; a stopped share answers 410 on every request
     /// until the sweep reclaims it.
     active: bool,
@@ -159,19 +158,28 @@ impl Share {
         if now.duration_since(self.created) >= self.ttl {
             return Err(Denied::Gone);
         }
+        // Serveable while ANY file has a download left; each file's own count
+        // is checked when it is fetched (`file_has_budget`).
         if let Some(per_file) = self.max_downloads {
-            // The cap is PER FILE: "N 次" means each shared file may be fetched
-            // N times, so the share's total budget scales with the file count.
-            // `downloads` counts every served file, so a K-file share with cap N
-            // retires only after N×K fetches — a single-file share is unchanged
-            // (N×1 = N). `.max(1)` guards the impossible empty set (create_share
-            // refuses one) so the budget is never a degenerate zero.
-            let budget = per_file.saturating_mul(self.files.len().max(1) as u32);
-            if self.downloads >= budget {
+            if self.whole_set_downloads() >= per_file {
                 return Err(Denied::Gone);
             }
         }
         Ok(())
+    }
+
+    /// Whether file `index` may be fetched once more under the per-file cap.
+    fn file_has_budget(&self, index: usize) -> bool {
+        match self.max_downloads {
+            None => true,
+            Some(per_file) => self.fetches.get(index).is_some_and(|&n| n < per_file),
+        }
+    }
+
+    /// How many times the WHOLE set has been downloaded: the least-fetched
+    /// file's count. It reaches the cap exactly when every file has.
+    fn whole_set_downloads(&self) -> u32 {
+        self.fetches.iter().copied().min().unwrap_or(0)
     }
 }
 
@@ -201,12 +209,12 @@ pub struct ShareDownloadEvent {
     pub name: String,
     /// The file's size in bytes.
     pub size: u64,
-    /// Whole-SET downloads so far (raw per-file fetches ÷ file count), matching
-    /// the count [`ShareInfo`] reports — so an open panel can display it verbatim.
+    /// Whole-SET downloads so far (the least-fetched file's count), matching the
+    /// count [`ShareInfo`] reports — so an open panel can display it verbatim.
     pub downloads: u32,
     /// The per-file download cap the sender set, or `null` for unlimited.
     pub max_downloads: Option<u32>,
-    /// How many files the share serves (the divisor behind `downloads`).
+    /// How many files the share serves.
     pub file_count: usize,
     /// The downloader's IP, best-effort (`"?"` if the peer address was unreadable).
     pub peer_ip: String,
@@ -266,11 +274,11 @@ pub fn create_share(
     let token = generate_token()?;
     let share = Share {
         token: token.clone(),
+        fetches: vec![0; share_files.len()],
         files: share_files,
         created: Instant::now(),
         ttl,
         max_downloads,
-        downloads: 0,
         active: true,
         expires_at_secs: now_unix_secs().saturating_add(ttl.as_secs()),
     };
@@ -370,16 +378,15 @@ pub struct ShareInfo {
     pub file_count: usize,
     pub total_size: u64,
     pub expires_at_secs: u64,
-    /// How many times the WHOLE shared set has been downloaded — the raw
-    /// per-file fetch tally divided by the file count. Reported this way (rather
-    /// than raw fetches) so it pairs honestly with the PER-FILE `max_downloads`:
-    /// a value in `0..=max_downloads` that reads as "the set was downloaded this
-    /// many of N times". A single-file share divides by one, so it is the raw
-    /// fetch count, unchanged.
+    /// How many times the WHOLE shared set has been downloaded — the
+    /// least-fetched file's count. Reported this way (rather than raw fetches)
+    /// so it pairs honestly with the PER-FILE `max_downloads`: a value in
+    /// `0..=max_downloads` that reads as "the set was downloaded this many of N
+    /// times", and reaches N exactly when the link stops serving. For a single
+    /// file it is that file's fetch count.
     pub downloads: u32,
     /// The PER-FILE download cap the user chose (the "N 次" dropdown value), or
-    /// `None` for unlimited — matches what `update_share` takes back. The
-    /// share's real budget is this × [`file_count`](Self::file_count).
+    /// `None` for unlimited — matches what `update_share` takes back.
     pub max_downloads: Option<u32>,
 }
 
@@ -401,9 +408,9 @@ pub fn list_shares(registry: &ShareRegistry, now: Instant) -> Vec<ShareInfo> {
             file_count: s.files.len(),
             total_size: s.files.iter().map(|f| f.size).sum(),
             expires_at_secs: s.expires_at_secs,
-            // Raw per-file fetches → completed whole-set downloads, so it stays
-            // in `0..=max_downloads` (see `ShareInfo::downloads`).
-            downloads: s.downloads / (s.files.len().max(1) as u32),
+            // Completed whole-set downloads, so it stays in `0..=max_downloads`
+            // (see `ShareInfo::downloads`).
+            downloads: s.whole_set_downloads(),
             max_downloads: s.max_downloads,
         })
         .collect();
@@ -441,10 +448,10 @@ fn now_unix_secs() -> u64 {
 /// (the file vanished between registration and the request). Best-effort: a
 /// missing share or poisoned lock is a no-op — the worst case is one download
 /// counted that did not deliver, which errs toward serving fewer, never more.
-fn refund(registry: &ShareRegistry, token: &str) {
+fn refund(registry: &ShareRegistry, token: &str, index: usize) {
     if let Ok(mut map) = registry.lock() {
-        if let Some(s) = map.get_mut(token) {
-            s.downloads = s.downloads.saturating_sub(1);
+        if let Some(n) = map.get_mut(token).and_then(|s| s.fetches.get_mut(index)) {
+            *n = n.saturating_sub(1);
         }
     }
 }
@@ -644,7 +651,7 @@ async fn landing(
 /// on the same route returns those headers only, spending no slot). Validates
 /// the token, bounds-checks the index and reserves a download slot ALL under the
 /// registry lock, so N concurrent requests can never collectively exceed the
-/// share's budget (the per-file cap × its file count). The file is then opened
+/// file's budget (the per-file cap). The file is then opened
 /// and streamed with the lock released (never held across `.await`); a file that
 /// vanished since creation refunds its slot and 404s.
 async fn download(
@@ -683,6 +690,10 @@ async fn download(
             // A valid token but no such file index — a fabricated or stale link.
             None => return denied(Denied::NotFound, lang),
         };
+        // THIS file's downloads are spent, even if others' are not (M3).
+        if !share.file_has_budget(index as usize) {
+            return denied(Denied::Gone, lang);
+        }
         // Reserve the slot atomically with the checks above — but only for a
         // real GET. A HEAD delivers no bytes, so it reserves nothing. The event
         // is assembled here (counts consistent under the lock) but only FIRED
@@ -691,15 +702,15 @@ async fn download(
         let ev = if is_head {
             None
         } else {
-            share.downloads += 1;
+            share.fetches[index as usize] += 1;
             let file_count = share.files.len().max(1);
             Some(ShareDownloadEvent {
                 token: token.clone(),
                 index,
                 name: name.clone(),
                 size,
-                // Whole-SET count, matching ShareInfo.downloads (raw ÷ files).
-                downloads: share.downloads / file_count as u32,
+                // Whole-SET count, matching ShareInfo.downloads.
+                downloads: share.whole_set_downloads(),
                 max_downloads: share.max_downloads,
                 file_count,
                 peer_ip: peer.ip().to_string(),
@@ -739,7 +750,7 @@ async fn download(
         Err(e) => {
             // The file is gone since it was registered — give the slot back and
             // report it as missing rather than leaking the OS error.
-            refund(&reg, &token);
+            refund(&reg, &token, index as usize);
             log::warn!("share file {} unavailable: {e}", path.display());
             denied(Denied::NotFound, lang)
         }
@@ -1209,7 +1220,7 @@ mod tests {
             created: now,
             ttl: Duration::from_secs(60),
             max_downloads: Some(2),
-            downloads: 0,
+            fetches: vec![0, 1],
             active: true,
             expires_at_secs: 0,
         };
@@ -1230,13 +1241,23 @@ mod tests {
             "past TTL → Gone"
         );
 
+        let one_spent = Share {
+            fetches: vec![2, 1],
+            ..clone_share(&base)
+        };
+        assert!(
+            one_spent.check(now).is_ok(),
+            "one file spent: the share still serves the other"
+        );
+        assert!(!one_spent.file_has_budget(0), "…but not that file");
+        assert!(one_spent.file_has_budget(1));
         let spent = Share {
-            downloads: 2,
+            fetches: vec![2, 2],
             ..clone_share(&base)
         };
         assert!(
             matches!(spent.check(now), Err(Denied::Gone)),
-            "budget spent → Gone"
+            "every file spent → Gone"
         );
     }
 
@@ -1249,7 +1270,7 @@ mod tests {
             created: s.created,
             ttl: s.ttl,
             max_downloads: s.max_downloads,
-            downloads: s.downloads,
+            fetches: s.fetches.clone(),
             active: s.active,
             expires_at_secs: s.expires_at_secs,
         }
@@ -1540,9 +1561,8 @@ mod tests {
     }
 
     /// The download cap is PER FILE: "N 次" means each shared file may be fetched
-    /// N times (effective budget = N × file count). A single-file Some(1) share
-    /// is unchanged — one fetch, then 410 — while a K-file Some(1) share serves
-    /// every file exactly once before any further fetch 410s.
+    /// N times, counted file by file. A single-file Some(1) share is one fetch,
+    /// then 410; a K-file Some(1) share serves every file exactly once.
     #[tokio::test]
     async fn cap_is_per_file_not_per_share() {
         // Single file, cap 1: unchanged — one download, the second 410s.
@@ -1591,6 +1611,31 @@ mod tests {
             }
             let (repeat, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
             assert_eq!(repeat, 410, "every file spent once → repeats are Gone");
+        }
+
+        // The cap is per FILE (M3): one file of a "once each" share can't be
+        // fetched again on the others' unused downloads — and the others keep
+        // theirs.
+        {
+            let reg = new_registry();
+            let f0 = temp_file("p0.bin", b"zero");
+            let f1 = temp_file("p1.bin", b"one!");
+            let token = create_share(
+                &reg,
+                vec![("p0.bin".into(), f0), ("p1.bin".into(), f1)],
+                Duration::from_secs(60),
+                Some(1),
+            )
+            .unwrap();
+            let addr = serve(reg).await;
+            let (first, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
+            let (again, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
+            let (other, _, _) = http_get(addr, &format!("/s/{token}/1")).await;
+            assert_eq!(
+                (first, again, other),
+                (200, 410, 200),
+                "file 0 once, then Gone — file 1 still has its download"
+            );
         }
     }
 
@@ -1807,7 +1852,7 @@ mod tests {
         // Spend the single slot directly on the registry (no HTTP roundtrip).
         {
             let mut map = reg.lock().unwrap();
-            map.get_mut(&token).unwrap().downloads = 1;
+            map.get_mut(&token).unwrap().fetches = vec![1];
         }
         let now = Instant::now();
         assert_eq!(
@@ -1994,11 +2039,11 @@ mod tests {
         );
     }
 
-    /// `list_shares` reports COMPLETED whole-set downloads: the raw per-file fetch
-    /// tally divided by the file count. A 2-file share with 4 raw fetches reads as
-    /// two completed downloads.
+    /// `list_shares` reports COMPLETED whole-set downloads: the least-fetched
+    /// file's count. Two files fetched twice and three times: the set was
+    /// downloaded twice.
     #[test]
-    fn list_shares_divides_downloads_by_file_count() {
+    fn list_shares_reports_whole_set_downloads() {
         let reg = new_registry();
         let f1 = temp_file("d1.bin", b"a");
         let f2 = temp_file("d2.bin", b"b");
@@ -2009,17 +2054,13 @@ mod tests {
             Some(3),
         )
         .unwrap();
-        // Four raw per-file fetches = two completed whole-set downloads.
         {
             let mut map = reg.lock().unwrap();
-            map.get_mut(&token).unwrap().downloads = 4;
+            map.get_mut(&token).unwrap().fetches = vec![2, 3];
         }
         let listed = list_shares(&reg, Instant::now());
         assert_eq!(listed.len(), 1);
-        assert_eq!(
-            listed[0].downloads, 2,
-            "4 raw fetches / 2 files = 2 whole-set downloads"
-        );
+        assert_eq!(listed[0].downloads, 2, "the less-fetched file's count");
     }
 
     /// `list_shares` omits an EXPIRED-but-unswept share: its `active` flag is still
@@ -2058,7 +2099,7 @@ mod tests {
         // Spend the whole budget, but leave it active and un-expired.
         {
             let mut map = reg.lock().unwrap();
-            map.get_mut(&token).unwrap().downloads = 5;
+            map.get_mut(&token).unwrap().fetches = vec![5];
         }
         sweep(&reg, Instant::now());
         assert!(
