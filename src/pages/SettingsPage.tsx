@@ -20,6 +20,12 @@ import { isMac } from "../lib/platform";
 import { setZoom, UI_ZOOMS } from "../lib/uiZoom";
 import { playSound } from "../lib/sound";
 import type { SoundKind } from "../lib/sound";
+import {
+  checkForUpdate,
+  openReleasePage,
+  RELEASES_URL,
+  type UpdateCheck,
+} from "../lib/update";
 import { APP_VERSION } from "../lib/version";
 
 /* fingerprint display: 4 groups of 4 from the deviceId's alphanumerics */
@@ -117,6 +123,16 @@ const stepBtn: CSSProperties = {
   fontSize: 13,
 };
 
+/** An action that reads as a link inside a line of text. */
+const linkBtn: CSSProperties = {
+  border: "none",
+  background: "none",
+  padding: 0,
+  font: "inherit",
+  color: "var(--accent-ink)",
+  cursor: "pointer",
+};
+
 export default function SettingsPage() {
   const { t, i18n } = useTranslation();
 
@@ -153,6 +169,14 @@ export default function SettingsPage() {
   };
 
   const milestone = () => showToast(t("common.milestoneNote"));
+
+  // 检查更新 (F2): one request to GitHub, only when the button is pressed —
+  // "checking" while it is out, then what came back.
+  const [update, setUpdate] = useState<UpdateCheck | "checking" | null>(null);
+  const checkUpdate = async () => {
+    setUpdate("checking");
+    setUpdate(await checkForUpdate());
+  };
 
   // Half-written files still in the download folder (M6.4). Loaded on mount and
   // after a clear; a transfer that ends while the page is open is rare enough
@@ -1271,15 +1295,47 @@ export default function SettingsPage() {
             >
               LanBeam v{APP_VERSION}
             </div>
+            <div className="set-desc" aria-live="polite">
+              {update === null || update === "checking" ? (
+                t("settings.updateDesc")
+              ) : update.kind === "newer" ? (
+                <>
+                  {t("settings.updateNewer", { latest: update.latest })}
+                  {" · "}
+                  <button
+                    type="button"
+                    style={linkBtn}
+                    onClick={() => void openReleasePage(update.url)}
+                  >
+                    {t("settings.updateDownload")}
+                  </button>
+                </>
+              ) : update.kind === "current" ? (
+                t("settings.updateCurrent")
+              ) : (
+                <>
+                  {t("settings.updateFailed")}
+                  {" · "}
+                  <button
+                    type="button"
+                    style={linkBtn}
+                    onClick={() => void openReleasePage(RELEASES_URL)}
+                  >
+                    {t("settings.updateOpenReleases")}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           <button
             type="button"
             className="btn sm ink"
-            onClick={() =>
-              showToast(t("settings.updateManual", { v: APP_VERSION }))
-            }
+            disabled={update === "checking"}
+            onClick={() => void checkUpdate()}
           >
-            {t("settings.checkUpdate")}
+            {update === "checking"
+              ? t("settings.checkingUpdate")
+              : t("settings.checkUpdate")}
           </button>
         </div>
         <div className="set-row last">
