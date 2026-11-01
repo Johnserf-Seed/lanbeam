@@ -28,7 +28,9 @@ export default function Toast() {
           fontSize: 12.5,
           fontWeight: 600,
           padding: "9px 17px",
-          borderRadius: 99,
+          // Half a one-line toast's height: a pill on one line, and a rounded
+          // box — not a stretched capsule — once a long message wraps.
+          borderRadius: 18,
           boxShadow: "var(--shadow)",
           animation: "lbUp .22s ease",
           pointerEvents: "auto",

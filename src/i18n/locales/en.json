@@ -256,7 +256,9 @@
     "removedFromCircleToast": "Moved {{name}} out of the trust circle — transfers will ask every time",
     "restoredToast": "Device restored",
     "deletedToast": "Deleted {{name}}",
-    "deletedStillHereToast": "Deleted {{name}} — it's still announcing itself on the LAN, so it comes back as an untrusted device"
+    "deletedStillHereToast": "Deleted {{name}} — it's still announcing itself on the LAN, so it comes back as an untrusted device",
+    "emptyLead": "No devices yet — ones on your network appear here by themselves; pair to add one on another subnet",
+    "emptyPair": "Pair…"
   },
   "settings": {
     "renamePlaceholder": "Device name…",
@@ -437,7 +439,8 @@
     "startTrustedToast_one": "Sending to {{count}} trusted device",
     "startTrustedToast_other": "Sending to {{count}} trusted devices",
     "sendFailedToast": "Sending to {{name}} failed: {{err}}",
-    "declinedToast": "The peer declined the transfer"
+    "declinedToast": "The peer declined the transfer",
+    "poolEmpty": "No recent files — choose some from disk, or drop them onto the window"
   },
   "net": {
     "udpDegraded": "Discovery receive degraded (port busy) · others may not see you",
@@ -505,7 +508,10 @@
     "accept": "Accept",
     "acceptToast": "Receiving files from {{name}}",
     "acceptTrustToast": "Receiving · {{name}} is now trusted",
-    "declineToast": "Declined the request from {{name}}"
+    "declineToast": "Declined the request from {{name}}",
+    "collapse": "Minimize",
+    "expand": "Show",
+    "expandLabel": "Show the request from {{name}}"
   },
   "conflict": {
     "title": "\"{{name}}\" already exists",
@@ -593,7 +599,10 @@
     "targetOffline": "“{{name}}” went offline — pick another, or wait for it to come back",
     "sentToast": "Sent to {{name}}",
     "sendFailed": "Send failed: {{err}}",
-    "foot": "End-to-end encrypted · instant while online · also via the global shortcut"
+    "foot": "End-to-end encrypted · instant while online · also via the global shortcut",
+    "noDevices": "No devices nearby",
+    "noDevicesHint": "Devices on your network show up by themselves; one on another subnet needs pairing first",
+    "pair": "Pair a device"
   },
   "share": {
     "title": "Receive in a browser",

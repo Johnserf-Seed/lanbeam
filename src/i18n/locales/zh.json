@@ -247,7 +247,9 @@
     "removedFromCircleToast": "已将 {{name}} 移出信任圈 · 之后每次传输都会询问",
     "restoredToast": "已恢复设备",
     "deletedToast": "已删除 {{name}}",
-    "deletedStillHereToast": "已删除 {{name}} · 它仍在局域网上广播,会作为未信任设备重新出现"
+    "deletedStillHereToast": "已删除 {{name}} · 它仍在局域网上广播,会作为未信任设备重新出现",
+    "emptyLead": "还没有设备 · 同一网络里的设备会自动出现在这里，跨网段的可以配对加入",
+    "emptyPair": "配对…"
   },
   "settings": {
     "renamePlaceholder": "输入设备名…",
@@ -418,7 +420,8 @@
     "sentOneToast": "{{name}} 已接受，开始传输",
     "startTrustedToast_other": "开始发送到 {{count}} 台受信任设备",
     "sendFailedToast": "发送到 {{name}} 失败：{{err}}",
-    "declinedToast": "对方拒绝了传输请求"
+    "declinedToast": "对方拒绝了传输请求",
+    "poolEmpty": "还没有最近的文件 · 点「从磁盘选择」，或直接把文件拖进窗口"
   },
   "net": {
     "udpDegraded": "本机收不到发现广播（端口被占用）· 其他设备可能看不到你",
@@ -485,7 +488,10 @@
     "accept": "接收",
     "acceptToast": "开始接收来自 {{name}} 的文件",
     "acceptTrustToast": "开始接收 · 已将 {{name}} 设为受信任",
-    "declineToast": "已拒绝 {{name}} 的传输请求"
+    "declineToast": "已拒绝 {{name}} 的传输请求",
+    "collapse": "收起",
+    "expand": "展开",
+    "expandLabel": "展开「{{name}}」的接收请求"
   },
   "conflict": {
     "title": "「{{name}}」已存在",
@@ -572,7 +578,10 @@
     "targetOffline": "「{{name}}」已离线 · 选另一台，或等它回来",
     "sentToast": "已发送到 {{name}}",
     "sendFailed": "发送失败：{{err}}",
-    "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起"
+    "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起",
+    "noDevices": "附近还没有设备",
+    "noDevicesHint": "同一网络里的设备会自动出现，跨网段的要先配对",
+    "pair": "去配对"
   },
   "share": {
     "title": "用浏览器接收",

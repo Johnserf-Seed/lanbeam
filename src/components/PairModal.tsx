@@ -33,7 +33,7 @@ import {
   validateJoin,
 } from "../lib/pairing";
 import { useEscape } from "../lib/useEscape";
-import { ModalHead, Segmented } from "./ui";
+import { MODAL_W, ModalHead, Segmented } from "./ui";
 
 /** Every async result is tagged with a unique, increasing epoch (see
  *  lib/pairing.ts). Module-wide so two mounts can never reuse one. */
@@ -289,7 +289,7 @@ export default function PairModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ width: 460, fontFamily: "var(--font)" }}
+        style={{ width: MODAL_W.wide, fontFamily: "var(--font)" }}
         onClick={(e) => e.stopPropagation()}
       >
         {c ? (

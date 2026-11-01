@@ -155,6 +155,10 @@ export function StatusDot({
   );
 }
 
+/** The two widths a modal comes in: one that asks a single thing, and one
+ *  that carries a list or a form. Seven modals in six widths read as accident. */
+export const MODAL_W = { narrow: 440, wide: 500 } as const;
+
 /** Modal header row: title + sub + close ×. */
 export function ModalHead({
   title,

@@ -6,6 +6,8 @@ import i18n from "../i18n";
 import {
   awaitingText,
   baseName,
+  CHIP_TEXT_MAX,
+  estChipW,
   etaClock,
   extOf,
   fmtBytes,
@@ -167,6 +169,16 @@ describe("fmtCountdown", () => {
     expect(fmtCountdown(0)).toBe("0:00");
     expect(fmtCountdown(-5_000)).toBe("0:00");
     expect(fmtCountdown(Number.NaN)).toBe("0:00");
+  });
+});
+
+describe("estChipW", () => {
+  it("never reserves more than a chip may draw (§5)", () => {
+    const longCjk = "长".repeat(63);
+    const longLatin = "W".repeat(63);
+    expect(estChipW(longCjk, "192.168.1.20")).toBe(44 + CHIP_TEXT_MAX);
+    expect(estChipW(longLatin, "192.168.1.20")).toBe(44 + CHIP_TEXT_MAX);
+    expect(estChipW("NAS", "192.168.1.20")).toBeLessThan(44 + CHIP_TEXT_MAX);
   });
 });
 

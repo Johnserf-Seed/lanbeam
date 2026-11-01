@@ -23,7 +23,7 @@ import {
   visibilityOf,
   type UITransfer,
 } from "../lib/store";
-import { estChipW, etaClock, fmtBytes } from "../lib/format";
+import { CHIP_TEXT_MAX, estChipW, etaClock, fmtBytes } from "../lib/format";
 import { errText } from "../lib/sendops";
 import { radarBasePos, resolveChips, type ChipNode } from "../lib/radar";
 import { ExtChip } from "../components/ui";
@@ -192,8 +192,8 @@ export default function DevicesPage() {
 
   /* ── node placement: deterministic base + collision resolve ─────────── */
   const nodePos = useMemo(() => {
-    const list: ChipNode[] = devices.map((d, i) => {
-      const bp = radarBasePos(d.deviceId, i);
+    const list: ChipNode[] = devices.map((d) => {
+      const bp = radarBasePos(d.deviceId);
       const x = rcX + Math.round((bp.x - 345) * rk);
       const y = rcY + Math.round((bp.y - 250) * rk);
       const name = nameById[d.deviceId] ?? d.name;
@@ -468,11 +468,15 @@ export default function DevicesPage() {
               {t("devices.self")}
             </div>
             <div
+              title={deviceName}
               style={{
                 fontFamily: "var(--mono)",
                 fontSize: 10.5,
                 color: "var(--muted)",
                 whiteSpace: "nowrap",
+                maxWidth: CHIP_TEXT_MAX,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
               }}
             >
               {deviceName}
@@ -635,12 +639,16 @@ export default function DevicesPage() {
                   )}
                   <div style={{ textAlign: rp.mirror ? "right" : "left" }}>
                     <div
+                      title={name}
                       style={{
                         fontSize: 12.5,
                         fontWeight: 600,
                         color: "var(--ink2)",
                         lineHeight: "18px",
                         whiteSpace: "nowrap",
+                        maxWidth: CHIP_TEXT_MAX,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
                       }}
                     >
                       {name}

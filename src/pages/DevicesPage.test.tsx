@@ -14,6 +14,7 @@ import {
   useTransfers,
   useTrust,
 } from "../lib/store";
+import { CHIP_TEXT_MAX } from "../lib/format";
 import type { TrustRecord } from "../lib/store";
 import { fireEvent, renderUI, screen, waitFor } from "../test/render";
 import DevicesPage from "./DevicesPage";
@@ -85,6 +86,18 @@ describe("DevicesPage — discovered devices", () => {
     expect(screen.getByText("192.168.1.9")).toBeTruthy();
     // the center hub ("this device") always renders
     expect(screen.getByText(i18n.t("devices.self"))).toBeTruthy();
+  });
+
+  it("cuts a long name short on the radar, keeping the whole name on hover (§5)", () => {
+    // A name can be 63 characters; nowrap with no bound ran it over its
+    // neighbours.
+    const long =
+      "Engineering · Jane's MacBook Pro 16-inch (2023) · spare".repeat(2);
+    seedDevices([dev({ deviceId: "d1", name: long, address: "192.168.1.5" })]);
+    renderUI(<DevicesPage />);
+    const chip = screen.getByTitle(long);
+    expect(chip.style.maxWidth).toBe(`${CHIP_TEXT_MAX}px`);
+    expect(chip.style.textOverflow).toBe("ellipsis");
   });
 
   it("shows the drag hint (not the empty hint) when devices are present", () => {

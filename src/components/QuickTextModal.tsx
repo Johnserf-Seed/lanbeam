@@ -4,7 +4,17 @@ import { showToast, useData, useOverlays } from "../lib/store";
 import { isMac } from "../lib/platform";
 import { errText, sendTextTracked } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
-import { ModalHead, Toggle } from "./ui";
+import { MODAL_W, ModalHead, Toggle } from "./ui";
+
+/** An action that reads as a link inside a line of text. */
+const linkBtn = {
+  border: "none",
+  background: "none",
+  padding: 0,
+  font: "inherit",
+  color: "var(--accent-ink)",
+  cursor: "pointer",
+} as const;
 
 /** ⌁ 快传文本 — sends a short text/link over the encrypted channel for real
  *  (send_text, M7.3). The clipboard toggle is a REQUEST to the receiver; their
@@ -13,6 +23,7 @@ export default function QuickTextModal() {
   const { t } = useTranslation();
   const qtOpen = useOverlays((s) => s.qtOpen);
   const setQt = useOverlays((s) => s.setQt);
+  const setPair = useOverlays((s) => s.setPair);
   const devices = useData((s) => s.devices);
 
   const [text, setText] = useState("");
@@ -96,7 +107,7 @@ export default function QuickTextModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ width: 462, fontFamily: "var(--font)" }}
+        style={{ width: MODAL_W.narrow, fontFamily: "var(--font)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <ModalHead title={t("qt.title")} sub={t("qt.sub")} onClose={close} />
@@ -131,8 +142,34 @@ export default function QuickTextModal() {
                 {t("qt.offlineOption", { name: targetName })}
               </option>
             )}
+            {!devices.length && !offline && (
+              <option value="">{t("qt.noDevices")}</option>
+            )}
           </select>
         </div>
+        {!devices.length && !offline && (
+          // An empty, greyed-out list said nothing about why or what to do.
+          <div
+            style={{
+              padding: "6px 20px 0 20px",
+              fontSize: 11.5,
+              color: "var(--muted)",
+            }}
+          >
+            {t("qt.noDevicesHint")}
+            {" · "}
+            <button
+              type="button"
+              style={linkBtn}
+              onClick={() => {
+                setQt(false);
+                setPair(true);
+              }}
+            >
+              {t("qt.pair")}
+            </button>
+          </div>
+        )}
         {offline && (
           <div
             style={{

@@ -103,15 +103,14 @@ export function hashId(id: string): number {
 }
 
 /** Deterministic base position (690×500 canvas, center 345/250) for a real
- *  device: golden-angle spread by discovery order, jittered by id hash so the
- *  layout is stable across sessions but devices don't stack. */
-export function radarBasePos(
-  id: string,
-  index: number,
-): { x: number; y: number } {
+ *  device, from its id alone: the id's hash picks both the angle and the ring,
+ *  so a device keeps its spot whoever else is online. Spread by discovery order
+ *  instead, every device after it moved whenever one came or went. Two that
+ *  land close are pushed apart by `resolveChips`. */
+export function radarBasePos(id: string): { x: number; y: number } {
   const h = hashId(id);
-  const angle = index * 2.39996 + ((h % 360) * Math.PI) / 180 / 6;
-  const radius = 150 + ((h >> 8) % 3) * 42 + (index % 2) * 18;
+  const angle = ((h % 3600) / 3600) * 2 * Math.PI;
+  const radius = 150 + ((h >>> 12) % 3) * 42;
   return {
     x: Math.round(345 + radius * Math.cos(angle)),
     y: Math.round(250 + radius * 0.72 * Math.sin(angle)),

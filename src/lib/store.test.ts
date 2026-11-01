@@ -254,7 +254,8 @@ describe("trustList", () => {
 describe("usePrefs", () => {
   it("has the documented defaults", () => {
     const p = usePrefs.getState();
-    expect(p.themeMode).toBe("light");
+    // Follows the system until someone picks (index.html paints by the same rule).
+    expect(p.themeMode).toBe("system");
     expect(p.ghostUntil).toBeNull();
     expect(p.port).toBe("51704");
     expect(p.soundKind).toBe("叮咚");

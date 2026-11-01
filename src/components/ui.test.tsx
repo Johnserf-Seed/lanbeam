@@ -1,9 +1,26 @@
 // Smoke tests for the shared UI primitives — also the proof that the vitest
 // infrastructure (happy-dom + testing-library + jest-dom) is wired correctly.
+import { readdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import userEvent from "@testing-library/user-event";
-import { ExtChip, Segmented, StatusDot, Toggle } from "./ui";
+import { ExtChip, MODAL_W, Segmented, StatusDot, Toggle } from "./ui";
+
+describe("MODAL_W", () => {
+  it("every modal takes one of the two widths — none picks its own", () => {
+    // Seven modals had six widths between 412 and 500.
+    expect(Object.values(MODAL_W)).toEqual([440, 500]);
+    const dir = resolve(process.cwd(), "src/components");
+    const modals = readdirSync(dir).filter((f) => f.endsWith("Modal.tsx"));
+    expect(modals.length).toBeGreaterThanOrEqual(7);
+    for (const f of modals) {
+      const src = readFileSync(join(dir, f), "utf8");
+      expect(src, f).toMatch(/width: MODAL_W\.(narrow|wide)/);
+      expect(src, f).not.toMatch(/className="modal"[\s\S]{0,160}?width: \d/);
+    }
+  });
+});
 
 describe("ExtChip", () => {
   it("renders the extension text for a normal file", () => {
