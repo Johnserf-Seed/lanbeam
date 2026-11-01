@@ -3,8 +3,9 @@
 
 //! Integration tests for the accept prompt through the REAL `handle_incoming`:
 //! the names it shows are the sanitized ones (M4), it is withdrawn when the
-//! sender hangs up while it is up (M12), and strangers can't keep opening
-//! requests, or pile up more prompts than anyone answers (M18).
+//! sender hangs up while it is up (M12), strangers can't keep opening
+//! requests, or pile up more prompts than anyone answers (M18), and a waiting
+//! sender hears where its request stands (F4).
 //!
 //! Lives here (not in lib unit tests) for the same reason as bye_session.rs:
 //! a mock-runtime Tauri app links comctl32-v6 imports, and only integration-
@@ -26,9 +27,12 @@ use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
 use lanbeam_lib::state::{
-    CompletedLog, ConcurrencyGate, PairingState, Parked, TransferControl, TransferCtlGuard,
+    CompletedLog, ConcurrencyGate, PairingState, Parked, ReplyDecision, TransferControl,
+    TransferCtlGuard,
 };
-use lanbeam_lib::transfer::{build_send_list, handle_incoming, initiator_hello, run_send};
+use lanbeam_lib::transfer::{
+    build_send_list, handle_incoming, initiator_hello, run_send, FileEvent, PendingState,
+};
 use lanbeam_lib::transport::noise::NoiseSession;
 use lanbeam_lib::transport::TransportCtx;
 use lanbeam_lib::trust::TrustStore;
@@ -111,6 +115,21 @@ async fn send(
     id: &str,
     ctl: &TransferControl,
 ) -> lanbeam_lib::error::Result<()> {
+    let noted = Arc::default();
+    send_noting(sender, addr, file, wire_name, id, ctl, noted).await
+}
+
+/// [`send`], noting what the sender heard while it waited — `"prompted"`,
+/// `"queued"` — and `"accepted"`, in order, in `noted`.
+async fn send_noting(
+    sender: &Identity,
+    addr: std::net::SocketAddr,
+    file: &Path,
+    wire_name: &str,
+    id: &str,
+    ctl: &TransferControl,
+    noted: Arc<Mutex<Vec<&'static str>>>,
+) -> lanbeam_lib::error::Result<()> {
     let stream = TcpStream::connect(addr).await.unwrap();
     let mut sess = NoiseSession::handshake_initiator(stream, sender.private_bytes(), None)
         .await
@@ -118,7 +137,25 @@ async fn send(
     initiator_hello(&mut sess, "Sender".into()).await.unwrap();
     let mut items = build_send_list(&[file.to_path_buf()], false).unwrap();
     items[0].meta.name = wire_name.into();
-    run_send(&mut sess, id, &items, ctl, None, &mut |_| {}, |_, _| {}).await
+    let mut on_file = |e: FileEvent<'_>| {
+        let note = match e {
+            FileEvent::Pending(PendingState::Prompted) => "prompted",
+            FileEvent::Pending(PendingState::Queued) => "queued",
+            FileEvent::Accepted => "accepted",
+            _ => return,
+        };
+        noted.lock().unwrap().push(note);
+    };
+    run_send(&mut sess, id, &items, ctl, None, &mut on_file, |_, _| {}).await
+}
+
+/// Wait (up to 5 s) for `cond`.
+async fn until(what: &str, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !cond() {
+        assert!(Instant::now() < deadline, "{what}");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 /// M4 + M12: the prompt shows the name the file will actually get — not the
@@ -204,6 +241,110 @@ async fn prompt_shows_sanitized_names_and_is_withdrawn_when_the_sender_hangs_up(
     let errs = errors.lock().unwrap();
     assert_eq!(errs.len(), 1);
     assert_eq!(errs[0]["sessionId"], "t-hangup");
+    assert_eq!(errs[0]["code"], "connection_lost");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// F4: the sender waiting on a prompt hears that it is up — before anyone has
+/// answered — and then that it was accepted.
+#[tokio::test]
+async fn a_waiting_sender_hears_its_request_is_on_screen() {
+    let tmp = std::env::temp_dir().join(format!("lanbeam-shown-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let file = tmp.join("a.bin");
+    std::fs::write(&file, b"payload").unwrap();
+
+    let app = tauri::test::mock_app();
+    let ctx = ctx(app.handle().clone(), &tmp, "ask");
+    let (addr, receiver) = spawn_receiver(&ctx).await;
+    let noted: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let sending = tokio::spawn({
+        let (file, noted) = (file.clone(), noted.clone());
+        async move {
+            let ctl = TransferControl::neutral();
+            let sender = generate_identity().unwrap();
+            send_noting(&sender, addr, &file, "a.bin", "t-shown", &ctl, noted).await
+        }
+    });
+
+    until("the sender never heard the prompt was up", || {
+        noted.lock().unwrap().contains(&"prompted")
+    })
+    .await;
+    assert_eq!(ctx.pending.lock().unwrap().len(), 1, "nobody has answered");
+
+    // Someone says yes.
+    let parked = ctx.pending.lock().unwrap().remove("t-shown").unwrap();
+    parked.reply.send(ReplyDecision::plain(true)).unwrap();
+    sending.await.unwrap().expect("delivered");
+    receiver.await.unwrap().unwrap();
+    assert_eq!(*noted.lock().unwrap(), vec!["prompted", "accepted"]);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// F4, and M12 one step on: a receive that has its yes but has to wait for a
+/// free slot tells the sender so — and when the sender gives up while it waits,
+/// the receiver notices at once, not when a slot frees and its accept meets a
+/// closed socket (up to ~145 s later).
+#[tokio::test]
+async fn a_queued_receive_tells_the_sender_and_notices_it_leave() {
+    let tmp = std::env::temp_dir().join(format!("lanbeam-queued-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let file = tmp.join("a.bin");
+    std::fs::write(&file, b"payload").unwrap();
+
+    let app = tauri::test::mock_app();
+    // "all": accepted without asking anyone, straight to the slots.
+    let ctx = ctx(app.handle().clone(), &tmp, "all");
+    let queued = capture(app.handle(), "transfer_queued");
+    let errors = capture(app.handle(), "transfer_error");
+    let _busy: Vec<_> = (0..3)
+        .map(|_| ctx.concurrency.try_acquire_receive().expect("a free slot"))
+        .collect();
+    let (addr, receiver) = spawn_receiver(&ctx).await;
+    let noted: Arc<Mutex<Vec<&'static str>>> = Arc::default();
+    let ctl = TransferControl::neutral();
+    let cancel = ctl.cancel.clone();
+    let sending = tokio::spawn({
+        let (file, noted) = (file.clone(), noted.clone());
+        async move {
+            let sender = generate_identity().unwrap();
+            send_noting(&sender, addr, &file, "a.bin", "t-queued", &ctl, noted).await
+        }
+    });
+
+    until("the sender never heard it was queued", || {
+        noted.lock().unwrap().contains(&"queued")
+    })
+    .await;
+    assert_eq!(*noted.lock().unwrap(), vec!["queued"], "nobody was asked");
+    assert_eq!(
+        queued.lock().unwrap().len(),
+        1,
+        "and the receiver's row says so too"
+    );
+
+    // The sender gives up.
+    cancel.cancel();
+    assert!(matches!(
+        sending.await.unwrap(),
+        Err(LanBeamError::Cancelled)
+    ));
+    let res = tokio::time::timeout(Duration::from_secs(5), receiver)
+        .await
+        .expect("the queued receive notices the sender has gone")
+        .unwrap();
+    assert!(
+        matches!(res, Err(LanBeamError::ConnectionLost(_))),
+        "{res:?}"
+    );
+    let errs = errors.lock().unwrap();
+    assert_eq!(errs.len(), 1);
+    assert_eq!(errs[0]["sessionId"], "t-queued");
     assert_eq!(errs[0]["code"], "connection_lost");
 
     let _ = std::fs::remove_dir_all(&tmp);

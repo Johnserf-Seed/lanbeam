@@ -14,6 +14,7 @@ import {
   showToast,
   transferList,
 } from "../lib/store";
+import { nextThemeMode } from "../lib/theme";
 
 export default function Header() {
   const { t } = useTranslation();
@@ -139,7 +140,7 @@ export default function Header() {
         className="btn icon"
         title={t("header.toggleTheme")}
         onClick={() =>
-          setPrefs({ themeMode: theme === "light" ? "dark" : "light" })
+          setPrefs({ themeMode: nextThemeMode(themeMode, sysDark) })
         }
       >
         {theme === "light" ? "☾" : "☀"}

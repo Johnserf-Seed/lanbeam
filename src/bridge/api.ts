@@ -102,11 +102,12 @@ export type TextReceivedEvent = {
   at: number;
 };
 
-/** A browser fetched one file from a live share (`share_download`). Fired once
- *  per successful download so the app can surface it — toast, history entry,
- *  OS notification and a live count on the open share panel. `downloads` is the
- *  whole-set count so far (matches ShareEntry.downloads); `peerIp` is who pulled
- *  it. */
+/** A browser downloaded one file from a live share (`share_download`). Fired
+ *  once per download — a device's first fetch of the file; the same device
+ *  resuming or re-fetching it fires nothing — so the app can surface it: toast,
+ *  history entry, OS notification and a live count on the open share panel.
+ *  `downloads` is the whole-set count so far (matches ShareEntry.downloads);
+ *  `peerIp` is who pulled it. */
 export type ShareDownloadEvent = {
   token: string;
   index: number;
@@ -223,6 +224,15 @@ export type TransferEvent = {
   savedNames?: string[];
   /** the peer — on a queued send (M25), the first event the row gets */
   deviceId?: string;
+};
+/** Where a send stands on the receiver while it waits for an answer
+ *  (`transfer_pending`, F4) — said only by a receiver new enough to: `prompted`
+ *  is on their screen, waiting for a person; `queued` is accepted there and
+ *  waiting for one of its transfer slots. */
+export type TransferPendingEvent = {
+  sessionId: string;
+  direction: "send";
+  state: "prompted" | "queued";
 };
 /** The SAS of an outgoing send, emitted once the connection is up (H10). */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };

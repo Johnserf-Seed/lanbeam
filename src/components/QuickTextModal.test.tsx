@@ -46,6 +46,24 @@ describe("QuickTextModal", () => {
     expect(container.querySelector(".scrim")).toBeNull();
   });
 
+  it("with no device to send to, says why and offers to pair (§5)", async () => {
+    useData.setState({ devices: [] });
+    useOverlays.setState({ qtOpen: true });
+    renderUI(<QuickTextModal />);
+    // Not an empty, greyed-out list.
+    expect(screen.getByRole("combobox")).toHaveTextContent(
+      i18n.t("qt.noDevices"),
+    );
+    expect(
+      screen.getByText(i18n.t("qt.noDevicesHint"), { exact: false }),
+    ).toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole("button", { name: i18n.t("qt.pair") }),
+    );
+    expect(useOverlays.getState().qtOpen).toBe(false);
+    expect(useOverlays.getState().pairOpen).toBe(true);
+  });
+
   it("renders the textarea + target picker when open with a device", () => {
     useData.setState({ devices: [device()] });
     useOverlays.setState({ qtOpen: true });

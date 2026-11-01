@@ -119,6 +119,9 @@
     "queued": "等待空闲槽位",
     "awaitingAccept": "等待对方接受",
     "awaitingAcceptSas": "等待对方接受 · 校验码 {{sas}}",
+    "awaitingShown": "已在对方屏幕上 · 等待对方接受",
+    "awaitingShownSas": "已在对方屏幕上 · 校验码 {{sas}}",
+    "awaitingSlot": "对方已接受 · 等对方空出传输名额",
     "metaLine": "{{done}} / {{total}} · {{pct}}%",
     "filesMore": "{{name}} 等 {{n}} 个文件",
     "canceledToast": "已取消传输",
@@ -244,7 +247,9 @@
     "removedFromCircleToast": "已将 {{name}} 移出信任圈 · 之后每次传输都会询问",
     "restoredToast": "已恢复设备",
     "deletedToast": "已删除 {{name}}",
-    "deletedStillHereToast": "已删除 {{name}} · 它仍在局域网上广播,会作为未信任设备重新出现"
+    "deletedStillHereToast": "已删除 {{name}} · 它仍在局域网上广播,会作为未信任设备重新出现",
+    "emptyLead": "还没有设备 · 同一网络里的设备会自动出现在这里，跨网段的可以配对加入",
+    "emptyPair": "配对…"
   },
   "settings": {
     "renamePlaceholder": "输入设备名…",
@@ -348,7 +353,13 @@
     "secAbout": "关于",
     "version": "版本",
     "checkUpdate": "检查更新",
-    "updateManual": "当前 v{{v}} · 自动更新暂未启用",
+    "checkingUpdate": "正在检查…",
+    "updateDesc": "只在你点击时联网，向 GitHub 读取最新版本号 · 不会自动下载或安装",
+    "updateNewer": "有新版本 v{{latest}}",
+    "updateCurrent": "已是最新版本",
+    "updateFailed": "检查失败 · 连不上 GitHub，或检查得太频繁",
+    "updateDownload": "去下载",
+    "updateOpenReleases": "打开发布页",
     "license": "开源许可",
     "licenseDesc": "MIT License · 第三方组件清单",
     "licenseTitle": "开源许可",
@@ -395,6 +406,8 @@
     "startN_other": "发送到 {{count}} 台设备",
     "waitingNote_other": "受信任的 {{count}} 台设备已直接开始传输",
     "waitingState": "等待对方确认…",
+    "shownState": "已在对方屏幕上 · 等待确认…",
+    "queuedState": "对方已接受 · 等对方空出名额…",
     "okState": "已接受",
     "failedState": "发送失败",
     "sasLabel": "校验码 · 与对方屏幕一致",
@@ -407,7 +420,8 @@
     "sentOneToast": "{{name}} 已接受，开始传输",
     "startTrustedToast_other": "开始发送到 {{count}} 台受信任设备",
     "sendFailedToast": "发送到 {{name}} 失败：{{err}}",
-    "declinedToast": "对方拒绝了传输请求"
+    "declinedToast": "对方拒绝了传输请求",
+    "poolEmpty": "还没有最近的文件 · 点「从磁盘选择」，或直接把文件拖进窗口"
   },
   "net": {
     "udpDegraded": "本机收不到发现广播（端口被占用）· 其他设备可能看不到你",
@@ -475,7 +489,10 @@
     "accept": "接收",
     "acceptToast": "开始接收来自 {{name}} 的文件",
     "acceptTrustToast": "开始接收 · 已将 {{name}} 设为受信任",
-    "declineToast": "已拒绝 {{name}} 的传输请求"
+    "declineToast": "已拒绝 {{name}} 的传输请求",
+    "collapse": "收起",
+    "expand": "展开",
+    "expandLabel": "展开「{{name}}」的接收请求"
   },
   "conflict": {
     "title": "「{{name}}」已存在",
@@ -563,7 +580,10 @@
     "sentToast": "已发送到 {{name}}",
     "sendFailed": "发送失败：{{err}}",
     "tooLong": "超出上限，请改用发送文件",
-    "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起"
+    "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起",
+    "noDevices": "附近还没有设备",
+    "noDevicesHint": "同一网络里的设备会自动出现，跨网段的要先配对",
+    "pair": "去配对"
   },
   "share": {
     "title": "用浏览器接收",

@@ -89,8 +89,13 @@ describe("Header", () => {
 
   it("toggles the theme preference via the theme button", () => {
     usePrefs.setState({ themeMode: "light" });
+    useSysDark.setState({ dark: false });
     renderUI(<Header />);
     fireEvent.click(screen.getByTitle(i18n.t("header.toggleTheme")));
     expect(usePrefs.getState().themeMode).toBe("dark");
+    // Flipping back to what the (light) system shows follows the system again
+    // — one click used to pin light or dark for good.
+    fireEvent.click(screen.getByTitle(i18n.t("header.toggleTheme")));
+    expect(usePrefs.getState().themeMode).toBe("system");
   });
 });

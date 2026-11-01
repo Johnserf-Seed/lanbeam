@@ -4,7 +4,13 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip, Segmented } from "../components/ui";
-import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
+import {
+  awaitingText,
+  etaClock,
+  extOf,
+  fmtBytes,
+  fmtWhen,
+} from "../lib/format";
 import { copyText, resendTransfer } from "../lib/sendops";
 import {
   showToast,
@@ -30,6 +36,13 @@ const emptyNote: CSSProperties = {
   fontSize: 12,
   color: "var(--muted)",
 };
+
+/** The time column's width: `10:24` / `昨天 18:05` in Chinese, but English
+ *  says "Yesterday 18:05". One width per language keeps the column straight
+ *  down the list; one width for both wrapped English onto two lines. */
+function timeColW(lang: string): number {
+  return lang.startsWith("zh") ? 70 : 92;
+}
 
 /** First file name (+ 等 n 个文件) shown as the row title. */
 function rowName(tr: UITransfer, t: TFunction): string {
@@ -271,9 +284,7 @@ function RunningRow({ tr }: { tr: UITransfer }) {
             {queued
               ? t("transfers.queued")
               : awaiting
-                ? tr.sas
-                  ? t("transfers.awaitingAcceptSas", { sas: fmtSas(tr.sas) })
-                  : t("transfers.awaitingAccept")
+                ? awaitingText(tr)
                 : tr.paused
                   ? t("transfers.speedPaused")
                   : verifiedN > 0
@@ -321,7 +332,7 @@ function RunningRow({ tr }: { tr: UITransfer }) {
 // read lazily via getState() at click time — subscribing here would re-render
 // every memoized row on LAN-discovery churn, defeating the memo.
 const HistoryRow = memo(function HistoryRow({ tr }: { tr: UITransfer }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const setDetail = useOverlays((s) => s.setDetail);
   const isDone = tr.status === "done";
   // A user-cancelled transfer (M6.1) is an outcome, not a failure — show 已取消
@@ -408,8 +419,10 @@ const HistoryRow = memo(function HistoryRow({ tr }: { tr: UITransfer }) {
               ? "var(--muted)"
               : "var(--danger)",
           flex: "none",
-          width: 52,
+          // Fits the longest of them in either language ("Canceled").
+          width: 64,
           textAlign: "right",
+          whiteSpace: "nowrap",
         }}
       >
         {isDone
@@ -423,8 +436,9 @@ const HistoryRow = memo(function HistoryRow({ tr }: { tr: UITransfer }) {
           fontSize: 11,
           color: "var(--muted)",
           flex: "none",
-          width: 70,
+          width: timeColW(i18n.language),
           textAlign: "right",
+          whiteSpace: "nowrap",
         }}
       >
         {tr.doneAt ? fmtWhen(tr.doneAt) : ""}
@@ -477,7 +491,7 @@ const HistoryRow = memo(function HistoryRow({ tr }: { tr: UITransfer }) {
  *  Memoized like HistoryRow: `tr` is referentially stable once terminal, so the
  *  row is inert during live-transfer progress ticks (it has no store subscriptions). */
 const TextRow = memo(function TextRow({ tr }: { tr: UITransfer }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const copy = async () => {
     // A text from an earlier run may have been saved without its body (M23).
     if (tr.text === undefined) {
@@ -555,8 +569,9 @@ const TextRow = memo(function TextRow({ tr }: { tr: UITransfer }) {
           fontSize: 11,
           color: "var(--muted)",
           flex: "none",
-          width: 70,
+          width: timeColW(i18n.language),
           textAlign: "right",
+          whiteSpace: "nowrap",
         }}
       >
         {tr.doneAt ? fmtWhen(tr.doneAt) : ""}

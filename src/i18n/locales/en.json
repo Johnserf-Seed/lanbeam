@@ -122,6 +122,9 @@
     "queued": "Waiting for a free slot",
     "awaitingAccept": "Waiting for them to accept",
     "awaitingAcceptSas": "Waiting for them to accept · verification code {{sas}}",
+    "awaitingShown": "On their screen · waiting for them to accept",
+    "awaitingShownSas": "On their screen · verification code {{sas}}",
+    "awaitingSlot": "Accepted · waiting for a free transfer slot on their side",
     "metaLine": "{{done}} / {{total}} · {{pct}}%",
     "filesMore": "{{name}} · {{n}} files",
     "canceledToast": "Transfer canceled",
@@ -253,7 +256,9 @@
     "removedFromCircleToast": "Moved {{name}} out of the trust circle — transfers will ask every time",
     "restoredToast": "Device restored",
     "deletedToast": "Deleted {{name}}",
-    "deletedStillHereToast": "Deleted {{name}} — it's still announcing itself on the LAN, so it comes back as an untrusted device"
+    "deletedStillHereToast": "Deleted {{name}} — it's still announcing itself on the LAN, so it comes back as an untrusted device",
+    "emptyLead": "No devices yet — ones on your network appear here by themselves; pair to add one on another subnet",
+    "emptyPair": "Pair…"
   },
   "settings": {
     "renamePlaceholder": "Device name…",
@@ -357,7 +362,13 @@
     "secAbout": "About",
     "version": "Version",
     "checkUpdate": "Check for updates",
-    "updateManual": "Currently v{{v}} · auto-update not configured yet",
+    "checkingUpdate": "Checking…",
+    "updateDesc": "Goes online only when you press it, to read the latest version number from GitHub · nothing is downloaded or installed",
+    "updateNewer": "v{{latest}} is available",
+    "updateCurrent": "You're on the latest version",
+    "updateFailed": "Couldn't check · GitHub is unreachable, or was asked too often",
+    "updateDownload": "Download",
+    "updateOpenReleases": "Open the releases page",
     "license": "Open-source licenses",
     "licenseDesc": "MIT License · third-party components",
     "licenseTitle": "Open-source licenses",
@@ -413,6 +424,8 @@
     "waitingNote_one": "{{count}} trusted device already started",
     "waitingNote_other": "{{count}} trusted devices already started",
     "waitingState": "Waiting for the peer…",
+    "shownState": "On their screen · waiting for them…",
+    "queuedState": "Accepted · waiting for a free slot on their side…",
     "okState": "Accepted",
     "failedState": "Send failed",
     "sasLabel": "Verification code · must match the other screen",
@@ -426,7 +439,8 @@
     "startTrustedToast_one": "Sending to {{count}} trusted device",
     "startTrustedToast_other": "Sending to {{count}} trusted devices",
     "sendFailedToast": "Sending to {{name}} failed: {{err}}",
-    "declinedToast": "The peer declined the transfer"
+    "declinedToast": "The peer declined the transfer",
+    "poolEmpty": "No recent files — choose some from disk, or drop them onto the window"
   },
   "net": {
     "udpDegraded": "Discovery receive degraded (port busy) · others may not see you",
@@ -495,7 +509,10 @@
     "accept": "Accept",
     "acceptToast": "Receiving files from {{name}}",
     "acceptTrustToast": "Receiving · {{name}} is now trusted",
-    "declineToast": "Declined the request from {{name}}"
+    "declineToast": "Declined the request from {{name}}",
+    "collapse": "Minimize",
+    "expand": "Show",
+    "expandLabel": "Show the request from {{name}}"
   },
   "conflict": {
     "title": "\"{{name}}\" already exists",
@@ -584,7 +601,10 @@
     "sentToast": "Sent to {{name}}",
     "sendFailed": "Send failed: {{err}}",
     "tooLong": "Over the limit — send it as a file instead",
-    "foot": "End-to-end encrypted · instant while online · also via the global shortcut"
+    "foot": "End-to-end encrypted · instant while online · also via the global shortcut",
+    "noDevices": "No devices nearby",
+    "noDevicesHint": "Devices on your network show up by themselves; one on another subnet needs pairing first",
+    "pair": "Pair a device"
   },
   "share": {
     "title": "Receive in a browser",

@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
-use lanbeam_lib::consts::TRANSFER_V2;
+use lanbeam_lib::consts::TRANSFER_V3;
 use lanbeam_lib::error::LanBeamError;
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
@@ -129,8 +129,8 @@ async fn loopback_quick_text_emits_text_received_and_acks() {
         .await
         .unwrap();
     assert_eq!(
-        peer.version, TRANSFER_V2,
-        "two current builds negotiate v2 quick text"
+        peer.version, TRANSFER_V3,
+        "two current builds negotiate the newest version, quick text included"
     );
     send_text(&mut sess, "meet at 3pm ✅".into(), Some(true))
         .await
@@ -224,7 +224,7 @@ async fn untrusted_text_under_trusted_policy_is_dropped_and_the_sender_is_told()
         .await
         .unwrap();
     let peer = initiator_hello(&mut sess, "Stranger".into()).await.unwrap();
-    assert_eq!(peer.version, TRANSFER_V2);
+    assert_eq!(peer.version, TRANSFER_V3);
     // The send FAILS: the receiver acked, but the ack said it did not deliver.
     let err = send_text(&mut sess, "click this sketchy link".into(), Some(false))
         .await

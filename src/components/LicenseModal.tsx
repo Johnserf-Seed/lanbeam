@@ -3,7 +3,7 @@ import { useTranslation } from "react-i18next";
 import { LICENSES } from "../lib/licenses";
 import { useOverlays } from "../lib/store";
 import { useEscape } from "../lib/useEscape";
-import { ModalHead } from "./ui";
+import { MODAL_W, ModalHead } from "./ui";
 
 /** 开源许可 (M9 polish): a read-only inventory of the third-party components
  *  LanBeam bundles — its direct frontend (npm) and Rust (crate) dependencies
@@ -51,7 +51,7 @@ export default function LicenseModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ width: 460, fontFamily: "var(--font)" }}
+        style={{ width: MODAL_W.wide, fontFamily: "var(--font)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <ModalHead

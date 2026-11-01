@@ -13,7 +13,7 @@ import {
   useTrust,
   type TrustDevice,
 } from "../lib/store";
-import { estChipW, shortName } from "../lib/format";
+import { CHIP_TEXT_MAX, estChipW, shortName } from "../lib/format";
 import { hashId, resolveChips, trustGeom, trustSlots } from "../lib/radar";
 import { toneColor, trustDot, withHalo } from "../lib/trustDot";
 import { Toggle } from "../components/ui";
@@ -129,6 +129,7 @@ export default function TrustedPage() {
   const rename = useTrust((s) => s.rename);
   const setPos = useTrust((s) => s.setPos);
   const setFpAlert = useOverlays((s) => s.setFpAlert);
+  const setPair = useOverlays((s) => s.setPair);
 
   const [box, setBox] = useState({ w: 640, h: 430 });
   const [drag, setDrag] = useState<{
@@ -584,8 +585,11 @@ export default function TrustedPage() {
                 position: "absolute",
                 left: tcX,
                 top: tcY - R2,
-                width: 64,
-                margin: "-7px 0 0 -32px",
+                // Centered on the ring at its own width: a fixed 64px broke
+                // "Trust circle" over two lines.
+                transform: "translate(-50%, -50%)",
+                padding: "0 6px",
+                whiteSpace: "nowrap",
                 textAlign: "center",
                 lineHeight: "14px",
                 fontFamily: "var(--mono)",
@@ -618,6 +622,34 @@ export default function TrustedPage() {
             >
               {t("trusted.self")}
             </div>
+            {tl.length === 0 && (
+              // No device at all: an empty circle explained nothing. Say
+              // where devices come from, and offer the way to add one.
+              <div
+                style={{
+                  position: "absolute",
+                  left: tcX,
+                  top: tcY + 38,
+                  width: 250,
+                  marginLeft: -125,
+                  textAlign: "center",
+                  fontSize: 11.5,
+                  lineHeight: 1.6,
+                  color: "var(--muted2)",
+                }}
+              >
+                {t("trusted.emptyLead")}
+                <div style={{ marginTop: 8 }}>
+                  <button
+                    type="button"
+                    className="btn sm ink"
+                    onClick={() => setPair(true)}
+                  >
+                    {t("trusted.emptyPair")}
+                  </button>
+                </div>
+              </div>
+            )}
             {drag && dragRemovable && <RemoveZone hot={hotC} />}
 
             {mode === "free" &&
@@ -690,7 +722,22 @@ export default function TrustedPage() {
                             whiteSpace: "nowrap",
                           }}
                         >
-                          {n.d.name}
+                          {/* A long name is cut short; the fingerprint after a
+                              shared one stays — it is what tells them apart. */}
+                          <span
+                            title={n.d.name}
+                            style={{
+                              display: "inline-block",
+                              maxWidth: dupNames.has(n.d.name)
+                                ? CHIP_TEXT_MAX - 60
+                                : CHIP_TEXT_MAX,
+                              overflow: "hidden",
+                              textOverflow: "ellipsis",
+                              verticalAlign: "bottom",
+                            }}
+                          >
+                            {n.d.name}
+                          </span>
                           {/* Two devices can share a name — the default one is
                               whatever the machine's hostname is, and every install
                               nobody renamed answers to it. Then the page shows what
@@ -1141,11 +1188,15 @@ export default function TrustedPage() {
             ) : (
               <>
                 <span
+                  title={selD.name}
                   style={{
                     fontSize: 12.5,
                     fontWeight: 600,
                     color: "var(--ink2)",
                     whiteSpace: "nowrap",
+                    minWidth: 0,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
                   }}
                 >
                   {selD.name}

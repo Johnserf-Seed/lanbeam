@@ -142,7 +142,11 @@ in Settings).
 - **Browser receive** — publish an explicit file set over a one‑shot HTTP share: an
   unguessable token URL with a TTL, a **per‑file** download cap (each file counts its own
   downloads), and instant stop — LAN‑only, files addressed by index (no path/traversal
-  surface). Every share — including a single‑file one — gets a branded landing page that
+  surface). Downloads are **resumable** (`Range` / `If-Range`, with an ETag and
+  Last-Modified to resume against): a device that already downloaded a file can pick a
+  broken download back up, or fetch it again, without spending another download — so a
+  “once” link that drops halfway still delivers the file, while a second device still
+  can't have it. Every share — including a single‑file one — gets a branded landing page that
   renders in **their** language (from `Accept-Language`), and every download
   comes straight back to you: a toast with the downloader's IP, a row in the transfer
   history, an OS notification, and a live counter on the open share panel. **Closing the
@@ -218,8 +222,11 @@ in Settings).
 <summary><b>Does anything go to the internet?</b></summary>
 
 No. Discovery, transfers and browser shares stay on the LAN — the share server even refuses
-any request from outside a private network. There is no account, no telemetry and no update
-check, and the UI's fonts are bundled rather than fetched.
+any request from outside a private network. There is no account and no telemetry, and the UI's
+fonts are bundled rather than fetched. The only request that ever leaves the LAN is one you
+make: pressing *Check for updates* in Settings asks GitHub for the latest release's version
+number. Nothing else is sent (GitHub sees your IP address, as with any web request), and
+nothing is downloaded or installed.
 </details>
 
 <details>
@@ -274,7 +281,9 @@ rather than create a new identity; open it again to retry.
   keychain releases an item only to the exact build that stored it, judged by code
   signature; without a paid Developer ID, every update would have asked for your login
   password just to start.
-- All peer traffic is encrypted end‑to‑end (Noise); the app opens no internet connections.
+- All peer traffic is encrypted end‑to‑end (Noise). The app opens no internet connection on its
+  own; the one exception is pressing *Check for updates*, which asks GitHub (`api.github.com`)
+  for the latest release's version number.
 - Untrusted input is treated as hostile: manifest names/sizes/counts are bounded, received
   paths are sanitized against traversal and Windows reserved‑name/ADS tricks, and pairing
   is TOFU + user‑confirmed with an out‑of‑band SAS check. A `lanbeam://` deep link may only
@@ -401,7 +410,7 @@ Uses a locally installed Chrome or Edge (or `CHROME_PATH`); see
 │       ├── sanitize.rs   #   received‑path safety (the single write choke point)
 │       ├── trust.rs      #   trust store  ·  exif.rs — metadata stripping
 │       └── commands/     #   the Tauri command surface, one module per area
-├── ROADMAP.md            # backend milestones (M4–M8 shipped; M9 = EXIF done, updater pending)
+├── ROADMAP.md            # backend milestones (M4–M8 shipped; M9 = EXIF and a manual update check done, in-app updater pending)
 └── vitest.config.ts
 ```
 

@@ -12,6 +12,28 @@ export function fmtBytes(bytes: number): string {
   return fmtMb(bytes / 1048576);
 }
 
+/** What a send is still waiting on, for its row and its detail (H10, F4): a free
+ *  slot on a receiver that already said yes, or a person — whose screen it is
+ *  already on, once the receiver says so. While a person has to look, the SAS
+ *  rides along. */
+export function awaitingText(tr: {
+  sas?: string;
+  peerState?: "prompted" | "queued";
+}): string {
+  if (tr.peerState === "queued") return i18n.t("transfers.awaitingSlot");
+  const shown = tr.peerState === "prompted";
+  if (!tr.sas)
+    return i18n.t(
+      shown ? "transfers.awaitingShown" : "transfers.awaitingAccept",
+    );
+  // The code never breaks across lines: half a code on each is no code to read.
+  const sas = fmtSas(tr.sas).replace(/ /g, "\u00a0");
+  return i18n.t(
+    shown ? "transfers.awaitingShownSas" : "transfers.awaitingAcceptSas",
+    { sas },
+  );
+}
+
 /** SAS codes render as spaced groups of three digits: `483 · 921 · 067`. */
 export function fmtSas(v: string | undefined | null): string {
   if (!v) return "";
@@ -56,6 +78,12 @@ export function extOf(name: string): string {
   return ext.toUpperCase().slice(0, 4);
 }
 
+/** The widest a chip's text may render — its name, cut with an ellipsis past
+ *  this. `estChipW` caps the width the layout reserves at 44 + this, so a chip
+ *  can never draw wider than the room it was given (a 63-character name used
+ *  to run straight over its neighbours). */
+export const CHIP_TEXT_MAX = 170;
+
 /** Estimated rendered width of a radar/trust chip (CJK vs latin metrics). */
 export function estChipW(name: string, sub: string): number {
   const tw = (str: string, cj: number, lat: number) => {
@@ -63,7 +91,10 @@ export function estChipW(name: string, sub: string): number {
     for (const ch of String(str)) t += ch.charCodeAt(0) > 0x2e80 ? cj : lat;
     return t;
   };
-  return Math.min(214, 44 + Math.max(tw(name, 12.5, 7.2), tw(sub, 10.5, 6.4)));
+  return Math.min(
+    44 + CHIP_TEXT_MAX,
+    44 + Math.max(tw(name, 12.5, 7.2), tw(sub, 10.5, 6.4)),
+  );
 }
 
 /** `10:24` / `昨天 18:05` / `7月6日` style timestamps, localized to the

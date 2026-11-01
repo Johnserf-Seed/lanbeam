@@ -4,6 +4,8 @@
 // stays false so the stores stay in browser mode) and only spy on
 // replyFileRequest so we can assert the accept/decline reply. State is driven
 // through the zustand stores and asserted via getState().
+import { readdirSync, readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingRequest } from "../bridge/api";
@@ -70,6 +72,75 @@ describe("IncomingStack rendering", () => {
     expect(
       screen.getByRole("button", { name: t("incoming.decline") }),
     ).toBeInTheDocument();
+  });
+});
+
+describe("IncomingStack · 收起", () => {
+  it("folds to one line that still says who is waiting, and unfolds on a click", () => {
+    useTransfers.setState({
+      incomings: [req(), req({ sessionId: "rx2", senderName: "Bob" })],
+    });
+    renderUI(<IncomingStack />);
+    fireEvent.click(
+      screen.getByRole("button", { name: t("incoming.collapse") }),
+    );
+
+    expect(
+      screen.queryByRole("button", { name: t("incoming.accept") }),
+    ).toBeNull();
+    const pill = screen.getByRole("button", {
+      name: t("incoming.expandLabel", { name: "Alice" }),
+    });
+    expect(pill).toHaveTextContent("Alice");
+    expect(pill).toHaveTextContent(t("incoming.queue", { n: 2 }));
+
+    fireEvent.click(pill);
+    expect(
+      screen.getByRole("button", { name: t("incoming.accept") }),
+    ).toBeInTheDocument();
+  });
+
+  it("a new request at the front arrives unfolded", () => {
+    useTransfers.setState({ incomings: [req()] });
+    renderUI(<IncomingStack />);
+    fireEvent.click(
+      screen.getByRole("button", { name: t("incoming.collapse") }),
+    );
+    act(() =>
+      useTransfers.setState({
+        incomings: [req({ sessionId: "rx9", senderName: "Carol" })],
+      }),
+    );
+    expect(screen.getByText("Carol")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: t("incoming.accept") }),
+    ).toBeInTheDocument();
+  });
+
+  it("sits under every modal's scrim — it drew over their controls — and over the detail drawer", () => {
+    const read = (f: string) => readFileSync(resolve(process.cwd(), f), "utf8");
+    const stackZ = Number(
+      read("src/components/IncomingStack.tsx").match(
+        /const STACK_Z = (\d+);/,
+      )?.[1],
+    );
+    expect(stackZ).toBeGreaterThan(0);
+    const modals = readdirSync(resolve(process.cwd(), "src/components")).filter(
+      (f) => f.endsWith("Modal.tsx"),
+    );
+    expect(modals.length).toBeGreaterThanOrEqual(7);
+    for (const f of modals) {
+      const z = Number(
+        read(`src/components/${f}`).match(
+          /className="scrim"[\s\S]{0,400}?zIndex: (\d+)/,
+        )?.[1],
+      );
+      expect(z, f).toBeGreaterThan(stackZ);
+    }
+    const drawer = [
+      ...read("src/components/TransferDetail.tsx").matchAll(/zIndex: (\d+)/g),
+    ].map((m) => Number(m[1]));
+    expect(stackZ).toBeGreaterThan(Math.max(...drawer));
   });
 });
 

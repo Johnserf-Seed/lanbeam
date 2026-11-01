@@ -1,5 +1,5 @@
 use super::*;
-use crate::consts::{NOISE_PARAMS, TRANSFER_V1, TRANSFER_V2};
+use crate::consts::{NOISE_PARAMS, TRANSFER_V1, TRANSFER_V2, TRANSFER_V3};
 use snow::Builder;
 use tokio::net::{TcpListener, TcpStream};
 
@@ -45,9 +45,9 @@ async fn loopback_file_transfer_is_byte_identical() {
             InboundOpen::Pair { .. } => panic!("expected a file session, got pair"),
             InboundOpen::Text { .. } => panic!("expected a file session, got text"),
         };
-        // Two current builds negotiate the highest common version — v2 now
-        // that M7 appended it to SUPPORTED_VERSIONS (stage 7.0).
-        assert_eq!(peer.version, TRANSFER_V2);
+        // Two current builds negotiate the highest common version — v3 now
+        // that F4 appended it to SUPPORTED_VERSIONS.
+        assert_eq!(peer.version, TRANSFER_V3);
         assert_eq!(
             peer.name.as_deref(),
             Some("Sender"),
@@ -70,7 +70,7 @@ async fn loopback_file_transfer_is_byte_identical() {
         .await
         .unwrap();
     let peer = initiator_hello(&mut s, "Sender".into()).await.unwrap();
-    assert_eq!(peer.version, TRANSFER_V2);
+    assert_eq!(peer.version, TRANSFER_V3);
     assert_eq!(
         peer.name.as_deref(),
         Some("Receiver"),
@@ -572,8 +572,8 @@ async fn loopback_text_send_acks_and_dispatches_payload() {
             "the sender's request rides the wire"
         );
         assert_eq!(
-            peer.version, TRANSFER_V2,
-            "two current builds negotiate v2 quick text"
+            peer.version, TRANSFER_V3,
+            "two current builds negotiate the newest version, quick text included"
         );
         assert_eq!(peer.name.as_deref(), Some("Sender"));
         // Stand in for `handle_text_received`'s ack so send_text can resolve.
@@ -594,7 +594,7 @@ async fn loopback_text_send_acks_and_dispatches_payload() {
         .await
         .unwrap();
     let peer = initiator_hello(&mut s, "Sender".into()).await.unwrap();
-    assert_eq!(peer.version, TRANSFER_V2);
+    assert_eq!(peer.version, TRANSFER_V3);
     send_text(&mut s, "ping ✅".into(), Some(true))
         .await
         .expect("send_text resolves on ack");
@@ -1749,6 +1749,19 @@ enum Script {
     Refuse(Option<&'static str>),
     /// Accept, take every byte, then `TransferAck { ok: false, error }`.
     AcceptThenFail(&'static str),
+    /// Say where the request stands — a `Pending` per state token, in order —
+    /// then accept, take every byte and ack it.
+    NoticesThenAccept(&'static [&'static str]),
+}
+
+/// Read file chunks off `s` until `total` bytes have arrived.
+async fn take_all(s: &mut NoiseSession, total: u64) {
+    let mut got = 0u64;
+    while got < total {
+        if let Frame::FileChunk(_, data) = recv_frame(s).await.unwrap() {
+            got += data.len() as u64;
+        }
+    }
 }
 
 /// Drive the REAL `run_send` against a hand-scripted receiver; return what
@@ -1790,19 +1803,40 @@ async fn send_against(script: Script, tag: &str) -> (Result<()>, Vec<&'static st
                 send_reply(&mut s, &manifest.transfer_id, true, None)
                     .await
                     .unwrap();
-                let total: u64 = manifest.files.iter().map(|f| f.size).sum();
-                let mut got = 0u64;
-                while got < total {
-                    if let Frame::FileChunk(_, data) = recv_frame(&mut s).await.unwrap() {
-                        got += data.len() as u64;
-                    }
-                }
+                take_all(&mut s, manifest.files.iter().map(|f| f.size).sum()).await;
                 send_control(
                     &mut s,
                     &AppMessage::TransferAck {
                         transfer_id: manifest.transfer_id.clone(),
                         ok: false,
                         error: Some(token.into()),
+                    },
+                )
+                .await
+                .unwrap();
+            }
+            Script::NoticesThenAccept(states) => {
+                for state in states {
+                    send_control(
+                        &mut s,
+                        &AppMessage::Pending {
+                            transfer_id: manifest.transfer_id.clone(),
+                            state: (*state).into(),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+                send_reply(&mut s, &manifest.transfer_id, true, None)
+                    .await
+                    .unwrap();
+                take_all(&mut s, manifest.files.iter().map(|f| f.size).sum()).await;
+                send_control(
+                    &mut s,
+                    &AppMessage::TransferAck {
+                        transfer_id: manifest.transfer_id.clone(),
+                        ok: true,
+                        error: None,
                     },
                 )
                 .await
@@ -1826,6 +1860,8 @@ async fn send_against(script: Script, tag: &str) -> (Result<()>, Vec<&'static st
         None,
         &mut |e| {
             events.push(match e {
+                FileEvent::Pending(PendingState::Prompted) => "prompted",
+                FileEvent::Pending(PendingState::Queued) => "queued",
                 FileEvent::Accepted => "accepted",
                 FileEvent::Streaming { .. } => "streaming",
                 FileEvent::Done { .. } => "done",
@@ -1835,6 +1871,9 @@ async fn send_against(script: Script, tag: &str) -> (Result<()>, Vec<&'static st
         |_, _| {},
     )
     .await;
+    // Hang up before waiting on the script: a sender that quit early must leave
+    // a receiver reading for more with an EOF (a failed test), not a hang.
+    drop(s);
     receiver.await.unwrap();
     let _ = std::fs::remove_dir_all(&tmp);
     (res, events)
@@ -1875,6 +1914,58 @@ async fn sender_reports_acceptance_then_the_receivers_failure() {
     assert!(events.contains(&"streaming"), "{events:?}");
     let (res, _) = send_against(Script::AcceptThenFail("cancelled"), "ack-cancel").await;
     assert!(matches!(res, Err(LanBeamError::PeerCancelled)), "{res:?}");
+}
+
+/// A v3 receiver says where the request stands before it answers (F4) — on its
+/// screen, then queued for a slot — and the sender reports each, in order,
+/// ahead of "accepted"; a state from some later build is passed over rather
+/// than failing the wait.
+#[tokio::test]
+async fn sender_reports_where_its_request_stands() {
+    let (res, events) = send_against(
+        Script::NoticesThenAccept(&["prompted", "thinking-it-over", "queued"]),
+        "pending",
+    )
+    .await;
+    res.expect("notices don't disturb the transfer");
+    assert_eq!(
+        events[..3],
+        ["prompted", "queued", "accepted"],
+        "{events:?}"
+    );
+    assert!(events.contains(&"done"), "{events:?}");
+}
+
+/// A pending notice reaches only a sender that negotiated v3 (F4): an older one
+/// is waiting for exactly the reply, and anything else there would fail it.
+#[tokio::test]
+async fn pending_notices_go_only_to_a_v3_sender() {
+    let a_priv = priv_key();
+    let b_priv = priv_key();
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let receiver = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut s = NoiseSession::handshake_responder(stream, &b_priv)
+            .await
+            .unwrap();
+        send_pending(&mut s, TRANSFER_V2, "t-gate", PendingState::Prompted).await;
+        send_pending(&mut s, TRANSFER_V3, "t-gate", PendingState::Queued).await;
+    });
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
+        .await
+        .unwrap();
+    let first = recv_control(&mut s).await.unwrap();
+    assert_eq!(
+        first,
+        AppMessage::Pending {
+            transfer_id: "t-gate".into(),
+            state: "queued".into(),
+        },
+        "the v2 notice was never sent"
+    );
+    receiver.await.unwrap();
 }
 
 /// Every code a receiver can put in its ack maps back to the sender-side
@@ -3238,7 +3329,7 @@ async fn per_file_progress_events_report_each_file_in_order() {
         let mut on_file = |e: FileEvent<'_>| match e {
             FileEvent::Streaming { index, .. } => s_idx.lock().unwrap().push(index),
             FileEvent::Done { index, verified } => d.lock().unwrap().push((index, verified)),
-            FileEvent::PauseAutoResumed | FileEvent::Accepted => {}
+            FileEvent::PauseAutoResumed | FileEvent::Accepted | FileEvent::Pending(_) => {}
         };
         run_receive_core(
             &mut s,

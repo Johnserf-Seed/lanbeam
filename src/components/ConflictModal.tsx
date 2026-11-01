@@ -18,6 +18,7 @@ import {
   useTrust,
 } from "../lib/store";
 import { useEscape } from "../lib/useEscape";
+import { MODAL_W } from "./ui";
 
 /** The backend resolves collisions per transfer with a single action, so one
  *  choice covers every colliding file. "skip" has no backend disposition — it
@@ -126,7 +127,10 @@ export default function ConflictModal() {
 
   return (
     <div className="scrim" style={{ zIndex: 62 }}>
-      <div className="modal" style={{ width: 412, fontFamily: "var(--font)" }}>
+      <div
+        className="modal"
+        style={{ width: MODAL_W.narrow, fontFamily: "var(--font)" }}
+      >
         {/* heading */}
         <div style={{ padding: "18px 20px 0" }}>
           <div

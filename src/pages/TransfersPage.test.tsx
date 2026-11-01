@@ -196,6 +196,41 @@ describe("TransfersPage", () => {
     ).toBeGreaterThan(0);
   });
 
+  it("the status and time columns fit English, and stay one width down the list (§5)", async () => {
+    // "Canceled" ran over a 52px column; "Yesterday 18:05" wrapped in a 70px one.
+    const canceled = tr({
+      sessionId: "cnl",
+      status: "error",
+      errorCode: "cancelled",
+      name: "old.zip",
+      doneAt: Date.now() - 86_400_000,
+    });
+    useTransfers.setState({ transfers: { cnl: canceled, fin: done } });
+    /** Each row's last two columns: status width, time width, time wrapping. */
+    const widths = () =>
+      ["old.zip", "photo.png"].map((name) => {
+        const row = screen.getByText(name).closest(".hover-row");
+        if (!row) throw new Error(`no history row for ${name}`);
+        const [status, time] = [
+          ...row.querySelectorAll<HTMLElement>("span"),
+        ].slice(-2);
+        return [status.style.width, time.style.width, time.style.whiteSpace];
+      });
+    try {
+      await act(() => i18n.changeLanguage("en"));
+      const { unmount } = renderUI(<TransfersPage />);
+      expect(widths()).toEqual([
+        ["64px", "92px", "nowrap"],
+        ["64px", "92px", "nowrap"],
+      ]);
+      unmount();
+    } finally {
+      await act(() => i18n.changeLanguage("zh"));
+    }
+    renderUI(<TransfersPage />);
+    expect(widths()[0]).toEqual(["64px", "70px", "nowrap"]);
+  });
+
   it("the Resend action on a failed send calls resendTransfer", () => {
     renderUI(<TransfersPage />);
     const resendEl = screen.getByText(i18n.t("transfers.resend"));

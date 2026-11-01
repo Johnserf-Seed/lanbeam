@@ -3,6 +3,9 @@
    Tokens on :root, dark via [data-theme="dark"]. Tokens → base → components. */
 
 :root {
+  /* Native parts — <select> lists, scrollbars, form controls — follow the
+     theme too; without it they stayed light in dark mode. */
+  color-scheme: light;
   --font:
     "Space Grotesk Variable", "Space Grotesk", system-ui, -apple-system,
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
@@ -49,6 +52,7 @@
 }
 
 [data-theme="dark"] {
+  color-scheme: dark;
   --bg: #10151d;
   --panel: #171e28;
   --sidebar: #0c1117;

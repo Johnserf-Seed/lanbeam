@@ -22,10 +22,15 @@ describe("the app version", () => {
   });
 
   it("is never written into the UI text by hand", () => {
-    for (const s of [zh.settings.updateManual, en.settings.updateManual]) {
-      expect(s).toContain("{{v}}");
+    for (const s of [
+      ...Object.values(zh.settings),
+      ...Object.values(en.settings),
+    ]) {
       expect(s).not.toMatch(/\d+\.\d+\.\d+/);
     }
+    // The one string that names a version takes it as a value (F2).
+    expect(zh.settings.updateNewer).toContain("{{latest}}");
+    expect(en.settings.updateNewer).toContain("{{latest}}");
     expect(read("src/pages/SettingsPage.tsx")).not.toMatch(/v\d+\.\d+\.\d+/);
   });
 });

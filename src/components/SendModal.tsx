@@ -19,9 +19,11 @@ import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
 import { beginSend, pickFiles } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
-import { ExtChip, ModalHead } from "./ui";
+import { ExtChip, MODAL_W, ModalHead } from "./ui";
 
-type WaitState = "waiting" | "ok" | "failed";
+/** A pending device's row: waiting on a person (`shown`: their screen has it),
+ *  on a free slot over there (`queued`: they said yes), done, or failed. */
+type WaitState = "waiting" | "shown" | "queued" | "ok" | "failed";
 
 /** Square check mark used by the file rows (17px) and device cards (16px). */
 function CheckBox({ on, size }: { on: boolean; size: number }) {
@@ -113,7 +115,11 @@ export default function SendModal() {
               ? "failed"
               : tr?.accepted
                 ? "ok"
-                : "waiting";
+                : tr?.peerState === "queued"
+                  ? "queued"
+                  : tr?.peerState === "prompted"
+                    ? "shown"
+                    : "waiting";
           return { deviceId: p.deviceId, name: p.name, sas: tr?.sas, state };
         })
       : [];
@@ -305,7 +311,7 @@ export default function SendModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ width: 500, fontFamily: "var(--font)" }}
+        style={{ width: MODAL_W.wide, fontFamily: "var(--font)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <ModalHead
@@ -406,6 +412,20 @@ export default function SendModal() {
                   </div>
                 );
               })}
+              {send.pool.length === 0 && (
+                // Nothing recent to pick from: say where files come from
+                // instead of an empty box between the header and the footer.
+                <div
+                  style={{
+                    padding: "30px 24px",
+                    textAlign: "center",
+                    fontSize: 12,
+                    color: "var(--muted)",
+                  }}
+                >
+                  {t("send.poolEmpty")}
+                </div>
+              )}
             </div>
             <div
               style={{
@@ -973,7 +993,7 @@ export default function SendModal() {
                             ? "var(--danger)"
                             : "var(--accent)",
                       animation:
-                        p.state === "waiting"
+                        p.state !== "ok" && p.state !== "failed"
                           ? "lbBlink 1.4s ease-in-out infinite"
                           : "none",
                       flex: "none",
@@ -1009,7 +1029,11 @@ export default function SendModal() {
                         ? t("send.okState")
                         : p.state === "failed"
                           ? t("send.failedState")
-                          : t("send.waitingState")}
+                          : p.state === "queued"
+                            ? t("send.queuedState")
+                            : p.state === "shown"
+                              ? t("send.shownState")
+                              : t("send.waitingState")}
                     </div>
                   </div>
                   <div style={{ textAlign: "right", flex: "none" }}>
