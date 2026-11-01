@@ -72,6 +72,20 @@ pub struct PartialRecord {
     /// Bytes already on disk — the resume offset.
     #[serde(default)]
     pub bytes_written: u64,
+    /// The file name, in the same folder, the partial is renamed to once the
+    /// transfer completes — set when it is NOT `disk_rel`'s own name. An
+    /// overwrite streams into a de-duped "(1)" sibling and only replaces the
+    /// real file once everything has arrived, so a resumed overwrite has to
+    /// know which file it is replacing; it used to finish as a second copy (M9).
+    #[serde(default)]
+    pub commit_name: Option<String>,
+    /// The download folder the partial was written under. `disk_rel` is
+    /// relative to it, and the user can change the setting while the partial
+    /// waits: joined to the NEW folder it can name some other file entirely,
+    /// which a discard then deleted (M2). `None` for records older than this
+    /// field — those can only be taken to be under the current folder.
+    #[serde(default)]
+    pub root: Option<String>,
 }
 
 impl PartialRecord {
@@ -310,6 +324,8 @@ mod tests {
             sha256: Some("deadbeef".into()),
             disk_rel: rel.into(),
             bytes_written: bytes,
+            commit_name: None,
+            root: None,
         }
     }
 
@@ -335,6 +351,27 @@ mod tests {
             .expect("a.bin survives the round-trip");
         assert_eq!(got.bytes_written, 400);
         cleanup(&path);
+    }
+
+    /// The fields added for a resumed overwrite (M9) and the folder a partial
+    /// lives in (M2) survive a save; a record written before them still parses,
+    /// as "already at its final name, under the current folder".
+    #[test]
+    fn commit_name_and_root_round_trip_and_default_for_old_records() {
+        let old: PartialRecord = serde_json::from_str(
+            r#"{"rel":"a.bin","size":10,"sha256":"ab","disk_rel":"a (1).bin","bytes_written":4}"#,
+        )
+        .unwrap();
+        assert_eq!(old.commit_name, None);
+        assert_eq!(old.root, None);
+        let new = PartialRecord {
+            commit_name: Some("a.bin".into()),
+            root: Some("/downloads".into()),
+            ..old
+        };
+        let back: PartialRecord =
+            serde_json::from_str(&serde_json::to_string(&new).unwrap()).unwrap();
+        assert_eq!(back, new);
     }
 
     /// Lookup matches on the WHOLE identity — a differing size or hash (a

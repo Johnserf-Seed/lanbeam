@@ -42,6 +42,7 @@ fn make_ctx<R: tauri::Runtime>(
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.to_path_buf())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -50,9 +51,10 @@ fn make_ctx<R: tauri::Runtime>(
         trusted: Arc::new(RwLock::new(TrustStore::load(trust_path))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(partials_path))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing: Arc::new(PairingState::default()),
         text_rate: Default::default(),
+        file_rate: Default::default(),
     }
 }
 
@@ -175,6 +177,8 @@ async fn seeded_partial_resumes_end_to_end_and_clears() {
                 sha256: sha256.clone(),
                 disk_rel: "resumed.bin".into(),
                 bytes_written: offset,
+                commit_name: None,
+                root: None,
             }],
         );
         store.save();

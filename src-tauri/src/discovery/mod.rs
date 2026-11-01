@@ -13,11 +13,14 @@ use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
 use crate::consts::{
-    ANNOUNCE_INTERVAL, DISCOVERY_GROUP, DISCOVERY_PORT, PEER_EXPIRY, PROTO_VERSION,
+    ANNOUNCE_INTERVAL, DISCOVERY_GROUP, DISCOVERY_PORT, DISCOVERY_RECV_BUF, MAX_DISCOVERED_PEERS,
+    PEER_EXPIRY, PROTO_VERSION,
 };
 use crate::settings::Settings;
 use crate::state::{ManualPeer, NetDegraded};
@@ -78,6 +81,14 @@ pub fn snapshot(peers: &Arc<Mutex<PeerTable>>) -> Vec<DiscoveredDevice> {
     list
 }
 
+/// Whether `id` is a device id: the unpadded URL-safe base64 of a 32-byte
+/// X25519 public key (L13). An announce under anything else is not a LanBeam
+/// device — it could never be dialed (the dial pins the key the id encodes) —
+/// and its junk would only ever reach the device list.
+pub fn is_device_id(id: &str) -> bool {
+    id.len() == 43 && URL_SAFE_NO_PAD.decode(id).is_ok_and(|key| key.len() == 32)
+}
+
 /// Apply one received packet to the peer table. Returns whether the visible set changed.
 /// Pure-ish (uses `Instant::now` for expiry); the `changed` result is deterministic and tested.
 pub fn apply_packet(
@@ -86,11 +97,18 @@ pub fn apply_packet(
     src_ip: Ipv4Addr,
     pkt: &DiscoveryPacket,
 ) -> bool {
-    if pkt.v != PROTO_VERSION || pkt.id == my_id {
+    if pkt.v != PROTO_VERSION || pkt.id == my_id || !is_device_id(&pkt.id) {
         return false;
     }
     if !pkt.disc {
-        return peers.remove(&pkt.id).is_some();
+        // A tombstone counts only from where that device announced itself
+        // (L13): announces are unauthenticated, and anyone on the LAN could
+        // otherwise make any device vanish from everyone's list. One sent from
+        // somewhere else is ignored; the entry still expires on its own.
+        return match peers.get(&pkt.id) {
+            Some(p) if p.addr == src_ip => peers.remove(&pkt.id).is_some(),
+            _ => false,
+        };
     }
     let expires = Instant::now() + PEER_EXPIRY;
     // Clamp the peer-supplied name at this trust boundary, exactly as the
@@ -109,6 +127,16 @@ pub fn apply_packet(
             changed
         }
         None => {
+            if peers.len() >= MAX_DISCOVERED_PEERS {
+                // Make room: drop the device heard from longest ago.
+                if let Some(oldest) = peers
+                    .iter()
+                    .min_by_key(|(_, p)| p.expires)
+                    .map(|(id, _)| id.clone())
+                {
+                    peers.remove(&oldest);
+                }
+            }
             peers.insert(
                 pkt.id.clone(),
                 Peer {
@@ -274,7 +302,7 @@ fn share_http_advert(ctx: &DiscoveryCtx) -> Option<u16> {
 /// and `list_discovered_devices` go through. `snapshot` locks (and releases)
 /// `peers`, then `manual` is locked separately, so no two locks are ever held at
 /// once (and none across an await — this is sync).
-fn devices_payload(
+pub(crate) fn devices_payload(
     peers: &Arc<Mutex<PeerTable>>,
     manual: &Arc<Mutex<HashMap<String, ManualPeer>>>,
     my_id: &str,
@@ -437,7 +465,7 @@ async fn announce_loop(sock: Arc<tokio::net::UdpSocket>, ctx: DiscoveryCtx) {
 }
 
 async fn listen_loop(sock: Arc<tokio::net::UdpSocket>, ctx: DiscoveryCtx) {
-    let mut buf = [0u8; 2048];
+    let mut buf = [0u8; DISCOVERY_RECV_BUF];
     loop {
         let (n, src) = match sock.recv_from(&mut buf).await {
             Ok(x) => x,
@@ -514,6 +542,11 @@ async fn expiry_loop(ctx: DiscoveryCtx) {
 mod tests {
     use super::*;
 
+    /// A well-formed device id (43 base64url characters) built from a tag.
+    fn dev(tag: &str) -> String {
+        format!("{tag:A<43}")
+    }
+
     fn pkt(id: &str, name: &str, disc: bool) -> DiscoveryPacket {
         DiscoveryPacket {
             v: PROTO_VERSION,
@@ -565,7 +598,7 @@ mod tests {
         adv.http = Some(52200);
         let bytes = serde_json::to_vec(&adv).unwrap();
         assert!(
-            bytes.len() < 2048,
+            bytes.len() < DISCOVERY_RECV_BUF,
             "the packet stays under the recv buffer: {}",
             bytes.len()
         );
@@ -626,35 +659,40 @@ mod tests {
         let mut peers = PeerTable::new();
         let ip = Ipv4Addr::new(192, 168, 1, 5);
         // new peer → changed
-        assert!(apply_packet(&mut peers, "me", ip, &pkt("peerA", "A", true)));
+        assert!(apply_packet(
+            &mut peers,
+            "me",
+            ip,
+            &pkt(&dev("peerA"), "A", true)
+        ));
         assert_eq!(peers.len(), 1);
         // identical → no change
         assert!(!apply_packet(
             &mut peers,
             "me",
             ip,
-            &pkt("peerA", "A", true)
+            &pkt(&dev("peerA"), "A", true)
         ));
         // renamed → changed
         assert!(apply_packet(
             &mut peers,
             "me",
             ip,
-            &pkt("peerA", "A2", true)
+            &pkt(&dev("peerA"), "A2", true)
         ));
         // our own announce → ignored
         assert!(!apply_packet(
             &mut peers,
-            "peerA",
+            &dev("peerA"),
             ip,
-            &pkt("peerA", "A2", true)
+            &pkt(&dev("peerA"), "A2", true)
         ));
         // tombstone → removed + changed
         assert!(apply_packet(
             &mut peers,
             "me",
             ip,
-            &pkt("peerA", "A2", false)
+            &pkt(&dev("peerA"), "A2", false)
         ));
         assert!(peers.is_empty());
     }
@@ -674,7 +712,7 @@ mod tests {
             let _ = a.join_multicast_v4(DISCOVERY_GROUP, iface.ip);
             let _ = b.join_multicast_v4(DISCOVERY_GROUP, iface.ip);
         }
-        let announce = serde_json::to_vec(&pkt("peerA", "A", true)).unwrap();
+        let announce = serde_json::to_vec(&pkt(&dev("peerA"), "A", true)).unwrap();
         let recv = tokio::spawn(async move {
             let mut rb = [0u8; 2048];
             let r = tokio::time::timeout(Duration::from_secs(3), b.recv_from(&mut rb)).await;
@@ -695,7 +733,78 @@ mod tests {
             .expect("timed out: no multicast received")
             .expect("recv error");
         let decoded: DiscoveryPacket = serde_json::from_slice(&got).unwrap();
-        assert_eq!(decoded.id, "peerA");
+        assert_eq!(decoded.id, dev("peerA"));
+    }
+
+    /// L13: a tombstone is honored only from the address the device announces
+    /// from — anyone else's is ignored — and an announce under something that
+    /// is not a device id is dropped.
+    #[test]
+    fn apply_packet_ignores_forged_tombstones_and_junk_ids() {
+        let mut peers = PeerTable::new();
+        let home = Ipv4Addr::new(192, 168, 1, 5);
+        let elsewhere = Ipv4Addr::new(192, 168, 1, 66);
+        assert!(apply_packet(
+            &mut peers,
+            "me",
+            home,
+            &pkt(&dev("peerA"), "A", true)
+        ));
+        assert!(!apply_packet(
+            &mut peers,
+            "me",
+            elsewhere,
+            &pkt(&dev("peerA"), "A", false)
+        ));
+        assert!(peers.contains_key(&dev("peerA")), "a forged tombstone");
+        assert!(apply_packet(
+            &mut peers,
+            "me",
+            home,
+            &pkt(&dev("peerA"), "A", false)
+        ));
+        assert!(peers.is_empty(), "the device's own tombstone");
+
+        for junk in [
+            "peerA",
+            &"x".repeat(43),
+            &"A".repeat(44),
+            &format!("{}\u{0}", "A".repeat(42)),
+        ] {
+            assert!(
+                !apply_packet(&mut peers, "me", home, &pkt(junk, "J", true)),
+                "{junk:?}"
+            );
+        }
+        assert!(peers.is_empty(), "no junk id is stored");
+        assert!(is_device_id(&dev("peerA")));
+    }
+
+    /// L13: the table is bounded — a new device past the cap replaces the one
+    /// heard from longest ago.
+    #[test]
+    fn apply_packet_keeps_the_table_bounded() {
+        let mut peers = PeerTable::new();
+        let ip = Ipv4Addr::new(192, 168, 1, 5);
+        for i in 0..MAX_DISCOVERED_PEERS {
+            assert!(apply_packet(
+                &mut peers,
+                "me",
+                ip,
+                &pkt(&dev(&format!("p{i}")), "P", true)
+            ));
+        }
+        // The first one is the stalest.
+        peers.get_mut(&dev("p0")).unwrap().expires -= Duration::from_secs(1);
+        assert!(apply_packet(
+            &mut peers,
+            "me",
+            ip,
+            &pkt(&dev("newcomer"), "N", true)
+        ));
+        assert_eq!(peers.len(), MAX_DISCOVERED_PEERS);
+        assert!(peers.contains_key(&dev("newcomer")));
+        assert!(!peers.contains_key(&dev("p0")), "the stalest made room");
     }
 
     /// A packet from a different protocol version is dropped whole — never
@@ -704,7 +813,7 @@ mod tests {
     fn apply_packet_ignores_wrong_proto_version() {
         let mut peers = PeerTable::new();
         let ip = Ipv4Addr::new(192, 168, 1, 5);
-        let mut stranger = pkt("peerA", "A", true);
+        let mut stranger = pkt(&dev("peerA"), "A", true);
         stranger.v = PROTO_VERSION + 1;
         assert!(!apply_packet(&mut peers, "me", ip, &stranger));
         assert!(peers.is_empty(), "an alien-version packet is never stored");
@@ -720,7 +829,7 @@ mod tests {
             &mut peers,
             "me",
             ip,
-            &pkt("ghost", "Ghost", false)
+            &pkt(&dev("ghost"), "Ghost", false)
         ));
         assert!(peers.is_empty());
     }
@@ -731,11 +840,16 @@ mod tests {
     fn apply_packet_port_change_is_change() {
         let mut peers = PeerTable::new();
         let ip = Ipv4Addr::new(192, 168, 1, 5);
-        assert!(apply_packet(&mut peers, "me", ip, &pkt("peerA", "A", true)));
-        let mut moved = pkt("peerA", "A", true);
+        assert!(apply_packet(
+            &mut peers,
+            "me",
+            ip,
+            &pkt(&dev("peerA"), "A", true)
+        ));
+        let mut moved = pkt(&dev("peerA"), "A", true);
         moved.port = 51705;
         assert!(apply_packet(&mut peers, "me", ip, &moved));
-        assert_eq!(peers.get("peerA").unwrap().port, 51705);
+        assert_eq!(peers.get(&dev("peerA")).unwrap().port, 51705);
     }
 
     /// The same peer seen from a new source IP (DHCP renumber, NIC switch) is a
@@ -749,15 +863,15 @@ mod tests {
             &mut peers,
             "me",
             ip1,
-            &pkt("peerA", "A", true)
+            &pkt(&dev("peerA"), "A", true)
         ));
         assert!(apply_packet(
             &mut peers,
             "me",
             ip2,
-            &pkt("peerA", "A", true)
+            &pkt(&dev("peerA"), "A", true)
         ));
-        assert_eq!(peers.get("peerA").unwrap().addr, ip2);
+        assert_eq!(peers.get(&dev("peerA")).unwrap().addr, ip2);
     }
 
     /// The peer-supplied name is trimmed and clamped at the trust boundary
@@ -769,8 +883,8 @@ mod tests {
         let ip = Ipv4Addr::new(192, 168, 1, 5);
         let long: String = "x".repeat(200);
         let padded = format!("  {long}  ");
-        apply_packet(&mut peers, "me", ip, &pkt("peerA", &padded, true));
-        let stored = &peers.get("peerA").unwrap().name;
+        apply_packet(&mut peers, "me", ip, &pkt(&dev("peerA"), &padded, true));
+        let stored = &peers.get(&dev("peerA")).unwrap().name;
         assert!(
             !stored.starts_with(' ') && !stored.ends_with(' '),
             "trimmed"

@@ -4,7 +4,7 @@
 mod frame;
 pub mod noise;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -21,8 +21,8 @@ use crate::error::{LanBeamError, Result};
 use crate::identity::Identity;
 use crate::settings::Settings;
 use crate::state::{
-    CompletedLog, ConcurrencyGate, NetDegraded, PairingState, PendingMap, TextRateLimiter,
-    TransfersCtl,
+    CompletedLog, ConcurrencyGate, FileRequestRateLimiter, ManualPeer, NetDegraded, PairingState,
+    PendingMap, TextRateLimiter, TransfersCtl,
 };
 use crate::trust::TrustStore;
 use noise::NoiseSession;
@@ -58,6 +58,12 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// `handle_incoming` snapshots it at session start and never holds the
     /// lock across an await.
     pub download_dir: Arc<RwLock<PathBuf>>,
+    /// Manually-added peers (M7.2), shared with `AppState`: a successful
+    /// pairing records the JOINER's address here so the host can reach a
+    /// device discovery never announced (a different subnet) — until now only
+    /// the joiner remembered the host, and a cross-subnet pairing left the host
+    /// "trusted · offline" with nothing to dial.
+    pub manual_peers: Arc<Mutex<HashMap<String, ManualPeer>>>,
     /// Live settings — the hello exchange reads `device_name` at session time
     /// so a rename reaches the very next transfer (M4.2).
     pub settings: Arc<RwLock<Settings>>,
@@ -98,6 +104,9 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// is what stops one LAN peer from flooding the inbox with `text_received`
     /// events. See [`TextRateLimiter`].
     pub text_rate: Arc<Mutex<TextRateLimiter>>,
+    /// Per-source-IP inbound file-request throttle (M18). Listener-only too.
+    /// See [`FileRequestRateLimiter`].
+    pub file_rate: Arc<Mutex<FileRequestRateLimiter>>,
 }
 
 // Manual impl: `#[derive(Clone)]` would demand `R: Clone`, which the mock
@@ -109,6 +118,7 @@ impl<R: Runtime> Clone for TransportCtx<R> {
             identity: self.identity.clone(),
             tcp_port: self.tcp_port.clone(),
             download_dir: self.download_dir.clone(),
+            manual_peers: self.manual_peers.clone(),
             settings: self.settings.clone(),
             peers: self.peers.clone(),
             pending: self.pending.clone(),
@@ -120,6 +130,7 @@ impl<R: Runtime> Clone for TransportCtx<R> {
             concurrency: self.concurrency.clone(),
             pairing: self.pairing.clone(),
             text_rate: self.text_rate.clone(),
+            file_rate: self.file_rate.clone(),
         }
     }
 }
@@ -163,9 +174,15 @@ pub fn spawn_listener(ctx: TransportCtx, degraded: Arc<Mutex<Vec<NetDegraded>>>,
                 let _ = ctx.app.emit("net_degraded", &event);
             }
         }
+        // Back off on accept errors (L8). They are usually not about one
+        // connection — out of file descriptors (EMFILE), out of memory — so an
+        // immediate retry fails again at once: it spun a core and filled the
+        // log until the condition passed.
+        let mut backoff = ACCEPT_BACKOFF_MIN;
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
+                    backoff = ACCEPT_BACKOFF_MIN;
                     let _ = stream.set_nodelay(true);
                     let c = ctx.clone();
                     tokio::spawn(async move {
@@ -183,10 +200,23 @@ pub fn spawn_listener(ctx: TransportCtx, degraded: Arc<Mutex<Vec<NetDegraded>>>,
                         }
                     });
                 }
-                Err(e) => log::warn!("accept error: {e}"),
+                Err(e) => {
+                    log::warn!("accept error: {e}; retrying in {backoff:?}");
+                    tokio::time::sleep(backoff).await;
+                    backoff = next_accept_backoff(backoff);
+                }
             }
         }
     });
+}
+
+/// The first wait after a failed `accept`, and the most it grows to (L8).
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(2);
+
+/// Double the wait, up to [`ACCEPT_BACKOFF_MAX`].
+fn next_accept_backoff(cur: Duration) -> Duration {
+    (cur * 2).min(ACCEPT_BACKOFF_MAX)
 }
 
 /// Dial a peer and open an authenticated Noise channel, pinning `expected_id`.
@@ -234,7 +264,9 @@ where
 {
     match tokio::time::timeout(deadline, connecting).await {
         Ok(Ok(stream)) => Ok(stream),
-        Ok(Err(e)) => Err(LanBeamError::Io(e.to_string())),
+        // A refused / unroutable dial is "can't reach them", never a disk error:
+        // its own kind so the UI stops blaming a file for an offline peer.
+        Ok(Err(e)) => Err(LanBeamError::Unreachable(e.to_string())),
         Err(_) => Err(LanBeamError::Timeout),
     }
 }
@@ -242,6 +274,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L8: the wait after a failed accept doubles from 50 ms and stops at 2 s.
+    #[test]
+    fn accept_backoff_doubles_up_to_a_cap() {
+        let mut d = ACCEPT_BACKOFF_MIN;
+        let mut seen = vec![d];
+        for _ in 0..10 {
+            d = next_accept_backoff(d);
+            seen.push(d);
+        }
+        assert_eq!(seen[1], Duration::from_millis(100));
+        assert_eq!(*seen.last().unwrap(), ACCEPT_BACKOFF_MAX);
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]));
+    }
     use crate::consts::NOISE_PARAMS;
     use snow::Builder;
 
@@ -399,9 +445,10 @@ mod tests {
     }
 
     /// A connect error (inner `Err`, before the deadline) maps to
-    /// `LanBeamError::Io`, not `Timeout`.
+    /// `LanBeamError::Unreachable` — not `Timeout`, and not `Io` (which the UI
+    /// renders as a disk error).
     #[tokio::test]
-    async fn bounded_connect_maps_inner_error_to_io() {
+    async fn bounded_connect_maps_inner_error_to_unreachable() {
         let res = bounded_connect(
             async {
                 Err(std::io::Error::new(
@@ -412,7 +459,10 @@ mod tests {
             Duration::from_secs(5),
         )
         .await;
-        assert!(matches!(res, Err(LanBeamError::Io(_))), "got {res:?}");
+        assert!(
+            matches!(res, Err(LanBeamError::Unreachable(_))),
+            "got {res:?}"
+        );
     }
 
     /// `connect` dials, pins the peer's Device ID, and authenticates the channel

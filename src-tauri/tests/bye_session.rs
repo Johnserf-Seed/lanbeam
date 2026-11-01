@@ -1,4 +1,4 @@
-//! Integration test: a Bye-only session (what `connect_device`'s identity
+//! Integration test: a Bye-only session (what `connect_by_addr`'s identity
 //! round-trip produces) through the REAL `handle_incoming` must end cleanly
 //! and leave zero trace — no UI events, `pending`/`completed` untouched.
 //!
@@ -52,6 +52,7 @@ async fn bye_only_session_leaves_no_events_or_state() {
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(tmp.clone())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(Settings::default())),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -60,9 +61,10 @@ async fn bye_only_session_leaves_no_events_or_state() {
         trusted: Arc::new(RwLock::new(TrustStore::load(tmp.join("trusted.json")))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(tmp.join("partials.json")))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing: Arc::new(PairingState::default()),
         text_rate: Default::default(),
+        file_rate: Default::default(),
     };
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -76,7 +78,7 @@ async fn bye_only_session_leaves_no_events_or_state() {
         handle_incoming(sess, &ctx2).await
     });
 
-    // Mirror connect_device: hello exchange, then a deliberate Bye.
+    // Mirror connect_by_addr: hello exchange, then a deliberate Bye.
     let prober_priv = *generate_identity().unwrap().private_bytes();
     let stream = TcpStream::connect(addr).await.unwrap();
     let mut s = NoiseSession::handshake_initiator(stream, &prober_priv, None)

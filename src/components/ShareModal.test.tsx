@@ -30,7 +30,7 @@ vi.mock("../bridge/api", async () => {
 vi.mock("../lib/sendops", async () => {
   const actual =
     await vi.importActual<typeof import("../lib/sendops")>("../lib/sendops");
-  return { ...actual, copyText: vi.fn() };
+  return { ...actual, copyText: vi.fn().mockResolvedValue(true) };
 });
 
 import { listShares, startShare, stopShare, updateShare } from "../bridge/api";
@@ -104,7 +104,7 @@ describe("ShareModal", () => {
     expect(screen.getByText(i18n.t("share.lanNote"))).toBeInTheDocument();
     // The live download count starts at zero and is shown with the link.
     expect(
-      screen.getByText(i18n.t("share.dlCount", { n: 0 })),
+      screen.getByText(i18n.t("share.dlCount", { count: 0 })),
     ).toBeInTheDocument();
     // The demo/no-server note must NOT show on a successful create.
     expect(screen.queryByText(i18n.t("share.demoNote"))).toBeNull();
@@ -119,7 +119,9 @@ describe("ShareModal", () => {
     expect(copyText).toHaveBeenCalledWith(
       expect.stringContaining("192.168.1.20:51705/s/"),
     );
-    expect(useToast.getState().msg).toBe(i18n.t("share.copiedToast"));
+    await waitFor(() =>
+      expect(useToast.getState().msg).toBe(i18n.t("share.copiedToast")),
+    );
   });
 
   it("shows TTL + max-download controls and reconfigures the live share", async () => {
@@ -196,7 +198,9 @@ describe("ShareModal", () => {
     it("says the link is still live when you close the panel", async () => {
       await renderWithLink();
 
-      fireEvent.click(screen.getByRole("button", { name: "×" }));
+      fireEvent.click(
+        screen.getByRole("button", { name: i18n.t("common.close") }),
+      );
 
       expect(useOverlays.getState().shareOpen).toBe(false);
       // Not silence. The user closed a box, not a share.
@@ -215,6 +219,30 @@ describe("ShareModal", () => {
       // The whole point: it did NOT mint a second share.
       expect(startShare).not.toHaveBeenCalled();
       expect(useToast.getState().msg).toBe(i18n.t("share.adoptToast"));
+    });
+
+    it("shows the running share's own settings, and changing one keeps the other (M5)", async () => {
+      // Three downloads, 50 minutes left: the panel used to show the defaults
+      // (10 min, once) — and changing either then rewrote BOTH on the share.
+      const expiresAt = Math.round(Date.now() / 1000) + 50 * 60;
+      vi.mocked(listShares).mockResolvedValueOnce([
+        { ...LIVE, maxDownloads: 3, expiresAt },
+      ]);
+      useOverlays.setState({ send: null, shareOpen: true });
+      renderUI(<ShareModal />);
+      await screen.findByText(/192\.168\.1\.5:51705\/s\/livetoken/);
+
+      expect(
+        screen.getByText(i18n.t("share.life", { t: i18n.t("share.life1h") })),
+      ).toBeInTheDocument();
+      fireEvent.click(screen.getByText(i18n.t("share.once3")));
+      fireEvent.click(screen.getByText(i18n.t("share.onceAny")));
+      await waitFor(() => expect(updateShare).toHaveBeenCalled());
+      const [token, ttl, max] = vi.mocked(updateShare).mock.calls[0];
+      expect(token).toBe("livetoken");
+      expect(max).toBeNull();
+      // What was left of the lifetime — not a fresh hour, nor 10 minutes.
+      expect(Math.abs(ttl - 50 * 60)).toBeLessThanOrEqual(2);
     });
 
     it("still starts a NEW share when the send flow hands it files", async () => {

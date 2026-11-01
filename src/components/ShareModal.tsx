@@ -13,6 +13,7 @@ import {
 import { fmtBytes } from "../lib/format";
 import { copyText, errText, pickFiles } from "../lib/sendops";
 import { showToast, useOverlays, type SendFile } from "../lib/store";
+import { useEscape } from "../lib/useEscape";
 import Qr from "./Qr";
 import { ModalHead } from "./ui";
 
@@ -148,6 +149,19 @@ const LIFE_SECS = [600, 3600, 86_400];
 /** Download-count dropdown → maxDownloads (1 / 3 / unlimited). */
 const MAX_DL: (number | null)[] = [1, 3, null];
 
+/** The dropdown positions that describe a share already running (M5): its
+ *  download cap, and the shortest lifetime that still covers what is left of
+ *  it. Adopting used to show the defaults — 10 min, once — whatever the share
+ *  really was. */
+function configIdx(e: ShareEntry): { life: number; once: number } {
+  const left = e.expiresAt - Date.now() / 1000;
+  const life = LIFE_SECS.findIndex((secs) => left <= secs);
+  return {
+    life: life < 0 ? LIFE_SECS.length - 1 : life,
+    once: Math.max(0, MAX_DL.indexOf(e.maxDownloads)),
+  };
+}
+
 /** 用浏览器接收 (M8.2): registers the send flow's selected files as a real LAN
  *  browser share and surfaces the link + QR + lifetime/count controls. Closing
  *  the modal WITHOUT pressing 停止分享 leaves the share live until its TTL — the
@@ -214,6 +228,9 @@ export default function ShareModal() {
         if (cur) {
           setLink({ token: cur.token, url: cur.url });
           setEntry(cur);
+          const idx = configIdx(cur);
+          setLifeIdx(idx.life);
+          setOnceIdx(idx.once);
           showToast(t("share.adoptToast"));
           return;
         }
@@ -284,8 +301,6 @@ export default function ShareModal() {
     });
   }, [shareOpen, link?.token]);
 
-  if (!shareOpen) return null;
-
   /** Dismiss the panel. The share stays live — that is the design (a link you
    *  handed someone shouldn't die because you closed the panel you copied it
    *  from) — but it used to be a SILENT one, and silence is what turned it into a
@@ -295,6 +310,10 @@ export default function ShareModal() {
     if (link) showToast(t("share.keptToast"), undefined, 7000);
     setShare(false);
   };
+  // Escape closes an open dropdown first, then the panel.
+  useEscape(shareOpen, () => (menu !== null ? setMenu(null) : close()));
+
+  if (!shareOpen) return null;
 
   // Subtitle: the server's authoritative file count + size once the share
   // exists, else the pending selection so the header isn't blank while loading.
@@ -303,7 +322,7 @@ export default function ShareModal() {
     : [];
   const shown = sharedFiles.length ? sharedFiles : pending;
   const sub = t("share.sub", {
-    n: entry?.fileCount ?? shown.length,
+    count: entry?.fileCount ?? shown.length,
     size: entry
       ? fmtBytes(entry.totalSize)
       : fmtBytes(shown.reduce((a, f) => a + (f.size ?? 0), 0)),
@@ -312,20 +331,29 @@ export default function ShareModal() {
   const lifeOpts = [t("share.life10m"), t("share.life1h"), t("share.life24h")];
   const onceOpts = [t("share.once1"), t("share.once3"), t("share.onceAny")];
 
-  const copyLink = () => {
+  const copyLink = async () => {
     if (!link) return;
-    copyText(link.url);
-    showToast(t("share.copiedToast"));
+    showToast(
+      (await copyText(link.url))
+        ? t("share.copiedToast")
+        : t("common.copyFailed"),
+    );
   };
 
   // A dropdown change reconfigures the live share in place; both controls ride
   // update_share together because the backend takes the full config each call.
-  const applyConfig = (life: number, once: number) => {
+  // Changing the COUNT keeps what is left of the lifetime instead of starting
+  // it over (M5) — one setting must not quietly change the other.
+  const applyConfig = (life: number, once: number, newLife: boolean) => {
     const l = link;
     if (!l) return;
+    const ttl =
+      newLife || !entry
+        ? LIFE_SECS[life]
+        : Math.max(1, Math.round(entry.expiresAt - Date.now() / 1000));
     void (async () => {
       try {
-        const res = await updateShare(l.token, LIFE_SECS[life], MAX_DL[once]);
+        const res = await updateShare(l.token, ttl, MAX_DL[once]);
         if (!res) return;
         const list = await listShares().catch(() => [] as ShareEntry[]);
         setEntry((prev) => list.find((e) => e.token === l.token) ?? prev);
@@ -467,7 +495,7 @@ export default function ShareModal() {
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {t("share.dlCount", { n: entry?.downloads ?? 0 })}
+                {t("share.dlCount", { count: entry?.downloads ?? 0 })}
               </div>
             )}
             {link && (
@@ -484,7 +512,7 @@ export default function ShareModal() {
                   onPick={(i) => {
                     setLifeIdx(i);
                     setMenu(null);
-                    applyConfig(i, onceIdx);
+                    applyConfig(i, onceIdx, true);
                   }}
                 />
                 <DropPill
@@ -497,7 +525,7 @@ export default function ShareModal() {
                   onPick={(i) => {
                     setOnceIdx(i);
                     setMenu(null);
-                    applyConfig(lifeIdx, i);
+                    applyConfig(lifeIdx, i, false);
                   }}
                 />
                 <div style={{ flex: 1 }} />

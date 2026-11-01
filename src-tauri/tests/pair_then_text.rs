@@ -3,8 +3,9 @@
 
 //! Cross-stage integration test (M7.1 + M7.3): the two v2 features COMPOSE over
 //! a single, reused host `TransportCtx`. First a device pairs (7.1) — the host
-//! stores it in the trust store and consumes the one-shot code — and THEN, on a
-//! fresh session against the SAME host state, that device pushes a quick text
+//! consumes the one-shot code, and the trust a human then confirms is recorded
+//! the way the UI records it — and THEN, on a fresh session against the SAME
+//! host state, that device pushes a quick text
 //! (7.3) which is delivered and acked. This is the one seam the isolated
 //! `pairing.rs` / `quick_text.rs` tests don't touch: it proves the shared host
 //! state (`trusted`, `in_flight`, `concurrency`, `pairing`) survives one M7
@@ -36,7 +37,7 @@ use lanbeam_lib::transport::TransportCtx;
 use lanbeam_lib::trust::TrustStore;
 
 /// Build the host `TransportCtx` once and reuse it across both sessions, so the
-/// trust granted by pairing is still present when the quick text arrives. Shares
+/// trust recorded after pairing is still present when the quick text arrives. Shares
 /// the caller's `pairing` state so the test can plant the active invitation.
 fn make_host_ctx<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
@@ -52,6 +53,7 @@ fn make_host_ctx<R: tauri::Runtime>(
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.to_path_buf())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -60,14 +62,16 @@ fn make_host_ctx<R: tauri::Runtime>(
         trusted: Arc::new(RwLock::new(TrustStore::load(tmp.join("trusted.json")))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(tmp.join("partials.json")))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing,
         text_rate: Default::default(),
+        file_rate: Default::default(),
     }
 }
 
-/// Pair, then quick-text, against ONE host `TransportCtx`. The pair mutually
-/// trusts the joiner and consumes the code; the subsequent text from the same
+/// Pair, then quick-text, against ONE host `TransportCtx`. The pair consumes the
+/// code and trusts no one (that is the UI's step, once the SAS is compared); the
+/// subsequent text from the same
 /// device is delivered and acked — proving the two M7 features share the host's
 /// `handle_incoming` state without interfering.
 #[tokio::test]
@@ -96,6 +100,7 @@ async fn pair_then_quick_text_share_one_host_ctx() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "482913".into(),
         expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
     });
 
     // The joiner keeps its identity between the two sessions — it is the SAME
@@ -125,7 +130,7 @@ async fn pair_then_quick_text_share_one_host_ctx() {
             .await
             .unwrap();
         assert_eq!(peer.version, TRANSFER_V2, "two current builds negotiate v2");
-        send_pair_request(&mut sess, "482913").await.unwrap();
+        send_pair_request(&mut sess, "482913", None).await.unwrap();
         let (accept, host_name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
         assert!(accept, "the right code pairs");
         assert_eq!(host_name, "Host Device");

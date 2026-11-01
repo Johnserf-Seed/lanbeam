@@ -36,9 +36,11 @@ import {
   notify,
   resolvedTheme,
   setVisibility,
+  fpChangedRecordFor,
   shortFp,
   showToast,
   syncTrustFromBackend,
+  trustName,
   useData,
   useInbox,
   useOverlays,
@@ -56,7 +58,7 @@ import {
 import { maybeSeedDemo } from "../lib/demo";
 import { suppressBrowserShortcuts } from "../lib/browserShortcuts";
 import { installZoomHotkeys } from "../lib/uiZoom";
-import { parseDeepLink } from "../lib/deepLink";
+import { routeDeepLink } from "../lib/deepLinkRoute";
 import {
   errText,
   openDir,
@@ -68,45 +70,36 @@ import {
  *  sender declared for this very session (M4.2), then discovery, then the
  *  fingerprint — never blank. */
 function peerNameOf(deviceId: string, senderName?: string): string {
-  const rec = useTrust.getState().records[deviceId];
-  if (rec?.name) return rec.name;
+  const known = trustName(useTrust.getState().records[deviceId]);
+  if (known) return known;
   if (senderName) return senderName;
   const dev = useData.getState().devices.find((d) => d.deviceId === deviceId);
   return dev?.name ?? shortFp(deviceId);
 }
 
-/** Do the only three things a `lanbeam://` link is ALLOWED to do: surface (the
- *  backend already did that), PRE-FILL, or NAVIGATE — never act. A deep link is
- *  untrusted: any web page can ask the OS to open one. See `lib/deepLink.ts` for
- *  the contract; an unknown command is dropped rather than guessed at. */
-function routeDeepLink(raw: string, navigate: (path: string) => void): void {
-  const link = parseDeepLink(raw);
-  if (!link) return;
-  const ov = useOverlays.getState();
-  switch (link.cmd) {
-    case "pair":
-      // Pre-fills the join field; the user still confirms the SAS.
-      ov.setPair(true, link.url);
-      break;
-    case "text":
-      // Pre-fills the body; the user still picks a device and presses send.
-      ov.setQt(true, link.text);
-      break;
-    case "connect":
-      // Stages the address on the Devices page. It does NOT dial.
-      ov.setConnectPrefill(link.addr);
-      navigate("/devices");
-      break;
-    case "devices":
-    case "transfers":
-    case "inbox":
-    case "settings":
-      navigate(`/${link.cmd}`);
-      break;
-    case "open":
-      // The window is already up — that was the whole request.
-      break;
+/** An incoming request. The accept-or-prompt decision moved into the backend
+ *  (M4.4): `autoAccepted: true` means the receive policy already said yes and
+ *  no reply is expected — replying would go nowhere. The UI only narrates it. */
+function onIncomingRequest(r: IncomingRequest): void {
+  const peerName = peerNameOf(r.deviceId, r.senderName);
+  if (r.autoAccepted) {
+    // Auto-accept answered "do I want this", not "what about my existing
+    // file". If the user set 冲突策略 = 每次询问, that question is still
+    // theirs — the backend parks a prompt and waits for this reply. (It
+    // used to answer "rename" for them on exactly this path, which under
+    // the default settings is the ONLY path, so the modal never appeared.)
+    if (r.conflicts?.length && r.conflictPolicy === "ask") {
+      useOverlays
+        .getState()
+        .setConflict({ request: r, peerName, wantTrust: false });
+    } else {
+      useTransfers.getState().acceptMeta(r, peerName);
+      showToast(i18n.t("incoming.acceptToast", { name: peerName }));
+    }
+  } else {
+    useTransfers.getState().pushIncoming(r);
   }
+  notify();
 }
 
 /** Push the tray's whole localized snapshot. Reads live state through getState(),
@@ -247,8 +240,15 @@ export default function AppShell() {
     return () => mq.removeEventListener("change", fn);
   }, []);
 
-  // Ghost mode auto-restore (临时隐身 1 小时后恢复).
+  // Ghost mode auto-restore (临时隐身 1 小时后恢复) — only once the backend's
+  // settings are in (M27). Restoring on mount raced the startup load: the
+  // restore cleared the ghost timer and turned discovery on, then the
+  // `get_settings` issued before it came back with discoverable=false and
+  // overwrote the optimistic value. The machine was visible; the UI and tray
+  // said hidden, and nothing would ever correct them.
+  const settingsLoaded = useData((s) => s.settings !== null);
   useEffect(() => {
+    if (!settingsLoaded) return;
     const check = () => {
       const { ghostUntil } = usePrefs.getState();
       const settings = useData.getState().settings;
@@ -265,7 +265,7 @@ export default function AppShell() {
     check();
     const id = setInterval(check, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [settingsLoaded]);
 
   // Strip the browser out of the WebView: Ctrl+F's find bar, Ctrl+P, Ctrl+S,
   // Ctrl+U… none of that belongs in a packaged desktop app. See the module for
@@ -412,34 +412,29 @@ export default function AppShell() {
     [],
   );
 
-  // Incoming request. The accept-or-prompt decision moved into the backend
-  // (M4.4): `autoAccepted: true` means the receive policy already said yes and
-  // no reply is expected — replying would go nowhere. The UI only narrates it.
-  useEffect(
-    () =>
-      api.onEvent<IncomingRequest>("incoming_file_request", (r) => {
-        const peerName = peerNameOf(r.deviceId, r.senderName);
-        if (r.autoAccepted) {
-          // Auto-accept answered "do I want this", not "what about my existing
-          // file". If the user set 冲突策略 = 每次询问, that question is still
-          // theirs — the backend parks a prompt and waits for this reply. (It
-          // used to answer "rename" for them on exactly this path, which under
-          // the default settings is the ONLY path, so the modal never appeared.)
-          if (r.conflicts?.length && r.conflictPolicy === "ask") {
-            useOverlays
+  // Incoming request (see onIncomingRequest). Requests that came in before
+  // this window was up are fetched once it is (L23): their events went to
+  // nobody, and unanswered they would time out with the prompt never shown.
+  useEffect(() => {
+    const off = api.onEvent<IncomingRequest>(
+      "incoming_file_request",
+      onIncomingRequest,
+    );
+    void api
+      .pendingRequests()
+      .then((list) => {
+        for (const r of list) {
+          const shown =
+            useTransfers
               .getState()
-              .setConflict({ request: r, peerName, wantTrust: false });
-          } else {
-            useTransfers.getState().acceptMeta(r, peerName);
-            showToast(i18n.t("incoming.acceptToast", { name: peerName }));
-          }
-        } else {
-          useTransfers.getState().pushIncoming(r);
+              .incomings.some((x) => x.sessionId === r.sessionId) ||
+            useOverlays.getState().conflict?.request.sessionId === r.sessionId;
+          if (!shown) onIncomingRequest(r);
         }
-        notify();
-      }),
-    [],
-  );
+      })
+      .catch(() => {});
+    return off;
+  }, []);
 
   // Quick text arrived (M7.3): drop a text item into the inbox, toast who sent
   // it with a 查看 action that jumps there. Whether it was also placed on this
@@ -509,7 +504,7 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<SasEvent>("sas_code", (p) => {
-        // connect_device emits sas_code without a sessionId — no transfer.
+        // Every sas_code names its send; one without is nothing to attach to.
         if (!p.sessionId) return;
         useTransfers.getState().attachSas(p.sessionId, p.sas, p.deviceId);
       }),
@@ -519,6 +514,18 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<TransferEvent>("transfer_started", (p) => {
+        // The collision question for an auto-accepted transfer went unanswered
+        // and the backend has carried on, keeping both (M6). The dialog still
+        // up for it is asking about something already decided: an answer now
+        // would be a no-op that claimed to have worked.
+        const ov = useOverlays.getState();
+        const asked = ov.conflict;
+        if (asked?.request.sessionId === p.sessionId) {
+          // What an answer would have recorded: the row's names and peer.
+          useTransfers.getState().acceptMeta(asked.request, asked.peerName);
+          ov.setConflict(null);
+          showToast(i18n.t("conflict.timedOutToast"));
+        }
         useTransfers.getState().upsert({
           sessionId: p.sessionId,
           direction: p.direction,
@@ -531,6 +538,20 @@ export default function AppShell() {
     [],
   );
 
+  // The receiver accepted a send (H10). Until this the row is waiting on a
+  // person — not "started", which only meant the connection was open.
+  useEffect(
+    () =>
+      api.onEvent<TransferEvent>("transfer_accepted", (p) => {
+        useTransfers.getState().upsert({
+          sessionId: p.sessionId,
+          direction: "send",
+          accepted: true,
+        });
+      }),
+    [],
+  );
+
   // A transfer parked on the concurrency gate (M6.7): mark the row "queued" so
   // it reads as waiting-for-a-slot, not stuck at 0%. The subsequent
   // transfer_started (send: queued→started; receive: the first progress tick)
@@ -538,10 +559,19 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<TransferEvent>("transfer_queued", (p) => {
+        // A queued send is the first event its row gets. A send this window
+        // started brings its record along (H11); for any other, the event
+        // names the device, or the row sat there blank (M25).
+        const tr = useTransfers.getState().transfers[p.sessionId];
+        const known =
+          tr?.peerId || useTransfers.getState().pendingSend[p.sessionId];
         useTransfers.getState().upsert({
           sessionId: p.sessionId,
           direction: p.direction,
           status: "queued",
+          ...(p.deviceId && !known
+            ? { peerId: p.deviceId, peerName: peerNameOf(p.deviceId) }
+            : {}),
         });
       }),
     [],
@@ -582,6 +612,15 @@ export default function AppShell() {
     () =>
       api.onEvent<TransferEvent>("transfer_done", (p) => {
         const st = useTransfers.getState();
+        // A session this window knows nothing about — no row, no record of a
+        // send or an accept — has nothing to finish (L22). Upserting it made a
+        // nameless, sizeless history row; transfer_error already declined to.
+        if (
+          !st.transfers[p.sessionId] &&
+          !st.pendingSend[p.sessionId] &&
+          !st.pendingRecv[p.sessionId]
+        )
+          return;
         st.upsert({
           sessionId: p.sessionId,
           savedNames: p.savedNames,
@@ -653,6 +692,11 @@ export default function AppShell() {
           error: p.error,
           errorCode: p.code,
         });
+        // Cancelled HERE — by this user, who already got 「已取消传输」 from the
+        // button they pressed. Saying 「传输失败 · 已取消」 on top of it (with the
+        // failure sound) treated their own click as something that went wrong
+        // (M21). The row still moves to history as cancelled.
+        if (p.code === "cancelled") return;
         // Say it out loud. Success gets a toast AND an OS notification; failure
         // used to get a row quietly turning red on a page nobody was looking at
         // — so a receive that ran for ten minutes and then deleted a corrupt
@@ -719,10 +763,22 @@ export default function AppShell() {
               .getState()
               .devices.find((d) => d.deviceId === targetId);
             if (dev) {
+              // A device that carries a remembered name under a NEW key is the
+              // impersonation case: clicking it opens the fingerprint alert,
+              // and dropping files on it must too, never send (M19).
+              const oldId = fpChangedRecordFor(
+                dev.deviceId,
+                useData.getState().devices,
+                useTrust.getState().records,
+              );
+              if (oldId) {
+                ov.setFpAlert({ deviceId: oldId });
+                return;
+              }
               if (sendToDevice(dev, files))
                 showToast(
                   i18n.t("devices.startSendToast", {
-                    n: files.length,
+                    count: files.length,
                     name: dev.name,
                   }),
                 );

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import { create } from "qrcode";
 
 /** A real, scannable QR code rendered as a crisp, self-contained SVG.
@@ -28,6 +29,7 @@ export default function Qr({
   margin?: number;
   radius?: number;
 }) {
+  const { t } = useTranslation();
   const data = useMemo(() => {
     if (!value) return null;
     try {
@@ -81,7 +83,7 @@ export default function Qr({
       viewBox={`0 0 ${data.dim} ${data.dim}`}
       shapeRendering="crispEdges"
       role="img"
-      aria-label="QR"
+      aria-label={t("common.qrCode")}
       style={{ display: "block", borderRadius: radius, flex: "none" }}
     >
       <rect width={data.dim} height={data.dim} fill="#ffffff" />

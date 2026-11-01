@@ -15,22 +15,49 @@ import {
   type UITransfer,
 } from "./store";
 
-/** Kick off a real transfer to one device. Resolution of `send_files` is the
- *  whole transfer, so this fires and reports failures via toast + events.
- *  `stripExif` (M9.1) is the per-send metadata-strip choice; it defaults to the
- *  persisted preference so the direct-drop / resend / forward entrypoints match
- *  the confirm dialog's default, and the dialog passes its live checkbox value. */
+/** A fresh transfer id. The UI chooses it (H11) so its record of a send is tied
+ *  to exactly that session; the backend insists on a UUID. */
+export function newTransferId(): string {
+  const c = globalThis.crypto;
+  if (typeof c?.randomUUID === "function") return c.randomUUID();
+  // An older WebView without randomUUID: a v4 UUID from getRandomValues.
+  const b = new Uint8Array(16);
+  c.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, "0")).join("");
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+}
+
+/** Kick off a real transfer to one device, returning [`beginSend`]'s yes/no —
+ *  for the callers that only need to know whether it started. */
 export function sendToDevice(
   d: DiscoveredDevice,
   files: SendFile[],
   stripExif = usePrefs.getState().stripExif,
 ): boolean {
+  return beginSend(d, files, stripExif) !== null;
+}
+
+/** Kick off a real transfer to one device; its session id, or null when
+ *  nothing started (no real paths, or browser mode). Resolution of
+ *  `send_files` is the whole transfer, so this fires and reports failures via
+ *  toast + events. `stripExif` (M9.1) is the per-send metadata-strip choice; it
+ *  defaults to the persisted preference so the direct-drop / resend / forward
+ *  entrypoints match the confirm dialog's default, and the dialog passes its
+ *  live checkbox value. */
+export function beginSend(
+  d: DiscoveredDevice,
+  files: SendFile[],
+  stripExif = usePrefs.getState().stripExif,
+): string | null {
   const paths = files.flatMap((f) => (f.path ? [f.path] : []));
   if (!paths.length || !api.isTauri) {
     showToast(i18n.t("common.milestoneNote"));
-    return false;
+    return null;
   }
-  useTransfers.getState().registerOutgoing(d.deviceId, {
+  const sessionId = newTransferId();
+  useTransfers.getState().registerOutgoing(sessionId, {
     peerId: d.deviceId,
     peerName: d.name,
     name: files[0].name,
@@ -39,10 +66,15 @@ export function sendToDevice(
     paths,
   });
   useRecents.getState().add(files);
-  api.sendFiles(d.deviceId, paths, stripExif).catch((e) => {
+  api.sendFiles(d.deviceId, paths, stripExif, sessionId).catch((e) => {
+    // If no event claimed the record yet, none will now: the send died before
+    // the backend said anything about it (offline peer, unreadable file, …).
+    useTransfers.getState().dropOutgoing(sessionId);
     // A decline is already narrated by the transfer_error handler (M4.5
-    // code "declined") — a second generic failure toast would clobber it.
-    if ((e as { kind?: string } | null)?.kind !== "Rejected") {
+    // code "declined") — a second generic failure toast would clobber it. A
+    // cancel is this user's own doing, already confirmed by the button (M21).
+    const kind = (e as { kind?: string } | null)?.kind;
+    if (kind !== "Rejected" && kind !== "Cancelled") {
       showToast(
         i18n.t("send.sendFailedToast", {
           name: d.name,
@@ -56,12 +88,14 @@ export function sendToDevice(
     if (cur && cur.step === "waiting") {
       useOverlays.getState().patchSend({
         pending: cur.pending.map((p) =>
-          p.deviceId === d.deviceId ? { ...p, failed: errText(e) } : p,
+          (p.sessionId ? p.sessionId === sessionId : p.deviceId === d.deviceId)
+            ? { ...p, failed: errText(e) }
+            : p,
         ),
       });
     }
   });
-  return true;
+  return sessionId;
 }
 
 /** Send a quick text over the encrypted channel AND record it in the transfer
@@ -86,9 +120,21 @@ export async function sendTextTracked(
 
 /** Backend error `kind` (the stable serde tag on LanBeamError) → i18n key. The
  *  error's inner `message` is INTERNAL diagnostics (see error.rs) and must never
- *  reach the UI — only the localized text for its `kind` does. */
-const ERR_KEYS: Record<string, string> = {
+ *  reach the UI — only the localized text for its `kind` does. Exported for the
+ *  contract test that holds it to every variant in error.rs. */
+export const ERR_KEYS: Record<string, string> = {
   PeerTooOld: "errors.peerTooOld",
+  PairRejected: "errors.pairRejected",
+  InvalidAddress: "errors.invalidAddress",
+  PairCodeMissing: "errors.pairCodeMissing",
+  Unreachable: "errors.unreachable",
+  ConnectionLost: "errors.connectionLost",
+  PeerBusy: "errors.peerBusy",
+  PeerCancelled: "errors.peerCancelled",
+  PeerIntegrity: "errors.peerIntegrity",
+  PeerIo: "errors.peerIo",
+  TooManyFiles: "errors.tooManyFiles",
+  NoFiles: "errors.noFiles",
   PeerNotFound: "errors.peerNotFound",
   SelfPeer: "errors.selfPeer",
   TextRefused: "errors.textRefused",
@@ -117,8 +163,8 @@ export function isNotFound(e: unknown): boolean {
 }
 
 /** `transfer_error` events carry a coarse `code` (the backend's `ui_code()` — a
- *  closed set of seven) and an `error` string. Map the CODE; never show the
- *  string.
+ *  closed set, held to this table by the error contract test) and an `error`
+ *  string. Map the CODE; never show the string.
  *
  *  That string is the backend's English internal diagnostic — "protocol: peer
  *  closed connection", "io: The system cannot find the path specified. (os error
@@ -126,12 +172,19 @@ export function isNotFound(e: unknown): boolean {
  *  transfer detail pane did for every code it didn't special-case, put raw Rust
  *  in front of the user and leaked local paths into the UI. Every code has a key
  *  here; anything unrecognized gets the generic line, never the raw string. */
-const TRANSFER_ERR_KEYS: Record<string, string> = {
+export const TRANSFER_ERR_KEYS: Record<string, string> = {
   declined: "errors.rejected",
   timeout: "errors.timeout",
   cancelled: "errors.cancelled",
   peer_too_old: "errors.peerTooOld",
   integrity: "errors.integrity",
+  unreachable: "errors.unreachable",
+  connection_lost: "errors.connectionLost",
+  peer_busy: "errors.peerBusy",
+  peer_cancelled: "errors.peerCancelled",
+  peer_integrity: "errors.peerIntegrity",
+  peer_io: "errors.peerIo",
+  unsafe_path: "errors.unsafePath",
   io: "errors.io",
   protocol: "errors.protocol",
   text_dropped: "errors.textRefused",
@@ -202,14 +255,26 @@ export async function pickFiles(title: string): Promise<SendFile[]> {
   return paths.map(sendFileFromPath);
 }
 
-/** Best-effort copy to the system clipboard. The (rare) rejection is swallowed;
- *  callers pair this with their own confirmation toast. One implementation so the
- *  swallowed-rejection handling lives in a single place. */
-export function copyText(text: string): void {
+/** Copy to the system clipboard, resolving to whether it worked (M24). In the
+ *  packaged app this goes through the Tauri clipboard plugin, like
+ *  `readClipboardText`: a DOM write can be refused, and WebKitGTK may have no
+ *  `navigator.clipboard` at all. It used to be a fire-and-forget DOM write whose
+ *  failure nobody saw — every caller toasted 「已复制」 regardless, and 剪切 cut
+ *  the text even when nothing had been copied. Callers confirm only on `true`. */
+export async function copyText(text: string): Promise<boolean> {
   try {
-    void navigator.clipboard?.writeText(text);
+    if (api.isTauri) {
+      const { writeText } = await import(
+        "@tauri-apps/plugin-clipboard-manager"
+      );
+      await writeText(text);
+      return true;
+    }
+    if (!navigator.clipboard) return false;
+    await navigator.clipboard.writeText(text);
+    return true;
   } catch {
-    /* clipboard unavailable */
+    return false;
   }
 }
 

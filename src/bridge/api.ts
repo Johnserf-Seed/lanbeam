@@ -62,11 +62,18 @@ export type Settings = {
   stripExif: boolean;
 };
 
-/** A fresh pairing invitation (start_pairing, M7.1): the 6-digit code plus the
- *  QR/deep-link payload another device can scan to join. */
+/** A fresh pairing invitation (start_pairing, M7.1): the 6-digit code, this
+ *  device's dial address, and the pair link that packs both (`qr` — the same
+ *  string a QR code would carry). */
 export type PairingInvite = {
   code: string;
+  /** `lanbeam://pair?d=…&n=…&a=…&p=…&c=…` — address + code + name in one. */
   qr: string;
+  /** `ip:port` the joiner types next to the code — the same endpoint the link's
+   *  `a=`/`p=` carry. null when this machine has no LAN address at all. */
+  addr: string | null;
+  /** Unix milliseconds at which the code stops working (drives the countdown). */
+  expiresAt: number;
 };
 
 /** The peer a pairing / IP-direct handshake reached (join_by_code /
@@ -190,6 +197,14 @@ export type TransferErrorCode =
   | "cancelled"
   | "peer_too_old"
   | "integrity"
+  | "text_dropped"
+  | "unreachable"
+  | "connection_lost"
+  | "peer_busy"
+  | "peer_cancelled"
+  | "peer_integrity"
+  | "peer_io"
+  | "unsafe_path"
   | "io"
   | "protocol";
 
@@ -206,8 +221,10 @@ export type TransferEvent = {
   error?: string;
   code?: TransferErrorCode;
   savedNames?: string[];
+  /** the peer — on a queued send (M25), the first event the row gets */
+  deviceId?: string;
 };
-/** connect_device (fingerprint re-verify) emits sas_code without a session. */
+/** The SAS of an outgoing send, emitted once the connection is up (H10). */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };
 /** Silent network degradations surfaced by the backend (M4.6).
  *  Known kinds: "udp_recv_fallback" | "tcp_port_fallback"; future kinds must
@@ -540,15 +557,18 @@ export const setStripExif = (enabled: boolean) => {
 
 // ── pairing + quick text (M7) ────────────────────────────────────────────
 
-// M7.1: mint a fresh pairing invitation (6-digit code + QR/deep-link payload),
-// valid for 10 minutes. Calling it again replaces the previous code. Browser
-// mode returns a static demo invite so the modal renders.
+// M7.1: mint a fresh pairing invitation (6-digit code + this device's address +
+// the pair link packing both), valid for 10 minutes. Calling it again replaces
+// the previous code. Browser mode returns a static demo invite so the modal
+// renders.
 export const startPairing = () =>
   isTauri
     ? invoke<PairingInvite>("start_pairing")
     : Promise.resolve<PairingInvite>({
         code: "482913",
         qr: `lanbeam://pair?d=demo&n=${encodeURIComponent(demoDeviceName())}&a=192.168.1.20&p=51704&c=482913`,
+        addr: "192.168.1.20:51704",
+        expiresAt: Date.now() + 600_000,
       });
 
 // M7.1: cancel the active pairing code so it can no longer be redeemed. Safe
@@ -564,12 +584,19 @@ export const takePendingDeepLink = () =>
     ? invoke<string | null>("take_pending_deep_link")
     : Promise.resolve<string | null>(null);
 
-// M7.1: join a device showing a pairing code. `addr` is its ip[:port] or a
-// scanned lanbeam://pair link (which can itself carry the code). Resolves with
-// the paired peer; a wrong/expired code rejects. Browser mode fakes a success.
-export const joinByCode = (addr: string, code: string) =>
+// M7.1: join a device showing a pairing code. `addr` is its ip[:port] (or a
+// pasted lanbeam://pair link, which can itself carry the code). `expectedId` is
+// the link's `d=`: when given, the handshake is PINNED to that device and a
+// different responder fails with IdentityMismatch. Resolves with the reached
+// peer + SAS — it grants no trust; a wrong/expired code rejects (PairRejected).
+// Browser mode fakes a success.
+export const joinByCode = (addr: string, code: string, expectedId?: string) =>
   isTauri
-    ? invoke<ConnectResult>("join_by_code", { addr, code })
+    ? invoke<ConnectResult>("join_by_code", {
+        addr,
+        code,
+        expectedId: expectedId || null,
+      })
     : Promise.resolve<ConnectResult>({
         deviceId: "demo-paired",
         name: "Pixel 8 Pro",
@@ -681,24 +708,26 @@ export const listDiscoveredDevices = () =>
         })),
       );
 
-// M2: open an authenticated Noise channel to a peer; returns the SAS.
-export const connectDevice = (deviceId: string) =>
-  isTauri
-    ? invoke<string>("connect_device", { deviceId })
-    : Promise.resolve("483921");
-
 // M2: loopback self-test of the encrypted handshake; returns the SAS.
 
 // M3: file transfer. `stripExif` (M9.1) removes photo metadata (location,
 // camera, time) from JPEG/PNG/WebP images before sending — the per-send choice
 // from the confirm dialog.
+// `transferId` is the session id the UI chose (a UUID) so its record of what
+// it sent is tied to exactly this session; omitted, the backend mints one.
 export const sendFiles = (
   deviceId: string,
   paths: string[],
   stripExif: boolean,
+  transferId?: string,
 ) =>
   isTauri
-    ? invoke<string>("send_files", { deviceId, paths, stripExif })
+    ? invoke<string>("send_files", {
+        deviceId,
+        paths,
+        stripExif,
+        transferId: transferId ?? null,
+      })
     : Promise.reject(new Error("browser demo: no transport"));
 
 // `conflict` (M6.5) is the ConflictModal's choice — "rename" (keep both) or
@@ -729,8 +758,16 @@ export const resumeTransfer = (sessionId: string) =>
 
 // M6.4: discard the persisted resume state for a peer (forget every partial and
 // delete the half-written files). The counterpart to letting a transfer resume.
-/** One interrupted receive still holding bytes in the download folder. */
-export type Partial = {
+/** Requests still waiting for an answer (L23): a window that loaded after
+ *  their `incoming_file_request` events missed them. */
+export const pendingRequests = (): Promise<IncomingRequest[]> =>
+  isTauri
+    ? invoke<IncomingRequest[]>("pending_requests")
+    : Promise.resolve([] as IncomingRequest[]);
+
+/** One interrupted receive still holding bytes in the download folder. Not
+ *  `Partial`: that name shadowed TypeScript's own `Partial<T>` (L28). */
+export type PartialFile = {
   deviceId: string;
   name: string;
   written: number;
@@ -741,8 +778,8 @@ export type Partial = {
  *  `holiday.mp4`, 1.2 GB of 4 GB — so the download folder shows something that
  *  looks perfectly normal and plays for thirty seconds. The backend has always
  *  known about them (it is what makes resume work); nothing ever asked. */
-export const listPartials = (): Promise<Partial[]> =>
-  isTauri ? invoke<Partial[]>("list_partials") : Promise.resolve([]);
+export const listPartials = (): Promise<PartialFile[]> =>
+  isTauri ? invoke<PartialFile[]>("list_partials") : Promise.resolve([]);
 
 export const discardPartials = (deviceId: string) =>
   isTauri ? invoke<void>("discard_partials", { deviceId }) : Promise.resolve();

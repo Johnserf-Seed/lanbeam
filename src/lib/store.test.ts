@@ -1,4 +1,4 @@
-// Unit tests for the zustand stores + pure helpers in store.ts. The test env is
+// Unit tests for the zustand stores + pure helpers in store/. The test env is
 // non-Tauri (api.isTauri === false), so load()/trust writes take their
 // browser-mode branch (demo data / no IPC). Stores are reset to a captured
 // snapshot before each test so cases can't leak into one another.
@@ -10,14 +10,18 @@ import type {
 } from "../bridge/api";
 import {
   displayIp,
+  fpChangedRecordFor,
   histWindowMs,
   inboxFromText,
   inboxFromTransfer,
+  KEPT_TEXT_CHARS,
+  keepRecentTexts,
   resolvedTheme,
   sendFileFromPath,
   shortFp,
   transferList,
   trustList,
+  trustName,
   useData,
   useInbox,
   useOverlays,
@@ -168,6 +172,28 @@ describe("useTransfers.addShareDownload", () => {
     addShareDownload({ name: "a.png", size: 1, peerIp: "10.0.0.1" });
     addShareDownload({ name: "a.png", size: 1, peerIp: "10.0.0.1" });
     expect(Object.keys(useTransfers.getState().transfers)).toHaveLength(2);
+  });
+});
+
+describe("fpChangedRecordFor", () => {
+  it("names the remembered record a new key is wearing — and nothing else", () => {
+    // M19: the drop handler asks this before sending, as a click already did.
+    const devices: DiscoveredDevice[] = [
+      { deviceId: "NEW", name: "Mini", address: "1.1.1.1", port: 1 },
+      { deviceId: "OK", name: "Nas", address: "1.1.1.2", port: 1 },
+    ];
+    const rec = (deviceId: string, name: string): TrustRecord => ({
+      deviceId,
+      name,
+      trusted: true,
+      autoAccept: true,
+      addedAt: 1,
+      lastSeen: 1,
+    });
+    const records = { OLD: rec("OLD", "Mini"), OK: rec("OK", "Nas") };
+    expect(fpChangedRecordFor("NEW", devices, records)).toBe("OLD");
+    expect(fpChangedRecordFor("OK", devices, records)).toBeUndefined();
+    expect(fpChangedRecordFor("GONE", devices, records)).toBeUndefined();
   });
 });
 
@@ -429,6 +455,26 @@ describe("useTransfers.progress", () => {
     expect(t.hist).toEqual([10]);
     expect(t.percent).toBe(20);
   });
+
+  it("a burst of ticks a millisecond apart is not a speed (L26)", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(2_000_000);
+    useTransfers.getState().upsert({ sessionId: "p", direction: "receive" });
+    useTransfers.getState().progress("p", 10, 104857600);
+    // Two more ticks in the next 2 ms: no sample — 10 % in 1 ms read as ~10 GB/s.
+    vi.setSystemTime(2_000_001);
+    useTransfers.getState().progress("p", 20);
+    vi.setSystemTime(2_000_002);
+    useTransfers.getState().progress("p", 30);
+    expect(useTransfers.getState().transfers.p.speedBps).toBe(0);
+    expect(useTransfers.getState().transfers.p.percent).toBe(30);
+    // A second after the first tick: 30 % of 100 MB over that second.
+    vi.setSystemTime(2_001_000);
+    useTransfers.getState().progress("p", 40);
+    const t = useTransfers.getState().transfers.p;
+    expect(t.speedBps).toBeCloseTo(31457280, 0);
+    expect(t.hist).toEqual([30]);
+  });
 });
 
 describe("useTransfers.setPaused", () => {
@@ -439,6 +485,20 @@ describe("useTransfers.setPaused", () => {
     const before = useTransfers.getState().transfers;
     useTransfers.getState().setPaused("ghost", true);
     expect(useTransfers.getState().transfers).toBe(before);
+  });
+
+  it("a paused transfer moves nothing — no speed, so no ETA (L26)", () => {
+    useTransfers.getState().upsert({
+      sessionId: "p",
+      direction: "send",
+      speedBps: 5_000_000,
+      percent: 40,
+    });
+    useTransfers.getState().setPaused("p", true);
+    expect(useTransfers.getState().transfers.p.speedBps).toBe(0);
+    useTransfers.getState().setPaused("p", false);
+    // Resuming starts a fresh sample from where it is.
+    expect(useTransfers.getState().transfers.p._pm).toBe(40);
   });
 });
 
@@ -483,22 +543,47 @@ describe("useTransfers.registerOutgoing + attachSas (pendingSend keying)", () =>
     ...over,
   });
 
-  it("consumes queued metas FIFO, one per sas_code, and drops the empty key", () => {
+  it("attaches each record to exactly its own session, in any order", () => {
+    // H11: keyed by the session id the UI chose, not queued per device — two
+    // sends to one device can no longer swap (or inherit) each other's files.
     const t = useTransfers.getState();
-    t.registerOutgoing("dev1", meta({ name: "f1.txt", paths: ["/f1.txt"] }));
-    t.registerOutgoing("dev1", meta({ name: "f2.txt", paths: ["/f2.txt"] }));
-    expect(useTransfers.getState().pendingSend.dev1).toHaveLength(2);
-
-    t.attachSas("s1", "111", "dev1");
-    expect(useTransfers.getState().transfers.s1.name).toBe("f1.txt");
-    expect(useTransfers.getState().transfers.s1.sas).toBe("111");
-    expect(useTransfers.getState().transfers.s1.peerId).toBe("dev1");
-    expect(useTransfers.getState().pendingSend.dev1).toHaveLength(1);
+    t.registerOutgoing("s1", meta({ name: "f1.txt", paths: ["/f1.txt"] }));
+    t.registerOutgoing("s2", meta({ name: "f2.txt", paths: ["/f2.txt"] }));
 
     t.attachSas("s2", "222", "dev1");
-    expect(useTransfers.getState().transfers.s2.name).toBe("f2.txt");
-    // queue drained → key removed
-    expect(useTransfers.getState().pendingSend.dev1).toBeUndefined();
+    expect(useTransfers.getState().transfers.s2).toMatchObject({
+      name: "f2.txt",
+      paths: ["/f2.txt"],
+      sas: "222",
+      peerId: "dev1",
+    });
+    t.attachSas("s1", "111", "dev1");
+    expect(useTransfers.getState().transfers.s1.name).toBe("f1.txt");
+    expect(useTransfers.getState().pendingSend).toEqual({});
+  });
+
+  it("a queued send's row shows what it is — the queued event takes the record", () => {
+    useTransfers.getState().registerOutgoing("s1", meta({ name: "big.zip" }));
+    useTransfers.getState().upsert({
+      sessionId: "s1",
+      direction: "send",
+      status: "queued",
+    });
+    expect(useTransfers.getState().transfers.s1).toMatchObject({
+      status: "queued",
+      name: "big.zip",
+      peerName: "Dev One",
+      direction: "send",
+    });
+    expect(useTransfers.getState().pendingSend).toEqual({});
+  });
+
+  it("dropOutgoing forgets a record no event will claim", () => {
+    useTransfers.getState().registerOutgoing("s1", meta({}));
+    useTransfers.getState().dropOutgoing("s1");
+    expect(useTransfers.getState().pendingSend).toEqual({});
+    // Unknown ids are a no-op.
+    useTransfers.getState().dropOutgoing("nope");
   });
 
   it("still attaches a sas with no matching pending meta", () => {
@@ -663,6 +748,69 @@ describe("useTrust.touch", () => {
     const before = useTrust.getState().records;
     useTrust.getState().touch("ghost", "X");
     expect(useTrust.getState().records).toBe(before);
+  });
+});
+
+describe("useTrust.rename (M7)", () => {
+  const dev = (id: string, name: string): DiscoveredDevice => ({
+    deviceId: id,
+    name,
+    address: "1.1.1.1",
+    port: 1,
+  });
+
+  it("is a local alias the device's own name can't overwrite", () => {
+    useTrust.getState().setTrust({ deviceId: "d1", name: "MacBook" }, true);
+    useTrust.getState().rename("d1", "Desk");
+    // Every discovery event and every received transfer refreshes the
+    // device's own name — they used to take the rename with them.
+    useTrust.getState().touch("d1", "MacBook Pro");
+    useTrust.getState().hydrate([
+      {
+        deviceId: "d1",
+        name: "MacBook Pro",
+        autoAccept: true,
+        pairedAt: 1,
+        lastSeen: 2,
+      },
+    ]);
+    const r = useTrust.getState().records.d1;
+    expect(r.name).toBe("MacBook Pro");
+    expect(r.alias).toBe("Desk");
+    expect(trustName(r)).toBe("Desk");
+    expect(trustList([], useTrust.getState().records)[0].name).toBe("Desk");
+    expect(
+      trustList([dev("d1", "MacBook Pro")], useTrust.getState().records)[0]
+        .name,
+    ).toBe("Desk");
+  });
+
+  it("renaming back to the device's own name clears the alias", () => {
+    useTrust.getState().setTrust({ deviceId: "d1", name: "MacBook" }, true);
+    useTrust.getState().rename("d1", "Desk");
+    useTrust.getState().rename("d1", "MacBook");
+    expect(useTrust.getState().records.d1.alias).toBeUndefined();
+  });
+
+  it("an unknown device's rename keeps its live name as its own", () => {
+    useData.setState({ devices: [dev("u1", "Phone")] });
+    useTrust.getState().rename("u1", "Kid's phone");
+    expect(useTrust.getState().records.u1).toMatchObject({
+      name: "Phone",
+      alias: "Kid's phone",
+      trusted: false,
+    });
+  });
+
+  it("the fingerprint check still compares the device's own name", () => {
+    useTrust.getState().setTrust({ deviceId: "old", name: "Laptop" }, true);
+    useTrust.getState().rename("old", "Work");
+    const row = trustList(
+      [dev("new", "Laptop")],
+      useTrust.getState().records,
+    ).find((r) => r.deviceId === "old");
+    expect(row?.name).toBe("Work");
+    expect(row?.fpChanged).toEqual({ newDeviceId: "new" });
   });
 });
 
@@ -854,19 +1002,34 @@ describe("useToast", () => {
 // ── useOverlays ──────────────────────────────────────────────────────────────
 describe("useOverlays.setPair / pairPrefill", () => {
   it("stashes a prefill on open and clears it on close", () => {
-    useOverlays.getState().setPair(true, "lanbeam://pair?x=1");
+    useOverlays.getState().setPair(true, { link: "lanbeam://pair?x=1" });
     expect(useOverlays.getState().pairOpen).toBe(true);
-    expect(useOverlays.getState().pairPrefill).toBe("lanbeam://pair?x=1");
+    expect(useOverlays.getState().pairPrefill).toEqual({
+      link: "lanbeam://pair?x=1",
+    });
     useOverlays.getState().setPair(false);
     expect(useOverlays.getState().pairOpen).toBe(false);
     expect(useOverlays.getState().pairPrefill).toBeNull();
   });
 
   it("opening without a prefill leaves it null", () => {
+    useOverlays.getState().setPair(true, { addr: "10.0.0.2" });
+    // A later plain open (tray, header) must not inherit an older prefill.
     useOverlays.getState().setPair(true);
     expect(useOverlays.getState().pairPrefill).toBeNull();
-    useOverlays.getState().setPairPrefill("later");
-    expect(useOverlays.getState().pairPrefill).toBe("later");
+  });
+
+  it("stages a NEW object per call, so an open form sees a repeated link", () => {
+    // The form applies each prefill once, by identity. The same link opened
+    // twice must still arrive twice — the user clicked it twice.
+    const p = { link: "lanbeam://pair?a=10.0.0.2&c=111111" };
+    useOverlays.getState().setPair(true, p);
+    const first = useOverlays.getState().pairPrefill;
+    useOverlays.getState().setPair(true, p);
+    const second = useOverlays.getState().pairPrefill;
+    expect(second).toEqual(first);
+    expect(second).not.toBe(first);
+    expect(second).not.toBe(p);
   });
 });
 
@@ -1012,6 +1175,56 @@ describe("历史记录保留 (histKeep)", () => {
     expect(useTransfers.getState().transfers.justNow).toBeDefined();
   });
 
+  it("「不保留」 drops the history restored at launch, and clears it from disk (M22)", () => {
+    // History from an earlier run — exactly what 「不保留」 says not to keep —
+    // used to stay on screen AND on disk (nothing was written) until some
+    // transfer happened to finish, so it came back on every restart.
+    localStorage.setItem(
+      "lanbeam.transfers",
+      JSON.stringify({
+        state: {
+          transfers: { old: { sessionId: "old", status: "done", doneAt: 1 } },
+        },
+      }),
+    );
+    useTransfers.setState({
+      transfers: {
+        old: { sessionId: "old", status: "done", doneAt: 1 } as never,
+        justNow: {
+          sessionId: "justNow",
+          status: "done",
+          doneAt: Date.now(),
+        } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "none" });
+    useTransfers.getState().pruneHistory();
+    const left = useTransfers.getState().transfers;
+    expect(left.old).toBeUndefined();
+    expect(left.justNow).toBeDefined();
+    const saved = localStorage.getItem("lanbeam.transfers");
+    expect(saved ? JSON.parse(saved).state.transfers : {}).toEqual({});
+  });
+
+  it("「不保留」 also takes this run's finished rows off the disk (M22)", () => {
+    // Finished under 30 天 — so it was saved — then the setting changed. The
+    // row stays on screen this run; it must not come back after a restart.
+    usePrefs.getState().set({ histKeep: "30d" });
+    useTransfers.getState().upsert({
+      sessionId: "today",
+      direction: "send",
+      status: "done",
+      doneAt: Date.now(),
+    });
+    expect(localStorage.getItem("lanbeam.transfers")).toContain("today");
+    usePrefs.getState().set({ histKeep: "none" });
+    useTransfers.getState().pruneHistory();
+    expect(useTransfers.getState().transfers.today).toBeDefined();
+    expect(localStorage.getItem("lanbeam.transfers") ?? "").not.toContain(
+      "today",
+    );
+  });
+
   it("「永久保留」 keeps even an ancient row", () => {
     useTransfers.setState({
       transfers: {
@@ -1025,6 +1238,70 @@ describe("历史记录保留 (histKeep)", () => {
     usePrefs.getState().set({ histKeep: "forever" });
     useTransfers.getState().pruneHistory();
     expect(useTransfers.getState().transfers.ancient).toBeDefined();
+  });
+});
+
+describe("saving to localStorage (M23)", () => {
+  const txt = (id: string, chars: number) => ({
+    ...inboxFromText("Peer", "x".repeat(chars), Date.now()),
+    id,
+  });
+
+  it("keeps the newest text bodies within the budget, older ones as previews", () => {
+    const rows = [
+      { text: "a".repeat(KEPT_TEXT_CHARS - 10) },
+      { name: "a file" } as { text?: string },
+      { text: "b".repeat(10) },
+      { text: "c" },
+    ];
+    const kept = keepRecentTexts(rows);
+    expect(kept[0].text).toHaveLength(KEPT_TEXT_CHARS - 10);
+    expect(kept[1]).toBe(rows[1]);
+    expect(kept[2].text).toHaveLength(10); // exactly at the budget
+    expect(kept[3].text).toBeUndefined();
+  });
+
+  it("the inbox saves only recent text bodies — this run keeps them all", () => {
+    for (let i = 0; i < 6; i++) useInbox.getState().add(txt(`t${i}`, 60_000));
+    const saved = JSON.parse(localStorage.getItem("lanbeam.inbox") ?? "{}")
+      .state.items as { id: string; text?: string; name: string }[];
+    expect(saved.map((i) => i.text !== undefined)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+    ]);
+    expect(saved[5].name).toBeTruthy(); // the preview stays
+    expect(
+      useInbox.getState().items.every((i) => i.text?.length === 60_000),
+    ).toBe(true);
+  });
+
+  it("a full localStorage doesn't throw out of the store", () => {
+    // On the instance: happy-dom's localStorage stops going through
+    // Storage.prototype once anything has used it.
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => useInbox.getState().add(txt("q", 10))).not.toThrow();
+      expect(setItem).toHaveBeenCalled(); // the write was attempted, and failed
+      expect(useInbox.getState().items[0].id).toBe("q");
+      expect(() =>
+        useTransfers.getState().addTextTransfer({
+          direction: "receive",
+          peerId: "p",
+          peerName: "P",
+          text: "hi",
+        }),
+      ).not.toThrow();
+    } finally {
+      setItem.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
 

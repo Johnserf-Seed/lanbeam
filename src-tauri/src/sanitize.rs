@@ -7,7 +7,6 @@
 //! so `download_root.join(rel)` can never escape the root. `resolve_and_open` adds a
 //! runtime canonicalize-and-contain check as defense-in-depth (e.g. a pre-existing
 //! symlink inside the root pointing outward). DESIGN §5.1.
-#![allow(dead_code)] // wired into the receive loop in M3-B
 
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
@@ -21,7 +20,12 @@ const RESERVED: &[&str] = &[
     "CONIN$", "CONOUT$", "CLOCK$",
 ];
 const MAX_COMPONENTS: usize = 16;
-const MAX_COMPONENT_LEN: usize = 200;
+/// Per path segment, in UTF-8 BYTES. File systems cap a name at 255 (bytes on
+/// ext4/APFS, UTF-16 units on NTFS — never more than the UTF-8 byte count), and
+/// a collision appends at most " (10000)" (8 bytes, see
+/// [`dedupe_on_collision`]), so 240 always fits once de-duped. It was 200:
+/// about 66 CJK characters, which real document titles exceed.
+const MAX_COMPONENT_LEN: usize = 240;
 const MAX_TOTAL_LEN: usize = 4096;
 
 #[derive(Debug, PartialEq)]
@@ -40,7 +44,6 @@ pub enum RejectReason {
     NoValidComponents,
     TooManyComponents,
     TooLong,
-    EscapesDownloadRoot,
 }
 
 /// Pure lexical validation. No filesystem access, no side effects.
@@ -64,8 +67,17 @@ pub fn validate(name: &str) -> Decision {
     if b[0] == b'/' || b[0] == b'\\' {
         return Decision::Reject(AbsolutePath); // also UNC \\ and //
     }
-    if b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
-        return Decision::Reject(DrivePrefix); // "C:\x" AND "C:x"
+    // A drive: "C:", "C:\x", "C:/x". Not "a:b.txt" — a legal name on macOS and
+    // Linux that this used to refuse outright. A colon can never reach the disk
+    // anyway (`clean_component` maps every ':' to '_', which is also what defeats
+    // NTFS alternate streams), so "C:x" is accepted as "C_x", never as a
+    // drive-relative path.
+    if b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+    {
+        return Decision::Reject(DrivePrefix);
     }
 
     // Step 2 — split on BOTH separators; drop "", ".", ".."; sanitize each survivor.
@@ -151,6 +163,11 @@ fn is_bidi_or_zero_width(c: char) -> bool {
 /// [`resolve_and_open_resumable`], [`resolve_and_open_overwrite`]): it proves no
 /// real ancestor and the (created) parent resolves OUTSIDE the root before any
 /// file is opened, so a pre-planted junction/symlink cannot redirect the write.
+///
+/// Only an escape is `UnsafePath`. A folder that can't be created or resolved
+/// (no permission, a full disk, the download folder gone) is `Io` (M10): as
+/// "unsafe path" it reached the sender as a broken connection, and nobody
+/// thought to check the disk.
 fn ensure_parent_in_root(candidate: &Path, base: &Path) -> Result<()> {
     if let Some(parent) = candidate.parent() {
         // [red-team #1] Check the DEEPEST EXISTING ancestor's real path BEFORE creating
@@ -166,16 +183,16 @@ fn ensure_parent_in_root(candidate: &Path, base: &Path) -> Result<()> {
         if exists_nofollow(&anc) {
             let real = anc
                 .canonicalize()
-                .map_err(|e| LanBeamError::UnsafePath(format!("canonicalize ancestor: {e}")))?;
+                .map_err(|e| LanBeamError::Io(format!("canonicalize ancestor: {e}")))?;
             if !real.starts_with(base) {
                 return Err(LanBeamError::UnsafePath("escapes download root".into()));
             }
         }
         std::fs::create_dir_all(parent)
-            .map_err(|e| LanBeamError::UnsafePath(format!("create dirs: {e}")))?;
+            .map_err(|e| LanBeamError::Io(format!("create dirs: {e}")))?;
         let real_parent = parent
             .canonicalize()
-            .map_err(|e| LanBeamError::UnsafePath(format!("canonicalize parent: {e}")))?;
+            .map_err(|e| LanBeamError::Io(format!("canonicalize parent: {e}")))?;
         if !real_parent.starts_with(base) {
             return Err(LanBeamError::UnsafePath("escapes download root".into()));
         }
@@ -195,7 +212,7 @@ fn opened_inside_root(target: &Path, base: &Path) -> bool {
 pub fn resolve_and_open(rel: &Path, download_root: &Path) -> Result<(PathBuf, File)> {
     let base = download_root
         .canonicalize()
-        .map_err(|e| LanBeamError::UnsafePath(format!("download root: {e}")))?;
+        .map_err(|e| LanBeamError::Io(format!("download root: {e}")))?;
     let candidate = download_root.join(rel);
     ensure_parent_in_root(&candidate, &base)?;
 
@@ -276,7 +293,7 @@ pub fn resolve_and_open_resumable(
 ) -> Result<(PathBuf, File, u64)> {
     let base = download_root
         .canonicalize()
-        .map_err(|e| LanBeamError::UnsafePath(format!("download root: {e}")))?;
+        .map_err(|e| LanBeamError::Io(format!("download root: {e}")))?;
     let target = download_root.join(disk_rel);
     ensure_parent_in_root(&target, &base)?;
 
@@ -391,7 +408,12 @@ mod tests {
         assert_eq!(reject("/x"), AbsolutePath);
         assert_eq!(reject("/etc/passwd"), AbsolutePath);
         assert_eq!(reject("C:\\x"), DrivePrefix);
-        assert_eq!(reject("C:x"), DrivePrefix);
+        assert_eq!(reject("C:/x"), DrivePrefix);
+        assert_eq!(reject("C:"), DrivePrefix);
+        // Letter-colon without a separator is a NAME, and its colon is cleaned
+        // away — never a drive-relative path.
+        assert_eq!(accept_path("C:x"), "C_x");
+        assert_eq!(accept_path("a:b.txt"), "a_b.txt");
         assert_eq!(reject("\\\\host\\share\\x"), AbsolutePath);
         // Trailing dot/space (SAN-15..16)
         assert_eq!(accept_path("evil.bat."), "evil.bat");
@@ -475,6 +497,39 @@ mod tests {
         assert_ne!(p1, p2);
         assert!(p2.file_name().unwrap().to_string_lossy().contains("(1)"));
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // M10: a folder the receive cannot create, or a download folder that is
+    // gone, is a disk problem (`Io`) — not an unsafe name. Either used to come
+    // out as UnsafePath, which the sender read as "the connection failed".
+    #[test]
+    fn io_failures_are_io_not_unsafe_path() {
+        let root = std::env::temp_dir().join(format!("lanbeam-sanio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // `docs` exists as a FILE, so `docs/report.txt` needs a folder that can't be made.
+        std::fs::write(root.join("docs"), b"x").unwrap();
+        let rel = match validate("docs/report.txt") {
+            Decision::Accept(p) => p,
+            _ => panic!(),
+        };
+        assert!(
+            matches!(resolve_and_open(&rel, &root), Err(LanBeamError::Io(_))),
+            "an uncreatable folder is Io"
+        );
+        let gone = root.join("no-such-folder");
+        assert!(
+            matches!(resolve_and_open(&rel, &gone), Err(LanBeamError::Io(_))),
+            "a missing download folder is Io"
+        );
+        assert!(
+            matches!(
+                resolve_and_open_resumable(&gone, &rel, 0),
+                Err(LanBeamError::Io(_))
+            ),
+            "for a resume too"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -588,6 +643,18 @@ mod tests {
         // A component exactly at the per-component limit is accepted.
         let at_comp_limit = "b".repeat(MAX_COMPONENT_LEN);
         assert_eq!(accept_path(&at_comp_limit), at_comp_limit);
+    }
+
+    /// The per-segment cap leaves room for the longest de-dupe suffix, so a name
+    /// accepted here still fits a 255-byte file-system limit after a collision.
+    #[test]
+    fn component_cap_leaves_room_for_the_dedupe_suffix() {
+        const { assert!(MAX_COMPONENT_LEN + " (10000)".len() <= 255) };
+        // 80 CJK characters (3 bytes each) — a real document title — fit.
+        let title = "文".repeat(80);
+        assert_eq!(title.len(), 240);
+        assert_eq!(accept_path(&title), title);
+        assert_eq!(reject(&"文".repeat(81)), RejectReason::TooLong);
     }
 
     // Too-many-components gate (line 88): 17 survivors exceed MAX_COMPONENTS = 16.

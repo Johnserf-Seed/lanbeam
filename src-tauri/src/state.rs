@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 use tokio::sync::{oneshot, Notify};
@@ -34,14 +34,24 @@ pub struct NetDegraded {
     pub detail: String,
 }
 
-/// Incoming prompts awaiting a UI answer: session_id → (park generation,
-/// decision sender). The generation is stamped at park time so the post-prompt
-/// cleanup only removes its OWN entry — a successor session that re-parked the
-/// same sender-chosen id in the interim must survive. See
-/// `transfer::park_pending`. The payload is a [`ReplyDecision`] (not a bare
-/// `bool`) so the ConflictModal (M6.5) can fold its collision choice into the
-/// same single ordered answer per prompt.
-pub type PendingMap = HashMap<String, (u64, oneshot::Sender<ReplyDecision>)>;
+/// Incoming prompts awaiting a UI answer, by session id. See
+/// `transfer::park_pending`.
+pub type PendingMap = HashMap<String, Parked>;
+
+/// One prompt waiting for the UI's answer.
+pub struct Parked {
+    /// Stamped at park time so the post-prompt cleanup only removes its OWN
+    /// entry — a successor session that re-parked the same sender-chosen id in
+    /// the interim must survive.
+    pub generation: u64,
+    /// Where the answer goes: a [`ReplyDecision`] (not a bare `bool`) so the
+    /// ConflictModal (M6.5) can fold its collision choice into the same single
+    /// ordered answer per prompt.
+    pub reply: oneshot::Sender<ReplyDecision>,
+    /// The `incoming_file_request` payload the prompt went out with — so a
+    /// window that loaded after the event can still show it (L23).
+    pub request: serde_json::Value,
+}
 
 /// How the receiver resolves a name that collides with an existing file on
 /// disk (M6.5). Chosen once per transfer — from the `conflict` setting, or,
@@ -93,10 +103,12 @@ impl ReplyDecision {
 }
 
 /// Shared registry of live per-session transfer controls (M6.1/6.2), keyed by
-/// session id. One entry exists for the whole chunk phase of a send/receive —
-/// registered when byte streaming starts, removed by [`TransferCtlGuard`] on
-/// every exit path — so cancel/pause/resume act on exactly the sessions moving
-/// bytes right now, and no-op gracefully for an id that already finished.
+/// session id. An entry exists for as long as a transfer can be cancelled — a
+/// send registers before it dials (so a cancel while it sets up or queues is
+/// honored), a receive once it is accepted — and [`TransferCtlGuard`] removes it
+/// on every exit path, so cancel/pause/resume act on exactly the live sessions
+/// and no-op gracefully for an id that already finished. Also what an inbound
+/// session's id is checked against, so it can't borrow one of ours (L12).
 /// Shared between [`AppState`] (the commands) and the listener's
 /// `TransportCtx` (receive registration).
 pub type TransfersCtl = Arc<Mutex<HashMap<String, TransferControl>>>;
@@ -246,81 +258,132 @@ pub fn set_transfer_paused_ctl(map: &TransfersCtl, id: &str, paused: bool) -> bo
 ///
 /// WHY hand-rolled instead of a `tokio::Semaphore`: the cap is the LIVE
 /// `max_concurrent` setting, which the user can change at any time. A semaphore
-/// fixes its permit count at construction; this gate instead re-reads the cap
-/// (passed by the caller) on every acquire, so raising or lowering it needs no
-/// rebuild. A lowered cap simply gates the next transfers to reach here — ones
-/// already holding a slot keep it until they finish, and the queue drains down
-/// to the new cap as they do.
+/// fixes its permit count at construction; this gate keeps the cap in an atomic
+/// that [`set_limit`] updates — and wakes the queue, so RAISING the cap admits
+/// the transfers already waiting at once (M17; it used to be captured per
+/// acquire, so they waited for a slot to free under the old cap). A lowered cap
+/// simply gates the next transfers to reach here — ones already holding a slot
+/// keep it until they finish, and the queue drains down to the new cap as they do.
+///
+/// A send claims its slot BEFORE dialing, so a queued send opens no socket; but
+/// until the receiver answers it is only waiting on a person, and such a send
+/// does not count against a RECEIVE (M11). It used to: three unanswered sends
+/// held every slot for the receivers' whole 150s window, so nothing could be
+/// received meanwhile — and with a cap of 1, two people sending to each other at
+/// once each declined the other "busy". The cost is that a receive admitted
+/// while a send waits can, once that send is accepted, briefly put one more
+/// transfer on the wire than the cap: the sender can't hold an accepted
+/// transfer back for long, the receiver's idle timeout is waiting on its first
+/// chunk.
+///
+/// [`set_limit`]: ConcurrencyGate::set_limit
 pub struct ConcurrencyGate {
-    /// Transfers currently holding a slot.
-    active: AtomicU32,
-    /// Wakes queued acquirers when a slot frees; each re-checks its own live cap.
+    held: Mutex<Held>,
+    /// The live cap, floored at 1.
+    limit: AtomicU32,
+    /// Wakes queued acquirers when a slot frees or the cap changes.
     freed: Notify,
 }
 
-impl Default for ConcurrencyGate {
-    fn default() -> Self {
-        Self::new()
-    }
+/// What [`ConcurrencyGate`] counts. One lock for both numbers: a receive's
+/// check reads them together, and two atomics read one after the other could
+/// let a race admit a transfer the cap should refuse.
+#[derive(Default)]
+struct Held {
+    /// Slots held: every streaming transfer, plus the sends still waiting for
+    /// the receiver to answer.
+    active: u32,
+    /// Of `active`, the sends still waiting for that answer.
+    awaiting: u32,
 }
 
 impl ConcurrencyGate {
-    pub fn new() -> Self {
+    /// A gate admitting `limit` transfers at once — floored at 1, so a bad `0`
+    /// cap can never deadlock every transfer.
+    pub fn new(limit: u32) -> Self {
         Self {
-            active: AtomicU32::new(0),
+            held: Mutex::new(Held::default()),
+            limit: AtomicU32::new(limit.max(1)),
             freed: Notify::new(),
         }
+    }
+
+    /// Change the cap, waking every queued acquirer to re-check against it.
+    pub fn set_limit(&self, limit: u32) {
+        self.limit.store(limit.max(1), Ordering::Release);
+        self.freed.notify_waiters();
+    }
+
+    /// Never held across an await, and nothing under it can panic; a poisoned
+    /// lock still holds valid counts.
+    fn held(&self) -> std::sync::MutexGuard<'_, Held> {
+        self.held.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Number of slots currently held — observability for tests.
     #[doc(hidden)]
     pub fn active(&self) -> u32 {
-        self.active.load(Ordering::Acquire)
+        self.held().active
     }
 
-    /// Claim a slot without waiting, or `None` when the live `limit` is already
-    /// reached (the caller then emits a "queued" nuance and awaits [`acquire`]).
-    /// `limit` is floored at 1 so a bad `0` cap can never deadlock every
-    /// transfer. Lock-free CAS so the check-and-increment is atomic as a unit.
+    /// Claim a slot for a send without waiting, or `None` when the cap is
+    /// reached (the caller then emits a "queued" nuance and awaits
+    /// [`acquire_send`]). The slot counts as waiting on the receiver until
+    /// [`SlotGuard::streaming`].
     ///
-    /// [`acquire`]: ConcurrencyGate::acquire
-    pub fn try_acquire(self: &Arc<Self>, limit: u32) -> Option<SlotGuard> {
-        let limit = limit.max(1);
-        let mut cur = self.active.load(Ordering::Acquire);
-        loop {
-            if cur >= limit {
-                return None;
-            }
-            match self.active.compare_exchange_weak(
-                cur,
-                cur + 1,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            ) {
-                Ok(_) => {
-                    return Some(SlotGuard {
-                        gate: Arc::clone(self),
-                    })
-                }
-                Err(actual) => cur = actual, // lost the race — retry with the fresh count
-            }
+    /// [`acquire_send`]: ConcurrencyGate::acquire_send
+    pub fn try_acquire_send(self: &Arc<Self>) -> Option<SlotGuard> {
+        self.try_claim(true)
+    }
+
+    /// Claim a slot for a receive without waiting, or `None` when the cap is
+    /// reached by transfers that are actually streaming.
+    pub fn try_acquire_receive(self: &Arc<Self>) -> Option<SlotGuard> {
+        self.try_claim(false)
+    }
+
+    /// [`try_acquire_send`](ConcurrencyGate::try_acquire_send), queuing until a slot frees.
+    pub async fn acquire_send(self: &Arc<Self>) -> SlotGuard {
+        self.acquire(true).await
+    }
+
+    /// [`try_acquire_receive`](ConcurrencyGate::try_acquire_receive), queuing until a slot frees.
+    pub async fn acquire_receive(self: &Arc<Self>) -> SlotGuard {
+        self.acquire(false).await
+    }
+
+    fn try_claim(self: &Arc<Self>, send: bool) -> Option<SlotGuard> {
+        let limit = self.limit.load(Ordering::Acquire).max(1);
+        let mut held = self.held();
+        let counted = if send {
+            held.active
+        } else {
+            held.active.saturating_sub(held.awaiting)
+        };
+        if counted >= limit {
+            return None;
         }
+        held.active += 1;
+        if send {
+            held.awaiting += 1;
+        }
+        Some(SlotGuard {
+            gate: Arc::clone(self),
+            awaiting: AtomicBool::new(send),
+        })
     }
 
-    /// Acquire one streaming slot, queuing while `active >= limit`. Returns a
-    /// guard that frees the slot — and wakes the queue — on drop.
-    ///
     /// WHY the arm-then-recheck dance: `Notify::notify_waiters` only wakes
     /// waiters already registered when it fires, so a slot freed between the
-    /// `try_acquire` below and the `await` would be lost — arming the waiter
+    /// `try_claim` below and the `await` would be lost — arming the waiter
     /// (`enable`) BEFORE trying closes that race, exactly as the transfer pause
     /// gate does.
-    pub async fn acquire(self: &Arc<Self>, limit: u32) -> SlotGuard {
+    async fn acquire(self: &Arc<Self>, send: bool) -> SlotGuard {
         loop {
             let freed = self.freed.notified();
             tokio::pin!(freed);
             freed.as_mut().enable();
-            if let Some(guard) = self.try_acquire(limit) {
+            if let Some(guard) = self.try_claim(send) {
                 return guard;
             }
             freed.await;
@@ -333,16 +396,35 @@ impl ConcurrencyGate {
 /// the one whose live cap now admits it can proceed.
 pub struct SlotGuard {
     gate: Arc<ConcurrencyGate>,
+    /// A send whose receiver has not answered yet (see [`ConcurrencyGate`]).
+    awaiting: AtomicBool,
+}
+
+impl SlotGuard {
+    /// The receiver accepted: from here on this send streams, and counts
+    /// against receives too. Idempotent; a no-op on a receive's slot.
+    pub fn streaming(&self) {
+        if self.awaiting.swap(false, Ordering::AcqRel) {
+            let mut held = self.gate.held();
+            held.awaiting = held.awaiting.saturating_sub(1);
+        }
+    }
 }
 
 impl Drop for SlotGuard {
     fn drop(&mut self) {
-        self.gate.active.fetch_sub(1, Ordering::AcqRel);
-        // Wake ALL queued acquirers (not one): a single slot freed, but each
-        // waiter is gated by its OWN live cap, so waking only one risks parking
-        // a waiter whose cap now allows it behind one whose cap still doesn't.
-        // The queue is tiny (bounded by pending transfers), so the extra
-        // wakeups are negligible and each waiter simply re-checks and re-parks.
+        {
+            let mut held = self.gate.held();
+            if self.awaiting.swap(false, Ordering::AcqRel) {
+                held.awaiting = held.awaiting.saturating_sub(1);
+            }
+            held.active = held.active.saturating_sub(1);
+        }
+        // Wake ALL queued acquirers (not one): a send and a receive count the
+        // slots differently, so waking only one risks parking a waiter the
+        // freed slot now admits behind one it still doesn't. The queue is tiny
+        // (bounded by pending transfers), so the extra wakeups are negligible
+        // and each waiter simply re-checks and re-parks.
         self.gate.freed.notify_waiters();
     }
 }
@@ -358,6 +440,11 @@ pub struct PairingSession {
     /// Redemption deadline (`Instant`, a monotonic liveness clock — never
     /// displayed or persisted): the code is refused once `now >= expires`.
     pub expires: Instant,
+    /// The same deadline on the wall clock. WHY both: `Instant` does not
+    /// advance while the machine sleeps on macOS/Linux, so a code minted before
+    /// a nap could stay redeemable long past its ten real minutes; the host
+    /// refuses once EITHER clock says expired. Also what the UI counts down.
+    pub expires_at: SystemTime,
 }
 
 /// Per-source-IP failed-`PairRequest` throttle (M7.1). Keeps a short sliding
@@ -375,9 +462,11 @@ pub struct PairRateLimiter {
 }
 
 impl PairRateLimiter {
-    /// Whether `ip` may still attempt: prunes its expired failures first, then
-    /// reports whether the surviving count is under the cap. Drops an emptied
-    /// entry so an IP that only ever succeeded (or aged out) leaves no residue.
+    /// Whether `ip` may still attempt, WITHOUT reserving anything — a probe for
+    /// tests. The pairing path always goes through [`reserve_attempt`].
+    ///
+    /// [`reserve_attempt`]: PairRateLimiter::reserve_attempt
+    #[cfg(test)]
     pub fn allowed(&mut self, ip: IpAddr, now: Instant) -> bool {
         match self.failures.get_mut(&ip) {
             None => true,
@@ -385,27 +474,8 @@ impl PairRateLimiter {
                 recent.retain(|t| {
                     now.saturating_duration_since(*t) < crate::consts::PAIR_FAILURE_WINDOW
                 });
-                let ok = (recent.len() as u32) < crate::consts::MAX_PAIR_FAILURES;
-                if recent.is_empty() {
-                    self.failures.remove(&ip);
-                }
-                ok
+                (recent.len() as u32) < crate::consts::MAX_PAIR_FAILURES
             }
-        }
-    }
-
-    /// Record one failed attempt for `ip` (a wrong/expired code). Bounds the map
-    /// afterwards so a source that fails once and never returns — leaving an entry
-    /// nothing would otherwise prune — cannot accumulate without limit.
-    pub fn record_failure(&mut self, ip: IpAddr, now: Instant) {
-        self.failures.entry(ip).or_default().push(now);
-        if self.failures.len() > crate::consts::MAX_PAIR_TRACKED_IPS {
-            evict_over_cap(
-                &mut self.failures,
-                now,
-                crate::consts::MAX_PAIR_TRACKED_IPS,
-                crate::consts::PAIR_FAILURE_WINDOW,
-            );
         }
     }
 
@@ -415,8 +485,8 @@ impl PairRateLimiter {
     /// (reserving its slot) and return `true`; at or over the cap, record nothing
     /// and return `false`.
     ///
-    /// WHY reserve at the gate instead of a read-only [`allowed`] now and a
-    /// [`record_failure`] later: those two lock acquisitions leave a window in
+    /// WHY reserve at the gate instead of checking now and recording a failure
+    /// later (which is how this started): two lock acquisitions leave a window in
     /// which N concurrent requests from one IP all read the same stale count and
     /// all pass before any records its failure — a brute-force burst far past the
     /// per-window budget. Reserving under the same guard as the check makes each
@@ -427,8 +497,6 @@ impl PairRateLimiter {
     /// successful pair drops it wholesale via [`clear`].
     ///
     /// [`MAX_PAIR_FAILURES`]: crate::consts::MAX_PAIR_FAILURES
-    /// [`allowed`]: PairRateLimiter::allowed
-    /// [`record_failure`]: PairRateLimiter::record_failure
     /// [`unreserve`]: PairRateLimiter::unreserve
     /// [`clear`]: PairRateLimiter::clear
     pub fn reserve_attempt(&mut self, ip: IpAddr, now: Instant) -> bool {
@@ -533,25 +601,14 @@ impl TextRateLimiter {
     /// window forward — it simply stays capped until the window rolls off. Evicts
     /// least-recently-active sources when the map would exceed its bound.
     pub fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
-        let admitted = {
-            let recent = self.recent.entry(ip).or_default();
-            recent.retain(|t| now.saturating_duration_since(*t) < crate::consts::TEXT_RATE_WINDOW);
-            if (recent.len() as u32) >= crate::consts::MAX_TEXT_PER_WINDOW {
-                false
-            } else {
-                recent.push(now);
-                true
-            }
-        };
-        if self.recent.len() > crate::consts::MAX_TEXT_TRACKED_IPS {
-            evict_over_cap(
-                &mut self.recent,
-                now,
-                crate::consts::MAX_TEXT_TRACKED_IPS,
-                crate::consts::TEXT_RATE_WINDOW,
-            );
-        }
-        admitted
+        admit_in_window(
+            &mut self.recent,
+            ip,
+            now,
+            crate::consts::MAX_TEXT_PER_WINDOW,
+            crate::consts::TEXT_RATE_WINDOW,
+            crate::consts::MAX_TEXT_TRACKED_IPS,
+        )
     }
 
     /// Number of source IPs currently tracked — observability for tests.
@@ -559,6 +616,60 @@ impl TextRateLimiter {
     pub fn tracked(&self) -> usize {
         self.recent.len()
     }
+}
+
+/// Per-source-IP inbound FILE-request throttle (M18) — [`TextRateLimiter`]'s
+/// sliding window, with its own budget. A file request has a prompt, but
+/// reaching it costs a disk check for every listed file and, unless
+/// auto-accepted, a system notification; the receive path consults this before
+/// either, for any sender the user has not paired with. An over-budget request
+/// is declined "busy".
+#[derive(Default)]
+pub struct FileRequestRateLimiter {
+    recent: HashMap<IpAddr, Vec<Instant>>,
+}
+
+impl FileRequestRateLimiter {
+    /// Whether a request from `ip` may proceed now, stamping it when admitted.
+    pub fn admit(&mut self, ip: IpAddr, now: Instant) -> bool {
+        admit_in_window(
+            &mut self.recent,
+            ip,
+            now,
+            crate::consts::MAX_FILE_REQUESTS_PER_WINDOW,
+            crate::consts::FILE_REQUEST_WINDOW,
+            crate::consts::MAX_FILE_REQUEST_TRACKED_IPS,
+        )
+    }
+}
+
+/// The sliding window behind the per-source throttles: prune `ip`'s
+/// out-of-window stamps, then admit (and stamp) while the in-window count is
+/// under `per_window`. Once at the cap it drops WITHOUT stamping, so a flooding
+/// source cannot keep pushing its own window forward — it stays capped until the
+/// window rolls off. Evicts least-recently-active sources past `max_tracked`.
+fn admit_in_window(
+    recent: &mut HashMap<IpAddr, Vec<Instant>>,
+    ip: IpAddr,
+    now: Instant,
+    per_window: u32,
+    window: std::time::Duration,
+    max_tracked: usize,
+) -> bool {
+    let admitted = {
+        let stamps = recent.entry(ip).or_default();
+        stamps.retain(|t| now.saturating_duration_since(*t) < window);
+        if (stamps.len() as u32) >= per_window {
+            false
+        } else {
+            stamps.push(now);
+            true
+        }
+    };
+    if recent.len() > max_tracked {
+        evict_over_cap(recent, now, max_tracked, window);
+    }
+    admitted
 }
 
 /// Shared pairing state (M7.1): the single active invitation plus the
@@ -853,21 +964,21 @@ mod tests {
     /// sessions → 4th waits" contract, proven without any network.
     #[tokio::test]
     async fn concurrency_gate_caps_at_three_and_the_fourth_waits() {
-        let gate = Arc::new(ConcurrencyGate::new());
+        let gate = Arc::new(ConcurrencyGate::new(3));
         // Three acquire instantly under a cap of 3.
-        let g1 = gate.try_acquire(3).expect("1st slot");
-        let _g2 = gate.try_acquire(3).expect("2nd slot");
-        let g3 = gate.try_acquire(3).expect("3rd slot");
+        let g1 = gate.try_acquire_receive().expect("1st slot");
+        let _g2 = gate.try_acquire_receive().expect("2nd slot");
+        let g3 = gate.try_acquire_receive().expect("3rd slot");
         assert_eq!(gate.active(), 3);
         // The 4th finds no slot and would have to queue.
         assert!(
-            gate.try_acquire(3).is_none(),
+            gate.try_acquire_receive().is_none(),
             "4th must not get an immediate slot"
         );
 
         // A 4th acquirer parks; it must NOT resolve while the gate is full.
         let g = gate.clone();
-        let fourth = tokio::spawn(async move { g.acquire(3).await });
+        let fourth = tokio::spawn(async move { g.acquire_receive().await });
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert!(
             !fourth.is_finished(),
@@ -891,20 +1002,75 @@ mod tests {
         assert_eq!(gate.active(), 2);
     }
 
-    /// The cap is read LIVE per acquire (M6.7): raising it admits a previously
-    /// refused transfer, and a `0` cap is floored to 1 so it can never deadlock.
+    /// Raising the cap admits a transfer that is ALREADY queued, without any
+    /// slot freeing (M17) — it used to keep the cap it was called with and wait
+    /// for a finish. A `0` cap is floored to 1 so it can never deadlock.
     #[tokio::test]
-    async fn concurrency_gate_reads_the_live_cap_and_floors_zero() {
-        let gate = Arc::new(ConcurrencyGate::new());
-        let _g1 = gate.try_acquire(1).expect("1st slot under cap 1");
-        assert!(gate.try_acquire(1).is_none(), "cap 1 is full");
-        // The very next acquire with a raised cap succeeds — no rebuild needed.
-        let _g2 = gate.try_acquire(2).expect("raised cap admits another");
+    async fn raising_the_cap_admits_the_queue_at_once() {
+        let gate = Arc::new(ConcurrencyGate::new(1));
+        let _g1 = gate.try_acquire_receive().expect("1st slot under cap 1");
+        assert!(gate.try_acquire_receive().is_none(), "cap 1 is full");
+
+        let g = gate.clone();
+        let queued = tokio::spawn(async move { g.acquire_receive().await });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!queued.is_finished(), "parked behind the full cap");
+
+        gate.set_limit(2);
+        let _g2 = tokio::time::timeout(std::time::Duration::from_secs(1), queued)
+            .await
+            .expect("the raised cap must wake the queue")
+            .expect("acquire task must not panic");
         assert_eq!(gate.active(), 2);
 
         // A 0 cap must behave as at-least-1, never a permanent stall.
-        let fresh = Arc::new(ConcurrencyGate::new());
-        assert!(fresh.try_acquire(0).is_some(), "a 0 cap is floored to 1");
+        let fresh = Arc::new(ConcurrencyGate::new(0));
+        let only = fresh
+            .try_acquire_receive()
+            .expect("a 0 cap is floored to 1");
+        drop(only);
+        fresh.set_limit(0);
+        assert!(fresh.try_acquire_receive().is_some(), "so is a 0 set later");
+    }
+
+    /// A send still waiting for its receiver to answer holds a slot against
+    /// other SENDS (they queue before dialing, in order), but not against a
+    /// RECEIVE (M11): with a cap of 1, someone sending to us while our own
+    /// request waits on them used to be declined "busy" — and two people sending
+    /// to each other at once declined each other. Once accepted, the send counts
+    /// against everything.
+    #[test]
+    fn a_send_waiting_on_its_receiver_does_not_block_a_receive() {
+        let gate = Arc::new(ConcurrencyGate::new(1));
+        let send = gate.try_acquire_send().expect("the send's slot");
+        assert!(
+            gate.try_acquire_send().is_none(),
+            "a second send still queues behind it"
+        );
+        let recv = gate
+            .try_acquire_receive()
+            .expect("a receive is not blocked by an unanswered send");
+        drop(recv);
+
+        send.streaming();
+        send.streaming(); // idempotent
+        assert!(
+            gate.try_acquire_receive().is_none(),
+            "an accepted send streams, and counts"
+        );
+        drop(send);
+        assert_eq!(gate.active(), 0);
+
+        // A send dropped while still waiting (declined, cancelled) gives back
+        // its slot AND stops being counted as waiting.
+        let waiting = gate.try_acquire_send().expect("slot");
+        drop(waiting);
+        let streaming = gate.try_acquire_receive().expect("slot");
+        assert!(
+            gate.try_acquire_receive().is_none(),
+            "nothing left over from the dropped send"
+        );
+        drop(streaming);
     }
 
     // ── pairing throttle (M7.1) ───────────────────────────────────────────
@@ -919,15 +1085,15 @@ mod tests {
         let ip: IpAddr = Ipv4Addr::new(192, 168, 1, 9).into();
         let t0 = Instant::now();
 
-        // A source that never failed is always allowed, and leaves no residue.
-        assert!(r.allowed(ip, t0));
-
-        // Fill the failure budget within the window.
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, t0);
+        // Each attempt reserves a slot of the budget within the window.
+        for i in 0..MAX_PAIR_FAILURES {
+            assert!(
+                r.reserve_attempt(ip, t0),
+                "attempt {i} is within the budget"
+            );
         }
         assert!(
-            !r.allowed(ip, t0),
+            !r.reserve_attempt(ip, t0),
             "at the cap, further attempts are refused"
         );
 
@@ -935,24 +1101,22 @@ mod tests {
         // admitted again.
         let later = t0 + PAIR_FAILURE_WINDOW + std::time::Duration::from_secs(1);
         assert!(
-            r.allowed(ip, later),
+            r.reserve_attempt(ip, later),
             "the window rolling off re-admits the source"
         );
 
         // A success (clear) forgets the tally at once, even mid-window.
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, later);
-        }
-        assert!(!r.allowed(ip, later));
+        while r.reserve_attempt(ip, later) {}
         r.clear(&ip);
-        assert!(r.allowed(ip, later), "clear resets the source immediately");
+        assert!(
+            r.reserve_attempt(ip, later),
+            "clear resets the source immediately"
+        );
 
         // A different source is unaffected by another's failures.
         let other: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, later);
-        }
-        assert!(r.allowed(other, later), "throttling is per-source");
+        while r.reserve_attempt(ip, later) {}
+        assert!(r.reserve_attempt(other, later), "throttling is per-source");
     }
 
     /// The failure map is bounded: recording one failure each from far more
@@ -966,7 +1130,7 @@ mod tests {
         // Each IP fails exactly once and never returns — nothing would prune it.
         for i in 0..(MAX_PAIR_TRACKED_IPS as u32 + 500) {
             let ip: IpAddr = Ipv4Addr::from(i.wrapping_add(1)).into();
-            r.record_failure(ip, now);
+            r.reserve_attempt(ip, now);
         }
         assert!(
             r.tracked() <= MAX_PAIR_TRACKED_IPS,
@@ -1077,6 +1241,26 @@ mod tests {
         assert!(r.admit(other, later), "throttling is per-source");
     }
 
+    /// The file-request throttle (M18) has its own budget on the same sliding
+    /// window: the request past it is refused, refusals don't extend the
+    /// window, and it rolls off.
+    #[test]
+    fn file_request_limiter_caps_and_rolls_off() {
+        use crate::consts::{FILE_REQUEST_WINDOW, MAX_FILE_REQUESTS_PER_WINDOW};
+        let mut r = FileRequestRateLimiter::default();
+        let ip: IpAddr = Ipv4Addr::new(192, 168, 1, 42).into();
+        let t0 = Instant::now();
+        for i in 0..MAX_FILE_REQUESTS_PER_WINDOW {
+            assert!(r.admit(ip, t0), "request {i} within the budget proceeds");
+        }
+        assert!(!r.admit(ip, t0), "the request over the budget is refused");
+        assert!(!r.admit(ip, t0), "and stays refused");
+        let other: IpAddr = Ipv4Addr::new(10, 0, 0, 2).into();
+        assert!(r.admit(other, t0), "per source");
+        let later = t0 + FILE_REQUEST_WINDOW + std::time::Duration::from_secs(1);
+        assert!(r.admit(ip, later), "the window rolling off re-admits it");
+    }
+
     /// The quick-text map is bounded the same way the pairing map is.
     #[test]
     fn text_rate_limiter_map_stays_bounded() {
@@ -1170,6 +1354,7 @@ mod tests {
         *ps.session.lock().unwrap() = Some(PairingSession {
             code: "123456".into(),
             expires: Instant::now() + std::time::Duration::from_secs(60),
+            expires_at: SystemTime::now() + std::time::Duration::from_secs(60),
         });
         assert_eq!(
             ps.session.lock().unwrap().as_ref().unwrap().code,

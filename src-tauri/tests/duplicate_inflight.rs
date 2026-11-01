@@ -87,6 +87,7 @@ async fn duplicate_id_rejected_while_live_and_freed_after_completion() {
         identity: receiver_identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.clone())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -95,9 +96,10 @@ async fn duplicate_id_rejected_while_live_and_freed_after_completion() {
         trusted: Arc::new(RwLock::new(TrustStore::load(tmp.join("trusted.json")))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(tmp.join("partials.json")))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing: Arc::new(PairingState::default()),
         text_rate: Default::default(),
+        file_rate: Default::default(),
     };
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();

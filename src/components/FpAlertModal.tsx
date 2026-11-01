@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   showToast,
   trustList,
+  trustName,
   useData,
   useOverlays,
   useTrust,
@@ -18,9 +19,12 @@ function fpFull(deviceId: string): string {
 }
 
 function CloseBtn({ onClick }: { onClick: () => void }) {
+  const { t } = useTranslation();
   return (
     <button
       type="button"
+      aria-label={t("common.close")}
+      title={t("common.close")}
       onClick={onClick}
       style={{
         width: 28,
@@ -48,7 +52,8 @@ function CloseBtn({ onClick }: { onClick: () => void }) {
  *
  *  That flow dialled the new key, showed the resulting SAS, and told the user
  *  「两台设备屏幕应显示一致」. The other device showed NOTHING — `connect_device`
- *  hands the SAS back to the caller and the far end just swallows a Bye. So the
+ *  (since removed) handed the SAS back to the caller and the far end just
+ *  swallowed a Bye. So the
  *  number had nothing to be compared against, and pressing 「一致」 migrated trust
  *  onto the very key the alert existed to make you suspicious of. A code only one
  *  side can read is not a check; it is a formality that ends in a yes.
@@ -81,7 +86,7 @@ export default function FpAlertModal() {
 
   if (!fpAlert || !record || !newDevice) return null;
   const close = () => setFpAlert(null);
-  const name = record.name;
+  const name = trustName(record) ?? record.name;
 
   /* Delete the remembered device. The key it stood for is not coming back — and
      if the new one really is that machine, it will earn its own record by
@@ -92,13 +97,20 @@ export default function FpAlertModal() {
     close();
   };
 
-  /* Pair with the new key, like the new device it is. PairModal shows the SAS on
-     both screens and records trust only when a human says they match.
+  /* Pair with the new key, like the new device it is. PairModal opens on its
+     join view with this device's address (and PORT — it may not listen on the
+     default) filled in; the user still needs the code its screen shows, and
+     trust is recorded only when a human says the two SASes match.
      `setPair(open, prefill)` in ONE call — the two-arg form exists because
      `setPair(true)` alone defaults the prefill to null and would wipe it. */
   const pair = () => {
     close();
-    setPair(true, newDevice.address);
+    setPair(true, {
+      addr: newDevice.port
+        ? `${newDevice.address}:${newDevice.port}`
+        : newDevice.address,
+      name: newDevice.name,
+    });
   };
 
   return (

@@ -89,6 +89,23 @@ describe("TrustedPage", () => {
     expect(screen.getByText(i18n.t("trusted.hintFree"))).toBeInTheDocument();
   });
 
+  it("a drag in progress drops its window listeners on cancel and on unmount (L24)", () => {
+    seed([dev("d1", "Alice")], { d1: rec({ deviceId: "d1", name: "Alice" }) });
+    const off = vi.spyOn(window, "removeEventListener");
+    const view = renderUI(<TrustedPage />);
+    const chip = screen.getAllByText("Alice")[0];
+
+    fireEvent.pointerDown(chip, { button: 0, clientX: 5, clientY: 5 });
+    window.dispatchEvent(new Event("pointercancel"));
+    expect(off).toHaveBeenCalledWith("pointermove", expect.any(Function));
+
+    off.mockClear();
+    fireEvent.pointerDown(chip, { button: 0, clientX: 5, clientY: 5 });
+    view.unmount();
+    expect(off).toHaveBeenCalledWith("pointermove", expect.any(Function));
+    off.mockRestore();
+  });
+
   it("shows the selected peer's short fingerprint in the bar", () => {
     // shortFp("vjx0qm8d") → "VJX0 · QM8D"
     const id = "vjx0qm8d";
@@ -98,7 +115,7 @@ describe("TrustedPage", () => {
     expect(screen.getByText(shortFp(id))).toBeInTheDocument();
   });
 
-  it("renames the selected peer, updating its trust record", () => {
+  it("renames the selected peer as a local alias its own name can't undo (M7)", () => {
     seed([dev("d1", "Alice")], { d1: rec({ deviceId: "d1", name: "Alice" }) });
     renderUI(<TrustedPage />);
 
@@ -107,9 +124,14 @@ describe("TrustedPage", () => {
     fireEvent.change(input, { target: { value: "Alice Renamed" } });
     fireEvent.blur(input);
 
-    expect(useTrust.getState().records.d1.name).toBe("Alice Renamed");
-    // The renamed trusted record is written through to the backend store.
-    expect(api.setTrusted).toHaveBeenCalledWith("d1", "Alice Renamed", false);
+    expect(useTrust.getState().records.d1).toMatchObject({
+      name: "Alice",
+      alias: "Alice Renamed",
+    });
+    expect(screen.getAllByText("Alice Renamed").length).toBeGreaterThan(0);
+    // Not written to the backend: the name there is the device's own, and
+    // every transfer from it rewrites it — which is how renames got undone.
+    expect(api.setTrusted).not.toHaveBeenCalled();
   });
 
   it("toggles auto-accept for the selected trusted peer", () => {

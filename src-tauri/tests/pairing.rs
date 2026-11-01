@@ -2,8 +2,10 @@
 #![allow(clippy::field_reassign_with_default)]
 
 //! Integration tests (M7.1/7.2) through the REAL `handle_incoming` pairing path:
-//!   * a loopback pair with the right code mutually trusts and emits
-//!     `pair_joined` (carrying the SAS), consuming the one-shot code;
+//!   * a loopback pair with the right code emits `pair_joined` (carrying the
+//!     SAS), consumes the one-shot code, and trusts nothing on its own;
+//!   * a code typed the way it is displayed ("482 913") is accepted, and the
+//!     host records the joiner's address so the pairing is dialable both ways;
 //!   * a wrong code is rejected with no trust change and leaves the code live;
 //!   * an expired code is rejected and cleared, with no trust change;
 //!   * the `connect_by_addr` (IP-direct) transport flow learns the peer's
@@ -17,6 +19,7 @@
 //! targets carry the Windows manifest linker args — see build.rs.
 
 use std::collections::{HashMap, HashSet};
+use std::net::Ipv4Addr;
 use std::sync::atomic::AtomicU16;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
@@ -24,7 +27,7 @@ use std::time::{Duration, Instant};
 use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
-use lanbeam_lib::consts::TRANSFER_V2;
+use lanbeam_lib::consts::{DEFAULT_TCP_PORT, TRANSFER_V2};
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
@@ -54,6 +57,7 @@ fn make_host_ctx<R: tauri::Runtime>(
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.to_path_buf())),
+        manual_peers: Default::default(),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -62,9 +66,10 @@ fn make_host_ctx<R: tauri::Runtime>(
         trusted: Arc::new(RwLock::new(TrustStore::load(tmp.join("trusted.json")))),
         transfers_ctl: Arc::new(Mutex::new(HashMap::new())),
         partials: Arc::new(RwLock::new(PartialsStore::load(tmp.join("partials.json")))),
-        concurrency: Arc::new(ConcurrencyGate::new()),
+        concurrency: Arc::new(ConcurrencyGate::new(3)),
         pairing,
         text_rate: Default::default(),
+        file_rate: Default::default(),
     }
 }
 
@@ -113,6 +118,7 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "482913".into(),
         expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -143,7 +149,7 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
         peer.version, TRANSFER_V2,
         "two current builds negotiate v2 pairing"
     );
-    send_pair_request(&mut sess, "482913").await.unwrap();
+    send_pair_request(&mut sess, "482913", None).await.unwrap();
     let (accept, host_name, reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(accept, "the right code must be accepted");
     assert_eq!(
@@ -170,6 +176,14 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
         pairing.session.lock().unwrap().is_none(),
         "a successful pair clears the code"
     );
+    // An address is not trust: the joiner IS recorded as dialable — and a
+    // joiner that declared no listen port (an older build) gets the default.
+    let manual = ctx.manual_peers.lock().unwrap();
+    let rec = manual
+        .get(&joiner_id)
+        .expect("the host records the joiner's address");
+    assert_eq!(rec.port, DEFAULT_TCP_PORT);
+    drop(manual);
 
     // pair_joined fired with the joiner + the SAS (both sides derive the same one).
     let events = joined.lock().unwrap();
@@ -182,6 +196,110 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
         serde_json::Value::String(sas),
         "SAS is the channel binding"
     );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// The code as a person types it off the host's screen — grouped "482 913" —
+/// is accepted (the host normalizes before comparing; an older joiner still
+/// sends the raw text). And the host records the joiner as a dialable peer:
+/// its connection's source IP plus the listen port it declared. Pairing exists
+/// for peers discovery cannot see, so without this the host would end up
+/// trusting a device it had no way to reach. The merged device list is
+/// re-emitted so the UI shows the joiner right away. Still: no trust.
+#[tokio::test]
+async fn spaced_code_is_accepted_and_the_joiner_becomes_dialable() {
+    let tmp = std::env::temp_dir().join(format!("lanbeam-pair-spaced-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dl_dir = tmp.join("downloads");
+    std::fs::create_dir_all(&dl_dir).unwrap();
+
+    let app = tauri::test::mock_app();
+    let handle = app.handle().clone();
+    let updates: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    {
+        let sink = updates.clone();
+        handle.listen("devices_updated", move |e| {
+            sink.lock().unwrap().push(e.payload().to_string())
+        });
+    }
+
+    let host_identity = Arc::new(generate_identity().unwrap());
+    let host_priv = *host_identity.private_bytes();
+    let pairing = Arc::new(PairingState::default());
+    let ctx = make_host_ctx(
+        handle,
+        host_identity,
+        &dl_dir,
+        &tmp,
+        pairing.clone(),
+        "Host Device",
+    );
+    *pairing.session.lock().unwrap() = Some(PairingSession {
+        code: "482913".into(),
+        expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
+    });
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ctx2 = ctx.clone();
+    let responder = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let sess = NoiseSession::handshake_responder(stream, &host_priv)
+            .await
+            .unwrap();
+        handle_incoming(sess, &ctx2).await
+    });
+
+    let joiner_identity = generate_identity().unwrap();
+    let joiner_priv = *joiner_identity.private_bytes();
+    let joiner_id = joiner_identity.device_id();
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut sess = NoiseSession::handshake_initiator(stream, &joiner_priv, None)
+        .await
+        .unwrap();
+    initiator_hello(&mut sess, "Joiner Device".into())
+        .await
+        .unwrap();
+    send_pair_request(&mut sess, "482 913", Some(51999))
+        .await
+        .unwrap();
+    let (accept, _host_name, reason) = recv_pair_confirm(&mut sess).await.unwrap();
+    assert!(
+        accept,
+        "the displayed grouping must not fail the code: {reason:?}"
+    );
+    drop(sess);
+    responder
+        .await
+        .unwrap()
+        .expect("a successful pair is a clean Ok(())");
+
+    let manual = ctx.manual_peers.lock().unwrap();
+    let rec = manual
+        .get(&joiner_id)
+        .expect("the host records the joiner as a manual peer");
+    assert_eq!(rec.addr, Ipv4Addr::LOCALHOST, "the connection's source IP");
+    assert_eq!(rec.port, 51999, "the listen port the joiner declared");
+    assert_eq!(rec.name, "Joiner Device");
+    drop(manual);
+    assert!(
+        ctx.trusted.read().unwrap().list().is_empty(),
+        "reachable is not trusted — the SAS compare still decides that"
+    );
+
+    let events = updates.lock().unwrap();
+    assert_eq!(events.len(), 1, "exactly one devices_updated");
+    let list: serde_json::Value = serde_json::from_str(&events[0]).unwrap();
+    let entry = list
+        .as_array()
+        .expect("devices_updated carries the whole list")
+        .iter()
+        .find(|d| d["deviceId"] == serde_json::Value::String(joiner_id.clone()))
+        .expect("the merged list includes the joiner");
+    assert_eq!(entry["port"], 51999);
+    assert_eq!(entry["manual"], true);
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -219,6 +337,7 @@ async fn wrong_code_rejects_without_trust_and_keeps_code() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "111111".into(),
         expires: Instant::now() + Duration::from_secs(600),
+        expires_at: std::time::SystemTime::now() + Duration::from_secs(600),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -238,7 +357,7 @@ async fn wrong_code_rejects_without_trust_and_keeps_code() {
         .await
         .unwrap();
     initiator_hello(&mut sess, "Guesser".into()).await.unwrap();
-    send_pair_request(&mut sess, "999999").await.unwrap();
+    send_pair_request(&mut sess, "999999", None).await.unwrap();
     let (accept, _name, reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(!accept, "a wrong code must be declined");
     assert!(reason.is_some(), "a decline carries a reason");
@@ -295,6 +414,7 @@ async fn expired_code_rejects_and_clears() {
     *pairing.session.lock().unwrap() = Some(PairingSession {
         code: "482913".into(),
         expires: expired,
+        expires_at: std::time::SystemTime::now() - Duration::from_secs(1),
     });
 
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -316,7 +436,7 @@ async fn expired_code_rejects_and_clears() {
     initiator_hello(&mut sess, "Latecomer".into())
         .await
         .unwrap();
-    send_pair_request(&mut sess, "482913").await.unwrap();
+    send_pair_request(&mut sess, "482913", None).await.unwrap();
     let (accept, _name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(
         !accept,
@@ -385,7 +505,7 @@ async fn no_session_pair_request_does_not_grow_rate_map() {
         .await
         .unwrap();
     initiator_hello(&mut sess, "Prober".into()).await.unwrap();
-    send_pair_request(&mut sess, "123456").await.unwrap();
+    send_pair_request(&mut sess, "123456", None).await.unwrap();
     let (accept, _name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
     assert!(!accept, "a PairRequest at an idle host is declined");
     drop(sess);

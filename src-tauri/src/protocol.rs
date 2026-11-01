@@ -2,7 +2,6 @@
 //! `kind(1) || body`: CONTROL = JSON `AppMessage`, FILE_CHUNK = `index:u32 BE || bytes`.
 //! The file manifest is PAGED ([FIX-4]) so a large file list never overflows one frame.
 //! DESIGN §1.3–1.4. Wired into the send/receive loops in M3-B.
-#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 
@@ -107,15 +106,24 @@ pub enum AppMessage {
     },
     /// In-band pairing request (M7.1), gated on `TRANSFER_V2`: the initiator that
     /// redeemed a pairing code presents it so the responder can match it against
-    /// the code it minted, after which both sides store each other's fingerprint
-    /// in the trust store. Only ever sent to a peer whose `Hello` advertised 2 —
+    /// the code it minted. The exchange itself trusts no one: each side records
+    /// the other in its trust store only once a person there has compared the
+    /// SAS. Only ever sent to a peer whose `Hello` advertised 2 —
     /// a v1 (M4–M6) peer never receives it (see `transfer::PeerHello::version`).
     PairRequest {
         code: String,
+        /// The joiner's own TCP listen port, so the host can record the
+        /// joiner as a dialable manual peer (a cross-subnet pairing used to
+        /// leave the host with no address for the device it just trusted).
+        /// Additive + `#[serde(default)]`: an older joiner omits it and the
+        /// host falls back to the default port.
+        #[serde(default)]
+        port: Option<u16>,
     },
     /// The responder's answer to a [`AppMessage::PairRequest`] (M7.1): `accept`
-    /// on a code match — carrying the responder's friendly `name` for the
-    /// initiator's trust entry — or a decline with an optional human `reason`.
+    /// on a code match — carrying the responder's friendly `name`, for the trust
+    /// entry the initiator records once a person has compared the SAS — or a
+    /// decline with an optional human `reason`.
     /// Also gated on `TRANSFER_V2`.
     PairConfirm {
         accept: bool,
@@ -164,10 +172,6 @@ pub enum AppMessage {
         /// Additive.
         #[serde(default)]
         reason: Option<String>,
-    },
-    Error {
-        code: String,
-        message: String,
     },
     Bye,
 }
@@ -414,6 +418,7 @@ mod tests {
         for m in [
             AppMessage::PairRequest {
                 code: "482913".into(),
+                port: Some(51704),
             },
             AppMessage::PairConfirm {
                 accept: true,
@@ -429,6 +434,22 @@ mod tests {
             let enc = encode_control(&m).unwrap();
             assert_eq!(enc[0], KIND_CONTROL);
             assert_eq!(decode(&enc).unwrap(), Frame::Control(m));
+        }
+    }
+
+    /// `PairRequest.port` is additive: a request written by an older joiner
+    /// (no `port` key) decodes with `port == None`, never an error.
+    #[test]
+    fn pair_request_port_is_additive() {
+        let legacy = br#"{"t":"pair_request","code":"482913"}"#;
+        let mut frame = vec![KIND_CONTROL];
+        frame.extend_from_slice(legacy);
+        match decode(&frame).unwrap() {
+            Frame::Control(AppMessage::PairRequest { code, port }) => {
+                assert_eq!(code, "482913");
+                assert_eq!(port, None, "a missing port key must default to None");
+            }
+            other => panic!("expected PairRequest, got {other:?}"),
         }
     }
 

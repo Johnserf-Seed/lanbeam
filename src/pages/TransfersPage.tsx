@@ -4,7 +4,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip, Segmented } from "../components/ui";
-import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
+import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
 import { copyText, resendTransfer } from "../lib/sendops";
 import {
   showToast,
@@ -55,6 +55,18 @@ function RunningRow({ tr }: { tr: UITransfer }) {
   // Parked on the concurrency gate (M6.7): no bytes are moving yet, so the
   // speed/ETA and the pause control are meaningless — swap in a waiting hint.
   const queued = tr.status === "queued";
+  // A send whose receiver hasn't answered yet: their prompt is up, and the SAS
+  // is what both screens should show (H10) — not a 0% "transfer".
+  const awaiting =
+    tr.direction === "send" && tr.status === "active" && !tr.accepted;
+  // Files this receive has verified so far (M15). The row used to say
+  // 「SHA-256 校验」 the whole time, checksums or not. A send's per-file event
+  // only says a checksum was attached; the receiver does the checking.
+  const verifiedN =
+    tr.direction === "receive"
+      ? Object.values(tr.fileStat ?? {}).filter((f) => f.done && f.verified)
+          .length
+      : 0;
   const pct = Math.min(tr.percent, 100);
   const doneBytes = (tr.totalSize * pct) / 100;
   const eta = etaClock(tr.totalSize, tr.percent, tr.speedBps);
@@ -258,9 +270,15 @@ function RunningRow({ tr }: { tr: UITransfer }) {
             {" · "}
             {queued
               ? t("transfers.queued")
-              : tr.paused
-                ? t("transfers.speedPaused")
-                : t("transfers.shaChecking")}
+              : awaiting
+                ? tr.sas
+                  ? t("transfers.awaitingAcceptSas", { sas: fmtSas(tr.sas) })
+                  : t("transfers.awaitingAccept")
+                : tr.paused
+                  ? t("transfers.speedPaused")
+                  : verifiedN > 0
+                    ? t("transfers.verifiedSoFar", { n: verifiedN })
+                    : t("transfers.inFlight")}
           </div>
         </div>
         {hist.length > 0 && (
@@ -460,9 +478,17 @@ const HistoryRow = memo(function HistoryRow({ tr }: { tr: UITransfer }) {
  *  row is inert during live-transfer progress ticks (it has no store subscriptions). */
 const TextRow = memo(function TextRow({ tr }: { tr: UITransfer }) {
   const { t } = useTranslation();
-  const copy = () => {
-    copyText(tr.text ?? "");
-    showToast(t("inbox.copiedText"));
+  const copy = async () => {
+    // A text from an earlier run may have been saved without its body (M23).
+    if (tr.text === undefined) {
+      showToast(t("inbox.textNotKept"));
+      return;
+    }
+    showToast(
+      (await copyText(tr.text))
+        ? t("inbox.copiedText")
+        : t("common.copyFailed"),
+    );
   };
   return (
     // biome-ignore lint/a11y/useSemanticElements: styled text row kept — a <button> would change the row's layout/styling; made keyboard-operable via role/tabIndex/onKeyDown

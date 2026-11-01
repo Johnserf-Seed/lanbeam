@@ -27,17 +27,19 @@ export function Toggle({
   );
 }
 
-/** Segmented filter control. */
+/** Segmented filter control. `disabled` freezes it on the current value. */
 export function Segmented<K extends string>({
   options,
   value,
   onChange,
   itemStyle,
+  disabled,
 }: {
   options: { key: K; label: string }[];
   value: K;
   onChange: (k: K) => void;
   itemStyle?: CSSProperties;
+  disabled?: boolean;
 }) {
   return (
     <div className="seg">
@@ -47,6 +49,8 @@ export function Segmented<K extends string>({
           type="button"
           className={`seg-item${o.key === value ? " active" : ""}`}
           style={itemStyle}
+          aria-pressed={o.key === value}
+          disabled={disabled}
           onClick={() => onChange(o.key)}
         >
           {o.label}
@@ -163,6 +167,7 @@ export function ModalHead({
   onClose: () => void;
   pad?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <div
       style={{
@@ -184,6 +189,9 @@ export function ModalHead({
       </div>
       <button
         type="button"
+        // A bare × has no name a screen reader can say (L27).
+        aria-label={t("common.close")}
+        title={t("common.close")}
         onClick={onClose}
         style={{
           width: 28,

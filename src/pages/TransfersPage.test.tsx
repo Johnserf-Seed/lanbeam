@@ -7,13 +7,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../i18n";
 import type { UITransfer } from "../lib/store";
 import { useOverlays, useTransfers } from "../lib/store";
-import { fireEvent, renderUI, screen } from "../test/render";
+import { act, fireEvent, renderUI, screen } from "../test/render";
 import TransfersPage from "./TransfersPage";
 
 // The page calls copyText (text rows) and resendTransfer (failed sends) on
 // interaction; mock both so we can assert the calls in browser mode.
 vi.mock("../lib/sendops", () => ({
-  copyText: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(true),
   resendTransfer: vi.fn(),
 }));
 import { copyText, resendTransfer } from "../lib/sendops";
@@ -106,6 +106,59 @@ describe("TransfersPage", () => {
     expect(screen.getByText("photo.png")).toBeTruthy();
     expect(screen.getByText("report.pdf")).toBeTruthy();
     expect(screen.getByText("hello world")).toBeTruthy();
+  });
+
+  it("a send the receiver hasn't accepted says so, with the code to compare", () => {
+    // H10: it read like a transfer stuck at 0%, and the sender's SAS was
+    // nowhere once the send dialog closed.
+    useTransfers.setState({
+      transfers: { act: { ...active, percent: 0, sas: "483921" } },
+    });
+    renderUI(<TransfersPage />);
+    expect(
+      screen.getByText(
+        i18n.t("transfers.awaitingAcceptSas", { sas: "483 · 921" }),
+        { exact: false },
+      ),
+    ).toBeTruthy();
+
+    act(() => {
+      useTransfers.setState({
+        transfers: { act: { ...active, sas: "483921", accepted: true } },
+      });
+    });
+    expect(
+      screen.queryByText(
+        i18n.t("transfers.awaitingAcceptSas", { sas: "483 · 921" }),
+        { exact: false },
+      ),
+    ).toBeNull();
+  });
+
+  it("a running receive says what has really been checked (M15)", () => {
+    // It said 「SHA-256 校验」 the whole time, checksums or not.
+    const recv = { ...active, direction: "receive" as const };
+    useTransfers.setState({ transfers: { act: recv } });
+    renderUI(<TransfersPage />);
+    expect(
+      screen.getByText(i18n.t("transfers.inFlight"), { exact: false }),
+    ).toBeTruthy();
+
+    act(() => {
+      useTransfers.setState({
+        transfers: {
+          act: {
+            ...recv,
+            fileStat: { 0: { percent: 100, done: true, verified: true } },
+          },
+        },
+      });
+    });
+    expect(
+      screen.getByText(i18n.t("transfers.verifiedSoFar", { n: 1 }), {
+        exact: false,
+      }),
+    ).toBeTruthy();
   });
 
   it("segmented filter hides History on 'active' and Running on 'done'", () => {

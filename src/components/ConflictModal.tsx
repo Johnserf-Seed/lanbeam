@@ -4,7 +4,7 @@
  *  one reply_file_request: 保留两者 → accept+rename, 覆盖 → accept+overwrite,
  *  跳过 / 取消接收 → decline. Markup transcribed from「LanBeam 原型 v2」lines
  *  1330-1364. */
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
@@ -17,6 +17,7 @@ import {
   useTransfers,
   useTrust,
 } from "../lib/store";
+import { useEscape } from "../lib/useEscape";
 
 /** The backend resolves collisions per transfer with a single action, so one
  *  choice covers every colliding file. "skip" has no backend disposition — it
@@ -40,14 +41,10 @@ export default function ConflictModal() {
   }, [sessionId]);
 
   // Escape declines (same as 取消接收) — but only while a collision is parked.
-  useEffect(() => {
-    if (!pending) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") decline();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [sessionId]);
+  // Through the shared dialog stack, so one Escape never ALSO closes whatever
+  // dialog sits underneath, and an input method's Escape declines nothing.
+  const declineRef = useRef(() => {});
+  useEscape(!!pending, () => declineRef.current());
 
   if (!pending) return null;
   const { request, peerName, wantTrust } = pending;
@@ -71,6 +68,7 @@ export default function ConflictModal() {
     close();
     showToast(t("incoming.declineToast", { name: peerName }));
   };
+  declineRef.current = decline;
 
   const accept = (choice: "rename" | "overwrite") => {
     if (leaving) return;
@@ -138,7 +136,7 @@ export default function ConflictModal() {
           </div>
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
             {extra > 0
-              ? t("conflict.subMulti", { n: extra })
+              ? t("conflict.subMulti", { count: extra })
               : t("conflict.sub")}
           </div>
         </div>

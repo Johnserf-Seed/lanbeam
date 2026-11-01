@@ -41,6 +41,8 @@ type MenuEntry =
   | { sep: true }
   | {
       sep?: undefined;
+      /** React key when the label can repeat — two devices can share a name. */
+      key?: string;
       label: string;
       fg?: string;
       note?: string;
@@ -150,8 +152,13 @@ const InboxRow = memo(function InboxRow({
   const isTxt = it.kind === "txt";
   const showCk = selMode || hovered;
   const showActs = hovered && !selMode;
+  // A text from an earlier run may have been saved without its body (M23).
   const sizeStr = isTxt
-    ? t("inbox.charCount", { n: (it.text ?? "").length })
+    ? it.text === undefined
+      ? t("inbox.previewOnly")
+      : // Characters as a person counts them, not UTF-16 units — an emoji
+        // is one (L27).
+        t("inbox.charCount", { count: [...it.text].length })
     : fmtBytes(it.sizeBytes);
   return (
     // biome-ignore lint/a11y/useSemanticElements: keep the row as a div (a native <button> can't nest the checkbox/action controls and would restyle it); keyboard-operable via role + tabIndex + onKeyDown
@@ -425,6 +432,16 @@ export default function InboxPage() {
     [items, catOk, t],
   );
 
+  // A selection only ever holds rows you can see (L25). Switching the filter
+  // used to keep the hidden ones selected — and 删除 then deleted them too.
+  useEffect(() => {
+    const shown = new Set(groups.flatMap((g) => g.rows.map((r) => r.id)));
+    setSel((cur) => {
+      const kept = cur.filter((id) => shown.has(id));
+      return kept.length === cur.length ? cur : kept;
+    });
+  }, [groups]);
+
   /* ── row / menu actions ─────────────────────────────────────────────── */
 
   /** Item display name: multi-file items read as "name 等 N 个文件" (N = total). */
@@ -437,8 +454,15 @@ export default function InboxPage() {
   );
 
   const doCopy = useCallback(
-    (it: InboxItem) => {
-      copyText(it.text ?? "");
+    async (it: InboxItem) => {
+      if (it.text === undefined) {
+        showToast(t("inbox.textNotKept"));
+        return;
+      }
+      if (!(await copyText(it.text))) {
+        showToast(t("common.copyFailed"));
+        return;
+      }
       setCopiedIds((cur) => (cur.includes(it.id) ? cur : [...cur, it.id]));
       showToast(t("inbox.copiedText"));
     },
@@ -501,11 +525,15 @@ export default function InboxPage() {
     useInbox.getState().remove(ids);
     setSel([]);
     setMenu(null);
-    showToast(t("inbox.removedBatchToast", { n: ids.length }));
+    showToast(t("inbox.removedBatchToast", { count: ids.length }));
   };
 
   const fwdItem = (it: InboxItem, d: DiscoveredDevice) => {
     setMenu(null);
+    if (it.kind === "txt" && it.text === undefined) {
+      showToast(t("inbox.textNotKept"));
+      return;
+    }
     if (it.kind === "txt") {
       // Forward over the real text channel (M7.3), recording a sent-text entry
       // in the transfer history. alsoClipboard=true mirrors QuickTextModal's
@@ -549,16 +577,19 @@ export default function InboxPage() {
     const queued = paths.length
       ? sendToDevice(d, paths.map(sendFileFromPath))
       : true;
+    // A text saved without its body (M23) has nothing to forward.
+    const sendable = txts.filter((i) => i.text !== undefined);
     const sent = await Promise.allSettled(
-      txts.map((it) =>
+      sendable.map((it) =>
         sendTextTracked(d.deviceId, d.name, it.text ?? "", true),
       ),
     );
     const rejected = sent.filter((r) => r.status === "rejected");
+    const lost = txts.length - sendable.length;
     const total = files.length + txts.length;
-    const ok = total - rejected.length - (queued ? 0 : files.length);
+    const ok = total - rejected.length - lost - (queued ? 0 : files.length);
     if (ok === total) {
-      showToast(t("inbox.fwdBatchToast", { n: total, device: d.name }));
+      showToast(t("inbox.fwdBatchToast", { count: total, device: d.name }));
       return;
     }
     const first = rejected[0] as PromiseRejectedResult | undefined;
@@ -566,7 +597,11 @@ export default function InboxPage() {
       t("inbox.fwdBatchPartial", {
         ok,
         n: total,
-        err: first ? errText(first.reason) : t("errors.generic"),
+        err: first
+          ? errText(first.reason)
+          : lost
+            ? t("inbox.textNotKept")
+            : t("errors.generic"),
       }),
       undefined,
       7000,
@@ -613,6 +648,7 @@ export default function InboxPage() {
   if (menu && mItem) {
     const devEntries: MenuEntry[] = devices.length
       ? devices.map((d) => ({
+          key: d.deviceId,
           label: d.name,
           dot: "var(--success)",
           onClick: () => {
@@ -626,13 +662,13 @@ export default function InboxPage() {
     } else if (batchIds) {
       entries = [
         {
-          label: t("inbox.forwardBatch", { n: batchIds.length }),
+          label: t("inbox.forwardBatch", { count: batchIds.length }),
           hasSub: true,
           onClick: () => setSub(true),
         },
         { sep: true },
         {
-          label: t("inbox.removeBatch", { n: batchIds.length }),
+          label: t("inbox.removeBatch", { count: batchIds.length }),
           fg: "var(--muted2)",
           note: t("inbox.menuRemoveNote"),
           onClick: () => rmBatch(batchIds),
@@ -739,7 +775,7 @@ export default function InboxPage() {
     const n = sel.length;
     useInbox.getState().remove(sel);
     setSel([]);
-    showToast(t("inbox.removedBatchToast", { n }));
+    showToast(t("inbox.removedBatchToast", { count: n }));
   };
 
   /* ── render ─────────────────────────────────────────────────────────── */
@@ -875,7 +911,7 @@ export default function InboxPage() {
               ) : (
                 // biome-ignore lint/a11y/useSemanticElements: keep the styled div (a native <button> would restyle it); keyboard-operable via role + tabIndex + onKeyDown
                 <div
-                  key={en.label}
+                  key={en.key ?? en.label}
                   role="button"
                   tabIndex={0}
                   onClick={en.onClick}

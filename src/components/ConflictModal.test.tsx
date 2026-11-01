@@ -9,7 +9,7 @@ import { useOverlays, usePrefs, useTransfers, useTrust } from "../lib/store";
 import { fireEvent, renderUI, screen } from "../test/render";
 import ConflictModal from "./ConflictModal";
 
-// Partial mock: keep everything real (isTauri stays false, store.ts keeps its
+// Partial mock: keep everything real (isTauri stays false, the store keeps its
 // actual api) except replyFileRequest, which we spy on.
 vi.mock("../bridge/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../bridge/api")>();
@@ -93,7 +93,7 @@ describe("ConflictModal rendering", () => {
     });
     renderUI(<ConflictModal />);
     expect(
-      screen.getByText(t("conflict.subMulti", { n: 1 })),
+      screen.getByText(t("conflict.subMulti", { count: 1 })),
     ).toBeInTheDocument();
   });
 });
@@ -150,6 +150,19 @@ describe("ConflictModal choices", () => {
     expect(api.replyFileRequest).toHaveBeenCalledWith("sess-1", false);
     // Declining grants nothing — the deferred trust is never applied.
     expect(useTrust.getState().records["peer-dev"]).toBeUndefined();
+    expect(useOverlays.getState().conflict).toBeNull();
+  });
+
+  it("Escape declines like 取消接收 — exactly once, and not an IME's Escape", () => {
+    seedConflict();
+    renderUI(<ConflictModal />);
+
+    fireEvent.keyDown(window, { key: "Escape", isComposing: true });
+    expect(api.replyFileRequest).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(api.replyFileRequest).toHaveBeenCalledTimes(1);
+    expect(api.replyFileRequest).toHaveBeenCalledWith("sess-1", false);
     expect(useOverlays.getState().conflict).toBeNull();
   });
 

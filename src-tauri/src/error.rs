@@ -1,7 +1,6 @@
 //! Crate-wide error type. Serializes with a `{kind, message}` shape so a failed
 //! `#[tauri::command]` surfaces a structured, readable error on the JS side.
 //! `message`s are internal diagnostics for logs/UI — never a user-facing contract.
-#![allow(dead_code)] // several variants land in later milestones (M2–M4)
 
 use serde::Serialize;
 
@@ -56,6 +55,59 @@ pub enum LanBeamError {
     /// showing a generic failure.
     #[error("peer version too old: {0}")]
     PeerTooOld(String),
+    /// The pairing host checked the presented code and said no: wrong digits,
+    /// an expired invitation, or no invitation active there at all. Kept apart
+    /// from `Protocol` so the UI can say "wrong or expired code" instead of
+    /// "the connection failed" (the message is the host's reason token).
+    #[error("pairing rejected: {0}")]
+    PairRejected(String),
+    /// A dial target the user typed (or a link carried) is not an `ip[:port]`.
+    /// User input, not a wire fault — its own kind so the UI can point at the
+    /// address field rather than blaming the connection.
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
+    /// A join was attempted with no pairing code at all (neither typed nor
+    /// carried by the link).
+    #[error("no pairing code provided")]
+    PairCodeMissing,
+    /// The TCP dial itself failed — connection refused, no route, host down.
+    /// Distinct from `Io` (which the UI renders as "a file or disk error") so
+    /// an unreachable peer reads as exactly that.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
+    /// The connection dropped in the middle of a conversation: the peer closed
+    /// it (cancelled, quit, crashed) or the network went away. A TRANSPORT
+    /// failure — a read or write on the peer's socket — kept apart from `Io`,
+    /// which the UI words as a file or disk error, and from `Protocol`, which
+    /// means the peer said something that made no sense.
+    #[error("connection lost: {0}")]
+    ConnectionLost(String),
+    /// The receiver declined on its own because it was already running as many
+    /// transfers as it allows. Nobody said no, and later can work.
+    #[error("the peer is busy")]
+    PeerBusy,
+    /// The receiver reported that the transfer was cancelled on its side.
+    #[error("the peer cancelled the transfer")]
+    PeerCancelled,
+    /// The receiver's checksum of a file did not match the one we sent: the data
+    /// was corrupted on the way, and the receiver deleted that file. Its own kind
+    /// on the SENDING side, because `Integrity`'s words are the receiver's ("the
+    /// file was deleted; the rest are in your download folder").
+    #[error("the peer's checksum of a file failed")]
+    PeerIntegrity,
+    /// The receiver could not write what it received (a full disk, no write
+    /// permission). The failure is on THEIR machine — `Io` would send the user
+    /// looking at their own disk.
+    #[error("the peer could not save the files")]
+    PeerIo,
+    /// The selection is more than one transfer may carry (file count, or the
+    /// total bytes of the file names), caught before anything is hashed or
+    /// dialed.
+    #[error("too many files: {0}")]
+    TooManyFiles(String),
+    /// The selection holds no files at all — only empty folders, say.
+    #[error("no files to send")]
+    NoFiles,
     #[error("cancelled")]
     Cancelled,
     /// A received file's SHA-256 did not match the sender-declared digest
@@ -79,7 +131,14 @@ pub enum LanBeamError {
 impl LanBeamError {
     /// Coarse machine-readable code for the `transfer_error` event's optional
     /// `code` field: `"declined" | "timeout" | "cancelled" | "peer_too_old" |
-    /// "integrity" | "io" | "protocol"`.
+    /// "integrity" | "text_dropped" | "unreachable" | "connection_lost" |
+    /// "peer_busy" | "peer_cancelled" | "peer_integrity" | "peer_io" |
+    /// "unsafe_path" | "io" | "protocol"`. The frontend's contract test reads
+    /// this match and fails on a code it has no words for.
+    ///
+    /// The receiver also sends its own code to the sender as the
+    /// `TransferAck.error` token; `transfer::peer_ack_error` turns it back into
+    /// the sender-side kind.
     /// WHY: the UI must tell "the peer said no" apart from a genuine failure
     /// without string-matching the human-oriented `error` text (M4.5), and the
     /// error strings themselves are NOT a stable contract.
@@ -96,6 +155,22 @@ impl LanBeamError {
             // surface it. Its own bucket so the UI can say something actionable
             // ("ask them to trust you") instead of "the connection failed".
             LanBeamError::TextRefused | LanBeamError::TextThrottled => "text_dropped",
+            // The peer could not be dialed at all — "can't reach them", not a
+            // disk error and not a broken conversation.
+            LanBeamError::Unreachable(_) => "unreachable",
+            // The peer's socket went away mid-conversation — not this machine's
+            // disk, and not a peer talking nonsense.
+            LanBeamError::ConnectionLost(_) => "connection_lost",
+            // What the receiver told us about its side. Each needs its own words:
+            // "busy" invites a retry, "cancelled" was a person, and an integrity
+            // or disk failure happened on THEIR machine.
+            LanBeamError::PeerBusy => "peer_busy",
+            LanBeamError::PeerCancelled => "peer_cancelled",
+            LanBeamError::PeerIntegrity => "peer_integrity",
+            LanBeamError::PeerIo => "peer_io",
+            // A name the receiver could not place safely — "the connection
+            // failed" sent people retrying something that can never work.
+            LanBeamError::UnsafePath(_) => "unsafe_path",
             LanBeamError::Io(_)
             | LanBeamError::Bind(_)
             | LanBeamError::Keyring(_)
@@ -195,6 +270,32 @@ mod tests {
             LanBeamError::TextTooLong.to_string(),
             "quick text is too long"
         );
+        assert_eq!(
+            LanBeamError::PairRejected("code".into()).to_string(),
+            "pairing rejected: code"
+        );
+        assert_eq!(
+            LanBeamError::InvalidAddress("x".into()).to_string(),
+            "invalid address: x"
+        );
+        assert_eq!(
+            LanBeamError::PairCodeMissing.to_string(),
+            "no pairing code provided"
+        );
+        assert_eq!(
+            LanBeamError::Unreachable("refused".into()).to_string(),
+            "unreachable: refused"
+        );
+        assert_eq!(
+            LanBeamError::ConnectionLost("reset".into()).to_string(),
+            "connection lost: reset"
+        );
+        assert_eq!(LanBeamError::PeerBusy.to_string(), "the peer is busy");
+        assert_eq!(
+            LanBeamError::TooManyFiles("12000".into()).to_string(),
+            "too many files: 12000"
+        );
+        assert_eq!(LanBeamError::NoFiles.to_string(), "no files to send");
     }
 
     #[test]
@@ -213,9 +314,37 @@ mod tests {
         assert_eq!(LanBeamError::Handshake("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::IdentityMismatch.ui_code(), "protocol");
         assert_eq!(LanBeamError::PeerNotFound.ui_code(), "protocol");
-        assert_eq!(LanBeamError::UnsafePath("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::Crypto("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::Protocol("x".into()).ui_code(), "protocol");
+        assert_eq!(
+            LanBeamError::Unreachable("x".into()).ui_code(),
+            "unreachable"
+        );
+        // Pairing-only kinds never ride a transfer_error event; they fall into
+        // the generic bucket like every other "conversation broke" kind.
+        assert_eq!(LanBeamError::PairRejected("x".into()).ui_code(), "protocol");
+        assert_eq!(
+            LanBeamError::InvalidAddress("x".into()).ui_code(),
+            "protocol"
+        );
+        assert_eq!(LanBeamError::PairCodeMissing.ui_code(), "protocol");
+        assert_eq!(LanBeamError::TextRefused.ui_code(), "text_dropped");
+        assert_eq!(
+            LanBeamError::ConnectionLost("x".into()).ui_code(),
+            "connection_lost"
+        );
+        assert_eq!(LanBeamError::PeerBusy.ui_code(), "peer_busy");
+        assert_eq!(LanBeamError::PeerCancelled.ui_code(), "peer_cancelled");
+        assert_eq!(LanBeamError::PeerIntegrity.ui_code(), "peer_integrity");
+        assert_eq!(LanBeamError::PeerIo.ui_code(), "peer_io");
+        assert_eq!(
+            LanBeamError::UnsafePath("x".into()).ui_code(),
+            "unsafe_path"
+        );
+        // Caught before a transfer exists, so they never ride transfer_error;
+        // the command error's kind carries them to the UI.
+        assert_eq!(LanBeamError::TooManyFiles("x".into()).ui_code(), "protocol");
+        assert_eq!(LanBeamError::NoFiles.ui_code(), "protocol");
     }
 
     #[test]

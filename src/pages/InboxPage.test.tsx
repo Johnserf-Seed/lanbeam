@@ -3,7 +3,7 @@
 // real sendops helpers would only toast browser-mode stubs — we mock the whole
 // module and assert the component calls the right op with the right args.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, renderUI, screen } from "../test/render";
+import { fireEvent, renderUI, screen, waitFor } from "../test/render";
 import i18n from "../i18n";
 import type { DiscoveredDevice } from "../bridge/api";
 import {
@@ -21,7 +21,7 @@ import InboxPage from "./InboxPage";
 // without touching the clipboard / opener plugins. errText stays a pass-through
 // so the forward-error path (which the component wraps in a toast) never throws.
 vi.mock("../lib/sendops", () => ({
-  copyText: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(true),
   errText: (e: unknown) => String(e),
   openDir: vi.fn(() => Promise.resolve()),
   openFile: vi.fn(() => Promise.resolve()),
@@ -145,6 +145,29 @@ describe("InboxPage category filter", () => {
     expect(screen.queryByText("vacation.png")).not.toBeInTheDocument();
     expect(screen.getByText("remember the milk")).toBeInTheDocument();
   });
+
+  it("counts characters the way a person does — an emoji is one (L27)", () => {
+    useInbox.setState({
+      items: [textItem({ text: "👍👍 ok", name: "👍👍 ok" })],
+      unread: 0,
+    });
+    renderUI(<InboxPage />);
+    expect(
+      screen.getByText(new RegExp(t("inbox.charCount", { count: 5 }))),
+    ).toBeInTheDocument();
+  });
+
+  it("a filter drops hidden rows from the selection — and so from 删除 (L25)", () => {
+    useInbox.setState({ items: [fileItem(), textItem()], unread: 0 });
+    renderUI(<InboxPage />);
+    fireEvent.click(screen.getByText("vacation.png"), { ctrlKey: true });
+    fireEvent.click(screen.getByText("remember the milk"), { ctrlKey: true });
+
+    fireEvent.click(screen.getByRole("button", { name: t("inbox.filterTxt") }));
+    fireEvent.click(screen.getByText(t("inbox.barDelete")));
+    // The photo was out of sight; it used to go too.
+    expect(useInbox.getState().items.map((i) => i.id)).toEqual(["f1"]);
+  });
 });
 
 describe("InboxPage row actions", () => {
@@ -167,7 +190,7 @@ describe("InboxPage row actions", () => {
     expect(sendops.openFile).toHaveBeenCalledWith("/dl/vacation.png");
   });
 
-  it("copies a text item's content via its 'copy' link", () => {
+  it("copies a text item's content via its 'copy' link", async () => {
     useInbox.setState({ items: [textItem()], unread: 0 });
     renderUI(<InboxPage />);
 
@@ -175,7 +198,22 @@ describe("InboxPage row actions", () => {
 
     expect(sendops.copyText).toHaveBeenCalledWith("remember the milk");
     // and the confirmation toast fired
-    expect(useToast.getState().msg).toBe(t("inbox.copiedText"));
+    await waitFor(() =>
+      expect(useToast.getState().msg).toBe(t("inbox.copiedText")),
+    );
+  });
+
+  it("a text saved without its body says so instead of copying nothing (M23)", () => {
+    const { text: _body, ...preview } = textItem();
+    useInbox.setState({ items: [preview], unread: 0 });
+    renderUI(<InboxPage />);
+
+    expect(
+      screen.getByText(new RegExp(t("inbox.previewOnly"))),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText(t("inbox.copyAction")));
+    expect(sendops.copyText).not.toHaveBeenCalled();
+    expect(useToast.getState().msg).toBe(t("inbox.textNotKept"));
   });
 });
 

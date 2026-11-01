@@ -2,8 +2,9 @@ import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
-import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
+import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
 import { resendTransfer, revealFile, transferErrText } from "../lib/sendops";
+import { useEscape } from "../lib/useEscape";
 import {
   sendFileFromPath,
   showToast,
@@ -78,8 +79,10 @@ export default function TransferDetail() {
   const removeTransfer = useTransfers((s) => s.removeTransfer);
   const downloadDir = useData((s) => s.downloadDir);
   const port = usePrefs((s) => s.port);
-  const verifyHash = usePrefs((s) => s.verifyHash);
   const recents = useRecents((s) => s.items);
+  useEscape(!!tr && tr.kind !== "text" && tr.via !== "browser", () =>
+    setDetail(null),
+  );
   if (!tr) return null;
   // Quick-text records (M7.3) and browser-share downloads (M8.4) live in the
   // history list only — they carry no session/paths, so this file-oriented
@@ -95,6 +98,8 @@ export default function TransferDetail() {
   // Parked on the concurrency gate (M6.7): no bytes moving yet, so the status
   // line reads "waiting for a slot" instead of a misleading 0.0 MB/s.
   const isQueued = tr.status === "queued";
+  // Sent, not yet accepted: the receiver's prompt is up (H10).
+  const isAwaiting = dir === "send" && isActive && !tr.accepted;
   const isTerminal = isDone || isError;
   // Every code translates at render time. This used to hand-translate three of
   // them and fall back to `tr.error` for the rest — and `tr.error` is the
@@ -112,6 +117,14 @@ export default function TransferDetail() {
   const pct = Math.min(tr.percent, 100);
   const doneBytes = (tr.totalSize * pct) / 100;
   const filesN = tr.files?.length ?? tr.fileCount ?? 1;
+  // What was actually verified (M13): the files whose own completion event
+  // said so. It used to be this machine's 完整性校验 setting — which decides
+  // what THIS machine sends; whether a receive carries checksums is the
+  // sender's setting, so the drawer reported 「SHA-256 校验通过 n/n」 for files
+  // nobody had checked.
+  const verifiedN = Object.values(tr.fileStat ?? {}).filter(
+    (f) => f.done && f.verified,
+  ).length;
   const etaStr = etaClock(tr.totalSize, tr.percent, tr.speedBps);
 
   const hist = tr.hist.slice(-40);
@@ -182,14 +195,14 @@ export default function TransferDetail() {
         when: tr.doneAt ? fmtWhen(tr.doneAt) : t("transfers.justNow"),
       }),
     });
-    if (verifyHash)
+    if (verifiedN > 0)
       evs.push({
         k: "verified",
         tm: `${durS}s`,
         dot: "var(--success)",
         tc: "var(--success)",
         title: t("detail.evVerified"),
-        sub: t("detail.evVerifiedSub", { n: filesN, total: filesN }),
+        sub: t("detail.evVerifiedSub", { n: verifiedN, total: filesN }),
       });
   } else if (isError) {
     evs.push({
@@ -250,10 +263,8 @@ export default function TransferDetail() {
       label = isCanceled ? t("detail.fileCanceled") : t("detail.fileFailed");
       color = isCanceled ? "var(--muted)" : "var(--danger)";
     } else if (isDone || doneBytes >= acc - 1) {
-      label =
-        dir === "receive" && isDone && verifyHash
-          ? t("detail.fileVerified")
-          : t("detail.fileDone");
+      // No event for this file, so nothing says it was verified.
+      label = t("detail.fileDone");
       color = "var(--success)";
     } else if (doneBytes > start) {
       hasBar = true;
@@ -296,9 +307,9 @@ export default function TransferDetail() {
 
   const footLeft =
     dir === "receive" && isDone
-      ? verifyHash
-        ? t("detail.footVerified", { n: filesN, total: filesN })
-        : t("detail.footVerifyOff")
+      ? verifiedN > 0
+        ? t("detail.footVerified", { n: verifiedN, total: filesN })
+        : t("detail.footNotVerified")
       : t("app.name");
   const footRight = dir === "receive" ? downloadDir : t("detail.footSendDir");
 
@@ -354,6 +365,8 @@ export default function TransferDetail() {
           </span>
           <button
             type="button"
+            aria-label={t("common.close")}
+            title={t("common.close")}
             onClick={() => setDetail(null)}
             style={{
               marginLeft: "auto",
@@ -383,7 +396,10 @@ export default function TransferDetail() {
             {firstName}
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-            {t("detail.sizeLine", { n: filesN, size: fmtBytes(tr.totalSize) })}
+            {t("detail.sizeLine", {
+              count: filesN,
+              size: fmtBytes(tr.totalSize),
+            })}
           </div>
           {!isDone && (
             <>
@@ -427,7 +443,13 @@ export default function TransferDetail() {
                     ? (errorText ?? t("transfers.statusFailed"))
                     : isQueued
                       ? t("transfers.queued")
-                      : `${(tr.speedBps / 1048576).toFixed(1)} MB/s`}
+                      : isAwaiting
+                        ? tr.sas
+                          ? t("transfers.awaitingAcceptSas", {
+                              sas: fmtSas(tr.sas),
+                            })
+                          : t("transfers.awaitingAccept")
+                        : `${(tr.speedBps / 1048576).toFixed(1)} MB/s`}
                 </span>
                 <span
                   style={{

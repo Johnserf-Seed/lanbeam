@@ -16,7 +16,6 @@
     "opener:default",
     "opener:allow-reveal-item-in-dir",
     "dialog:default",
-    "store:default",
     "clipboard-manager:allow-write-text",
     "clipboard-manager:allow-read-text"
   ]

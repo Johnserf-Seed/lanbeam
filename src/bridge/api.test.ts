@@ -6,7 +6,6 @@ import {
   cancelPairing,
   cancelTransfer,
   connectByAddr,
-  connectDevice,
   discardPartials,
   exportDiagnostics,
   getDownloadDir,
@@ -245,10 +244,6 @@ describe("discovery + secure channel stubs", () => {
     for (const d of devices) {
       expect(d.address).toMatch(/^192\.168\.1\./);
     }
-  });
-
-  it("connectDevice resolves the demo SAS", async () => {
-    await expect(connectDevice("demo-mini")).resolves.toBe("483921");
   });
 });
 

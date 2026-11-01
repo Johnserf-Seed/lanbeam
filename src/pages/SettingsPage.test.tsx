@@ -10,7 +10,7 @@ import type { MyIdentity, NetworkInfo, Settings } from "../bridge/api";
 import i18n from "../i18n";
 import { copyText } from "../lib/sendops";
 import { useData, useOverlays, usePrefs, useToast } from "../lib/store";
-import { fireEvent, renderUI, screen } from "../test/render";
+import { fireEvent, renderUI, screen, waitFor } from "../test/render";
 import SettingsPage from "./SettingsPage";
 
 vi.mock("../bridge/api", async (importOriginal) => {
@@ -34,7 +34,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
 
 vi.mock("../lib/sendops", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/sendops")>();
-  return { ...actual, copyText: vi.fn() };
+  return { ...actual, copyText: vi.fn().mockResolvedValue(true) };
 });
 
 // ── snapshots for reset ─────────────────────────────────────────────────────
@@ -164,14 +164,16 @@ describe("SettingsPage toggles → bridge setter + prefs mirror", () => {
 });
 
 describe("SettingsPage fingerprint copy", () => {
-  it("copies the deviceId and shows the copied toast", () => {
+  it("copies the deviceId and shows the copied toast", async () => {
     seed();
     renderUI(<SettingsPage />);
 
     fireEvent.click(screen.getByText(i18n.t("settings.copyFp")));
 
     expect(vi.mocked(copyText)).toHaveBeenCalledWith(DEVICE_ID);
-    expect(useToast.getState().msg).toBe(i18n.t("settings.fpCopied"));
+    await waitFor(() =>
+      expect(useToast.getState().msg).toBe(i18n.t("settings.fpCopied")),
+    );
   });
 });
 

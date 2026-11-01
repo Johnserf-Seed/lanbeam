@@ -314,7 +314,7 @@ fn quit_app(app: &AppHandle) {
         // Drain fire-and-forget trust/partials writes before app.exit(0), which
         // does not wait on the blocking pool — a just-made pairing/trust or
         // discard decision must not be lost on quit.
-        crate::flush_persistence(&state);
+        crate::flush_persistence(app, &state);
     }
     app.exit(0);
 }

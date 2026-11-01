@@ -31,7 +31,6 @@ tauri-plugin-opener = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"
-tauri-plugin-store = "2"
 # Quick-text (M7.3): write an incoming text to this machine's clipboard when
 # the receiver opted in. All-platform (no desktop-only split), so it lives here
 # rather than in the per-target block below.
@@ -66,6 +65,10 @@ tokio = { version = "1", features = ["rt-multi-thread", "net", "time", "sync", "
 # (M8.1a): `ReaderStream` streams a shared file into the axum response body.
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 uuid = { version = "1", features = ["v4"] }
+# The auto-organize date folder must use the LOCAL date (H8), and the local
+# offset needs the OS time-zone database — `clock` is chrono's reader for it.
+# Already in Cargo.lock (serde_with's optional dependency), so no new crates.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # ── M4: logging + diagnostics ──
 log = "0.4"

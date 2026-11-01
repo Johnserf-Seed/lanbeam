@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
+import { cancelTransfer } from "../bridge/api";
 import {
   showToast,
   shortFp,
@@ -16,7 +17,8 @@ import {
 import type { UITransfer } from "../lib/store";
 import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
-import { pickFiles, sendToDevice } from "../lib/sendops";
+import { beginSend, pickFiles } from "../lib/sendops";
+import { useEscape } from "../lib/useEscape";
 import { ExtChip, ModalHead } from "./ui";
 
 type WaitState = "waiting" | "ok" | "failed";
@@ -73,8 +75,6 @@ export default function SendModal() {
   const stripExif = usePrefs((s) => s.stripExif);
   const setPrefs = usePrefs((s) => s.set);
   const transfers = useTransfers((s) => s.transfers);
-  /** epoch ms when startSend fired — matches live transfers to pending rows */
-  const flowStart = useRef(0);
   // Guard against a slip-off press (mousedown inside, mouseup on scrim) closing
   // the modal — matches the other four modals. (A real click outside no longer
   // costs the selection either: it is kept as a draft, see onDismiss.)
@@ -99,20 +99,22 @@ export default function SendModal() {
   }[] =
     send?.step === "waiting"
       ? send.pending.map((p) => {
-          let best: UITransfer | undefined;
-          for (const tr of Object.values(transfers)) {
-            if (tr.direction !== "send" || tr.peerId !== p.deviceId) continue;
-            if (tr.startedAt < flowStart.current - 1000) continue;
-            if (!best || tr.startedAt > best.startedAt) best = tr;
-          }
+          // Exactly the session this row started (H11) — not the newest send
+          // to the same device, which could be another one.
+          const tr: UITransfer | undefined = p.sessionId
+            ? transfers[p.sessionId]
+            : undefined;
+          // "ok" means the receiver ACCEPTED (H10). The connection opening —
+          // transfer_started — used to count, so this step closed while the
+          // receiver's prompt was still up and the SAS was never seen here.
           const state: WaitState = p.failed
             ? "failed"
-            : best?.status === "error"
+            : tr?.status === "error"
               ? "failed"
-              : best?.started
+              : tr?.accepted
                 ? "ok"
                 : "waiting";
-          return { deviceId: p.deviceId, name: p.name, sas: best?.sas, state };
+          return { deviceId: p.deviceId, name: p.name, sas: tr?.sas, state };
         })
       : [];
   const allOk = waitRows.length > 0 && waitRows.every((r) => r.state === "ok");
@@ -129,6 +131,16 @@ export default function SendModal() {
         : t("send.sentAllToast"),
     );
   }, [allOk, waitCount, firstWaitName, closeSend, t]);
+
+  /** A click outside (or Escape) — easily a slip. The selection is kept, so
+   *  reopening the send resumes at this step (the store's dismissSend); once
+   *  requests are out there is nothing left to keep. */
+  const onDismiss = () => {
+    if (useOverlays.getState().send?.step === "waiting")
+      showToast(t("send.canceledToast"));
+    dismissSend();
+  };
+  useEscape(!!send, onDismiss);
 
   if (!send) return null;
 
@@ -162,10 +174,10 @@ export default function SendModal() {
       ? targets.length === 1
         ? t("send.subFilesTo", { name: targets[0].name })
         : targets.length > 1
-          ? t("send.subFilesToN", { n: targets.length })
+          ? t("send.subFilesToN", { count: targets.length })
           : t("send.subFilesPick")
       : step === "device"
-        ? t("send.subDevice", { n: selFiles.length, size: totalStr })
+        ? t("send.subDevice", { count: selFiles.length, size: totalStr })
         : step === "confirm"
           ? t("send.subConfirm")
           : t("send.subWaiting");
@@ -184,12 +196,19 @@ export default function SendModal() {
     if (step === "waiting") showToast(t("send.canceledToast"));
     closeSend();
   };
-  /** A click outside — easily a slip. The selection is kept, so reopening the
-   *  send resumes at this step (the store's dismissSend); once requests are out
-   *  there is nothing left to keep. */
-  const onDismiss = () => {
-    if (step === "waiting") showToast(t("send.canceledToast"));
-    dismissSend();
+
+  /** 取消未确认的请求 — what it says (M20): every request a receiver has not
+   *  accepted yet is cancelled, which also takes its prompt off their screen.
+   *  It used to be the × under another name — the requests stayed out there,
+   *  and the toast even said so. Accepted ones are streaming; they stay. */
+  const cancelWaiting = () => {
+    for (const p of send.pending) {
+      const tr = p.sessionId ? transfers[p.sessionId] : undefined;
+      if (p.sessionId && !p.failed && !tr?.accepted && tr?.status !== "error")
+        void cancelTransfer(p.sessionId);
+    }
+    closeSend();
+    showToast(t("send.waitingCanceledToast"));
   };
 
   const toggleSel = (key: string) =>
@@ -230,12 +249,15 @@ export default function SendModal() {
 
   const startSend = () => {
     if (!selFiles.length || !targets.length) return;
-    let ok = false;
     // Pass the confirm dialog's live "抹除图片元数据" choice (M9.1) explicitly,
-    // rather than letting sendToDevice fall back to the persisted default.
-    for (const d of targets) ok = sendToDevice(d, selFiles, stripExif) || ok;
-    if (!ok) {
-      // No real paths / no backend — sendToDevice already toasted honestly.
+    // rather than letting beginSend fall back to the persisted default.
+    const sessions = new Map<string, string>();
+    for (const d of targets) {
+      const id = beginSend(d, selFiles, stripExif);
+      if (id) sessions.set(d.deviceId, id);
+    }
+    if (!sessions.size) {
+      // No real paths / no backend — beginSend already toasted honestly.
       closeSend();
       return;
     }
@@ -245,20 +267,20 @@ export default function SendModal() {
       closeSend();
       showToast(
         trusted.length > 1
-          ? t("send.startTrustedToast", { n: trusted.length })
+          ? t("send.startTrustedToast", { count: trusted.length })
           : t("devices.startSendToast", {
-              n: selFiles.length,
+              count: selFiles.length,
               name: trusted[0].name,
             }),
       );
       return;
     }
-    flowStart.current = Date.now();
     patchSend({
       step: "waiting",
       pending: untrusted.map((d) => ({
         deviceId: d.deviceId,
         name: d.name,
+        sessionId: sessions.get(d.deviceId),
         ok: false,
       })),
       startedTrusted: trusted.length,
@@ -602,7 +624,7 @@ export default function SendModal() {
                 }}
               >
                 {send.deviceIds.length
-                  ? t("send.devLine", { n: send.deviceIds.length })
+                  ? t("send.devLine", { count: send.deviceIds.length })
                   : t("send.devNone")}
               </div>
               <button
@@ -792,7 +814,7 @@ export default function SendModal() {
                     color: "var(--muted)",
                   }}
                 >
-                  {t("send.moreFiles", { n: selFiles.length - 4 })}
+                  {t("send.moreFiles", { count: selFiles.length - 4 })}
                 </div>
               )}
               <div
@@ -804,7 +826,7 @@ export default function SendModal() {
                 }}
               >
                 <span style={{ fontSize: 11.5, color: "var(--muted2)" }}>
-                  {t("send.totalFiles", { n: selFiles.length })}
+                  {t("send.totalFiles", { count: selFiles.length })}
                 </span>
                 <span
                   style={{
@@ -882,7 +904,7 @@ export default function SendModal() {
               >
                 <span style={{ fontSize: 14, lineHeight: 1 }}>↑</span>
                 {targets.length > 1
-                  ? t("send.startN", { n: targets.length })
+                  ? t("send.startN", { count: targets.length })
                   : t("send.start")}
               </button>
             </div>
@@ -915,7 +937,7 @@ export default function SendModal() {
                   color: "var(--success)",
                 }}
               >
-                ✓ {t("send.waitingNote", { n: send.startedTrusted })}
+                ✓ {t("send.waitingNote", { count: send.startedTrusted })}
               </div>
             )}
             <div
@@ -1031,7 +1053,7 @@ export default function SendModal() {
                 type="button"
                 className="btn"
                 style={{ height: 32, padding: "0 18px", fontSize: 12.5 }}
-                onClick={onClose}
+                onClick={cancelWaiting}
               >
                 {t("send.cancelWaiting")}
               </button>
