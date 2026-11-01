@@ -139,6 +139,7 @@ export const ERR_KEYS: Record<string, string> = {
   SelfPeer: "errors.selfPeer",
   TextRefused: "errors.textRefused",
   TextThrottled: "errors.textThrottled",
+  TextTooLong: "errors.textTooLong",
   Protocol: "errors.protocol",
   Handshake: "errors.handshake",
   IdentityMismatch: "errors.identityMismatch",

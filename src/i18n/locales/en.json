@@ -475,7 +475,8 @@
     "keyring": "Couldn't access the system keychain",
     "selfPeer": "That address is this device — you can't add yourself as a peer",
     "textRefused": "It didn't get through — they only accept from devices they trust. Ask them to add you to their trust circle.",
-    "textThrottled": "Too many, too fast — the other device is throttling. Wait a moment."
+    "textThrottled": "Too many, too fast — the other device is throttling. Wait a moment.",
+    "textTooLong": "Text is too long for quick text — send it as a file instead"
   },
   "menu": {
     "cut": "Cut",
@@ -599,6 +600,7 @@
     "targetOffline": "“{{name}}” went offline — pick another, or wait for it to come back",
     "sentToast": "Sent to {{name}}",
     "sendFailed": "Send failed: {{err}}",
+    "tooLong": "Over the limit — send it as a file instead",
     "foot": "End-to-end encrypted · instant while online · also via the global shortcut",
     "noDevices": "No devices nearby",
     "noDevicesHint": "Devices on your network show up by themselves; one on another subnet needs pairing first",

@@ -628,8 +628,16 @@ async fn send_text_refuses_oversized_payload() {
     let huge = "z".repeat(MAX_TEXT_BYTES * 4);
     let res = send_text(&mut s, huge, Some(false)).await;
     assert!(
-        matches!(res, Err(LanBeamError::Protocol(_))),
+        matches!(res, Err(LanBeamError::TextTooLong)),
         "oversized text must be rejected: {res:?}"
+    );
+    // Within the raw byte cap, but every `"` escapes to two bytes — the frame
+    // overflows, and that must surface as the same TextTooLong, not Protocol.
+    let quoted = "\"".repeat(MAX_TEXT_BYTES);
+    let res = send_text(&mut s, quoted, Some(false)).await;
+    assert!(
+        matches!(res, Err(LanBeamError::TextTooLong)),
+        "escape-heavy text must be rejected: {res:?}"
     );
 
     drop(s);

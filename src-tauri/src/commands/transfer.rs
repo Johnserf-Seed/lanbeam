@@ -34,7 +34,7 @@ pub async fn send_text(
         return Err(LanBeamError::Protocol("no text to send".into()));
     }
     if text.len() > crate::consts::MAX_TEXT_BYTES {
-        return Err(LanBeamError::Protocol("text is too long".into()));
+        return Err(LanBeamError::TextTooLong);
     }
     let (addr, port, expected) = resolve_peer(&state, &device_id)?;
     let local_private = *state.identity.private_bytes();

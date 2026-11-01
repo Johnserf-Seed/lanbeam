@@ -556,4 +556,18 @@ mod tests {
         );
         assert_eq!(decode(&enc).unwrap(), Frame::Control(msg));
     }
+
+    /// The frontend counts a quick text against the frame cap BEFORE sending
+    /// (src/lib/quickText.ts), assuming a fixed 49-byte wrapper around the bare
+    /// ASCII text: kind byte + `{"t":"text_send","text":"` … `","to_clipboard":false}`.
+    /// Renaming a field or the tag changes that, so pin it here.
+    #[test]
+    fn text_send_frame_overhead_matches_ui_budget() {
+        let enc = encode_control(&AppMessage::TextSend {
+            text: "abc".into(),
+            to_clipboard: Some(false),
+        })
+        .unwrap();
+        assert_eq!(enc.len(), 3 + 49);
+    }
 }

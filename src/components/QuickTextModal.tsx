@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { showToast, useData, useOverlays } from "../lib/store";
+import { fmtBytes } from "../lib/format";
 import { isMac } from "../lib/platform";
+import { MAX_TEXT_BYTES, quickTextSize } from "../lib/quickText";
 import { errText, sendTextTracked } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
 import { MODAL_W, ModalHead, Toggle } from "./ui";
@@ -75,7 +77,10 @@ export default function QuickTextModal() {
   const targetName = live?.name ?? target?.name ?? "";
   // Gone offline: say so and wait — never send somewhere else instead.
   const offline = !!target && !live;
-  const canSend = !!text.trim() && !!live && !sending;
+  // Measured on the trimmed text — that is what goes out. Over the cap, the send
+  // is refused here; the backend would only answer TextTooLong anyway.
+  const size = quickTextSize(text.trim());
+  const canSend = !!text.trim() && size.fits && !!live && !sending;
 
   const send = async () => {
     if (!canSend) return;
@@ -209,6 +214,19 @@ export default function QuickTextModal() {
             resize: "none",
           }}
         />
+        {text.trim() && (
+          <div
+            style={{
+              margin: "6px 20px 0",
+              textAlign: "right",
+              fontSize: 11,
+              color: size.fits ? "var(--muted2)" : "var(--danger)",
+            }}
+          >
+            {!size.fits && `${t("qt.tooLong")} · `}
+            {fmtBytes(size.bytes)} / {fmtBytes(MAX_TEXT_BYTES)}
+          </div>
+        )}
         <div
           style={{
             display: "flex",

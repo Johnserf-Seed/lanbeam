@@ -190,10 +190,10 @@ pub async fn send_text(
     to_clipboard: Option<bool>,
 ) -> Result<()> {
     let frame = protocol::encode_control(&AppMessage::TextSend { text, to_clipboard })?;
+    // Escaping can push a text that is under MAX_TEXT_BYTES past the frame (a
+    // `"` or newline costs 2 bytes, a control char 6), so this is a separate check.
     if frame.len() > MAX_PLAINTEXT {
-        return Err(LanBeamError::Protocol(
-            "quick text is too large to send in one frame".into(),
-        ));
+        return Err(LanBeamError::TextTooLong);
     }
     let acked = tokio::time::timeout(MANIFEST_TIMEOUT, async {
         session.write_msg(&frame).await?;

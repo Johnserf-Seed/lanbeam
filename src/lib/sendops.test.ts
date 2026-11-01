@@ -89,6 +89,12 @@ describe("errText", () => {
     expect(errText({ kind: "PeerTooOld" })).not.toBe("PeerTooOld");
   });
 
+  it("says an over-long quick text is too long, not that the connection failed", () => {
+    const out = errText({ kind: "TextTooLong" });
+    expect(out).toBe(i18n.t("errors.textTooLong"));
+    expect(out).not.toBe(i18n.t("errors.protocol"));
+  });
+
   it("uses the kind and NEVER surfaces the internal English message", () => {
     // `message` is internal diagnostics (error.rs) — it must not reach the UI.
     const out = errText({
