@@ -1,4 +1,4 @@
-// Unit tests for the zustand stores + pure helpers in store.ts. The test env is
+// Unit tests for the zustand stores + pure helpers in store/. The test env is
 // non-Tauri (api.isTauri === false), so load()/trust writes take their
 // browser-mode branch (demo data / no IPC). Stores are reset to a captured
 // snapshot before each test so cases can't leak into one another.

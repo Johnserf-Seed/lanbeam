@@ -694,8 +694,9 @@ impl StripCtx {
             std::fs::create_dir_all(&self.base)?;
             // On Unix, lock the scratch dir to the owner (0700). The temp copies
             // are plaintext of the user's private photos, and the app-cache /tmp
-            // fallback (commands.rs) can land in a world-traversable directory —
-            // 0700 keeps another local user from reading them during the send.
+            // fallback (commands/transfer.rs) can land in a world-traversable
+            // directory — 0700 keeps another local user from reading them during
+            // the send.
             // No-op on Windows, where %LOCALAPPDATA%/%TEMP% are per-user ACL'd.
             #[cfg(unix)]
             {
