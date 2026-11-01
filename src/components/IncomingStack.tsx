@@ -218,7 +218,7 @@ export default function IncomingStack() {
             </div>
             <div style={{ fontSize: 11, color: "var(--muted)" }}>
               {t("incoming.subLine", {
-                n: front.fileCount,
+                count: front.fileCount,
                 size: fmtBytes(front.totalSize),
               })}
             </div>

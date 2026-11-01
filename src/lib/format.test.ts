@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import i18n from "../i18n";
 import {
   baseName,
+  etaClock,
   extOf,
   fmtBytes,
   fmtCountdown,
@@ -165,5 +166,16 @@ describe("fmtCountdown", () => {
     expect(fmtCountdown(0)).toBe("0:00");
     expect(fmtCountdown(-5_000)).toBe("0:00");
     expect(fmtCountdown(Number.NaN)).toBe("0:00");
+  });
+});
+
+describe("etaClock", () => {
+  it("is m:ss under an hour and h:mm:ss from an hour up (L26)", () => {
+    expect(etaClock(100 * MB, 50, MB)).toBe("0:50");
+    expect(etaClock(100 * MB, 0, MB / 30)).toBe("50:00");
+    // Two hours read "120:00".
+    expect(etaClock(7200 * MB, 0, MB)).toBe("2:00:00");
+    expect(etaClock(3725 * MB, 0, MB)).toBe("1:02:05");
+    expect(etaClock(MB, 0, 0)).toBe("");
   });
 });

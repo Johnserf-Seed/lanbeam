@@ -7,7 +7,6 @@
 //! so `download_root.join(rel)` can never escape the root. `resolve_and_open` adds a
 //! runtime canonicalize-and-contain check as defense-in-depth (e.g. a pre-existing
 //! symlink inside the root pointing outward). DESIGN §5.1.
-#![allow(dead_code)] // wired into the receive loop in M3-B
 
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;
@@ -45,7 +44,6 @@ pub enum RejectReason {
     NoValidComponents,
     TooManyComponents,
     TooLong,
-    EscapesDownloadRoot,
 }
 
 /// Pure lexical validation. No filesystem access, no side effects.

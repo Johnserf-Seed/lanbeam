@@ -39,11 +39,6 @@ export const LICENSES: LicenseEntry[] = [
     license: "MIT OR Apache-2.0",
   },
   {
-    name: "@tauri-apps/plugin-store",
-    version: "2.4.3",
-    license: "MIT OR Apache-2.0",
-  },
-  {
     name: "@tauri-apps/plugin-clipboard-manager",
     version: "2.3.2",
     license: "MIT OR Apache-2.0",
@@ -89,11 +84,6 @@ export const LICENSES: LicenseEntry[] = [
   {
     name: "tauri-plugin-dialog",
     version: "2.7.1",
-    license: "Apache-2.0 OR MIT",
-  },
-  {
-    name: "tauri-plugin-store",
-    version: "2.4.3",
     license: "Apache-2.0 OR MIT",
   },
   {

@@ -89,6 +89,23 @@ describe("TrustedPage", () => {
     expect(screen.getByText(i18n.t("trusted.hintFree"))).toBeInTheDocument();
   });
 
+  it("a drag in progress drops its window listeners on cancel and on unmount (L24)", () => {
+    seed([dev("d1", "Alice")], { d1: rec({ deviceId: "d1", name: "Alice" }) });
+    const off = vi.spyOn(window, "removeEventListener");
+    const view = renderUI(<TrustedPage />);
+    const chip = screen.getAllByText("Alice")[0];
+
+    fireEvent.pointerDown(chip, { button: 0, clientX: 5, clientY: 5 });
+    window.dispatchEvent(new Event("pointercancel"));
+    expect(off).toHaveBeenCalledWith("pointermove", expect.any(Function));
+
+    off.mockClear();
+    fireEvent.pointerDown(chip, { button: 0, clientX: 5, clientY: 5 });
+    view.unmount();
+    expect(off).toHaveBeenCalledWith("pointermove", expect.any(Function));
+    off.mockRestore();
+  });
+
   it("shows the selected peer's short fingerprint in the bar", () => {
     // shortFp("vjx0qm8d") → "VJX0 · QM8D"
     const id = "vjx0qm8d";

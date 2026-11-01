@@ -94,7 +94,7 @@ const PAIRS: [string, string, string][] = [
   ["src-tauri/src/commands.rs", "ShareStarted", "ShareStarted"],
   ["src-tauri/src/commands.rs", "ShareUpdated", "ShareUpdated"],
   ["src-tauri/src/commands.rs", "ShareEntry", "ShareEntry"],
-  ["src-tauri/src/commands.rs", "PartialDto", "Partial"],
+  ["src-tauri/src/commands.rs", "PartialDto", "PartialFile"],
   ["src-tauri/src/trust.rs", "TrustedPeerDto", "TrustedPeer"],
   ["src-tauri/src/share.rs", "ShareDownloadEvent", "ShareDownloadEvent"],
   ["src-tauri/src/discovery/mod.rs", "DiscoveredDevice", "DiscoveredDevice"],

@@ -57,7 +57,7 @@ export default function Header() {
     sub = t("titles.transfersSub", { running, history });
   } else if (pathname === "/inbox") {
     title = t("titles.inbox");
-    sub = t("titles.inboxSub", { n: inboxCount });
+    sub = t("titles.inboxSub", { count: inboxCount });
   } else if (pathname === "/trusted") {
     title = t("titles.trusted");
     sub = t("titles.trustedSub");

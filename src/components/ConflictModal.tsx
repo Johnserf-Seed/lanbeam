@@ -136,7 +136,7 @@ export default function ConflictModal() {
           </div>
           <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
             {extra > 0
-              ? t("conflict.subMulti", { n: extra })
+              ? t("conflict.subMulti", { count: extra })
               : t("conflict.sub")}
           </div>
         </div>

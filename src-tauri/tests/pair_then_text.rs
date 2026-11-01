@@ -3,8 +3,9 @@
 
 //! Cross-stage integration test (M7.1 + M7.3): the two v2 features COMPOSE over
 //! a single, reused host `TransportCtx`. First a device pairs (7.1) — the host
-//! stores it in the trust store and consumes the one-shot code — and THEN, on a
-//! fresh session against the SAME host state, that device pushes a quick text
+//! consumes the one-shot code, and the trust a human then confirms is recorded
+//! the way the UI records it — and THEN, on a fresh session against the SAME
+//! host state, that device pushes a quick text
 //! (7.3) which is delivered and acked. This is the one seam the isolated
 //! `pairing.rs` / `quick_text.rs` tests don't touch: it proves the shared host
 //! state (`trusted`, `in_flight`, `concurrency`, `pairing`) survives one M7
@@ -36,7 +37,7 @@ use lanbeam_lib::transport::TransportCtx;
 use lanbeam_lib::trust::TrustStore;
 
 /// Build the host `TransportCtx` once and reuse it across both sessions, so the
-/// trust granted by pairing is still present when the quick text arrives. Shares
+/// trust recorded after pairing is still present when the quick text arrives. Shares
 /// the caller's `pairing` state so the test can plant the active invitation.
 fn make_host_ctx<R: tauri::Runtime>(
     handle: tauri::AppHandle<R>,
@@ -68,8 +69,9 @@ fn make_host_ctx<R: tauri::Runtime>(
     }
 }
 
-/// Pair, then quick-text, against ONE host `TransportCtx`. The pair mutually
-/// trusts the joiner and consumes the code; the subsequent text from the same
+/// Pair, then quick-text, against ONE host `TransportCtx`. The pair consumes the
+/// code and trusts no one (that is the UI's step, once the SAS is compared); the
+/// subsequent text from the same
 /// device is delivered and acked — proving the two M7 features share the host's
 /// `handle_incoming` state without interfering.
 #[tokio::test]

@@ -566,45 +566,86 @@ fn corruption_diag(path: &std::path::Path) -> Option<String> {
     }
 }
 
+/// Persist `s` — on the blocking pool (L14). Every setter is a sync command,
+/// which Tauri runs on the MAIN thread, and the fsync below used to run there
+/// too: on a slow disk each toggle froze the window for as long as the write
+/// took. The snapshot is serialized here, in call order, and stamped; the write
+/// skips a stamp older than one already on disk, so a slow write of an earlier
+/// snapshot can never land after a later one. A deliberate exit, which does not
+/// wait for the pool, writes through [`save_now`] instead.
 pub fn save(app: &AppHandle, s: &Settings) {
-    // Serialize concurrent saves within this process. tauri-plugin-store used to
-    // provide this via its internal store mutex; writing the file ourselves, two
-    // command setters racing would otherwise share one temp path and could
-    // rename a half-written file. A poisoned lock (a writer panicked mid-save)
-    // degrades to a no-op — skipping one save beats racing an unknown on-disk
-    // state; the next setter re-persists the freshest snapshot anyway.
-    static SAVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let Ok(_guard) = SAVE_LOCK.lock() else {
-        return;
-    };
+    if let Some(job) = SaveJob::new(app, s) {
+        tauri::async_runtime::spawn_blocking(move || job.write());
+    }
+}
 
-    // Every degraded branch is logged (M4.6): a silently failed save means a
-    // security-relevant setting (recv_policy!) quietly reverts next launch
-    // while the user believes it changed. Logging is safe here — save only
-    // runs from commands, after the log plugin is registered (the pre-logger
-    // constraint applies to `load` alone).
-    let path = crate::paths::data_dir(app).join(store_file());
-    // Serialize the same `{"settings": {...}}` shape the plugin wrote, so `load`
-    // (and any older build still on the plugin) reads it back unchanged.
-    let json = match serde_json::to_value(s).map(|v| serde_json::json!({ KEY: v })) {
-        Ok(doc) => match serde_json::to_string_pretty(&doc) {
+/// [`save`], done before it returns.
+pub fn save_now(app: &AppHandle, s: &Settings) {
+    if let Some(job) = SaveJob::new(app, s) {
+        job.write();
+    }
+}
+
+/// The stamp of the newest save requested.
+static SAVE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The stamp of the newest save on disk — and the lock that serializes writes.
+/// tauri-plugin-store used to provide that via its internal store mutex;
+/// writing the file ourselves, two writes racing would otherwise share one
+/// temp path and could rename a half-written file. A poisoned lock (a writer
+/// panicked mid-save) degrades to a no-op — skipping one save beats racing an
+/// unknown on-disk state; the next setter re-persists the freshest snapshot.
+static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+
+/// One serialized snapshot, stamped, on its way to disk.
+struct SaveJob {
+    path: PathBuf,
+    json: String,
+    seq: u64,
+}
+
+impl SaveJob {
+    fn new(app: &AppHandle, s: &Settings) -> Option<SaveJob> {
+        // Every degraded branch is logged (M4.6): a silently failed save means a
+        // security-relevant setting (recv_policy!) quietly reverts next launch
+        // while the user believes it changed. Logging is safe here — save only
+        // runs from commands, after the log plugin is registered (the pre-logger
+        // constraint applies to `load` alone).
+        let path = crate::paths::data_dir(app).join(store_file());
+        // Serialize the same `{"settings": {...}}` shape the plugin wrote, so
+        // `load` (and any older build still on the plugin) reads it back unchanged.
+        let json = match serde_json::to_value(s)
+            .map(|v| serde_json::json!({ KEY: v }))
+            .and_then(|doc| serde_json::to_string_pretty(&doc))
+        {
             Ok(j) => j,
             Err(e) => {
                 log::warn!("settings serialize failed: {e}");
-                return;
+                return None;
             }
-        },
-        Err(e) => {
-            log::warn!("settings serialize failed: {e}");
-            return;
-        }
-    };
+        };
+        let seq = SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Some(SaveJob { path, json, seq })
+    }
 
-    // Atomic replace mirroring `TrustSnapshot::persist`: write a sibling temp,
-    // fsync it, then rename over the target. A crash or power loss mid-write
-    // leaves the OLD complete file or the NEW one, never the torn/zero-length
-    // blob the plugin's truncate-then-write could leave behind — which `load`
-    // would treat as wholesale corruption and reset every setting (recv_policy!).
+    fn write(self) {
+        let Ok(mut written) = WRITTEN.lock() else {
+            return;
+        };
+        if self.seq < *written {
+            return; // a later snapshot is already on disk
+        }
+        if write_atomically(&self.path, &self.json) {
+            *written = self.seq;
+        }
+    }
+}
+
+/// Atomic replace mirroring `TrustSnapshot::persist`: write a sibling temp,
+/// fsync it, then rename over the target. A crash or power loss mid-write
+/// leaves the OLD complete file or the NEW one, never the torn/zero-length
+/// blob the plugin's truncate-then-write could leave behind — which `load`
+/// would treat as wholesale corruption and reset every setting (recv_policy!).
+fn write_atomically(path: &std::path::Path, json: &str) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -617,9 +658,13 @@ pub fn save(app: &AppHandle, s: &Settings) {
         // bytes are still only in the page cache.
         f.sync_all()
     })();
-    if let Err(e) = written.and_then(|()| std::fs::rename(&tmp, &path)) {
-        log::warn!("settings save failed ({}): {e}", path.display());
-        let _ = std::fs::remove_file(&tmp);
+    match written.and_then(|()| std::fs::rename(&tmp, path)) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("settings save failed ({}): {e}", path.display());
+            let _ = std::fs::remove_file(&tmp);
+            false
+        }
     }
 }
 
@@ -633,6 +678,31 @@ mod tests {
     /// A blob written by an M1 build (only the 3 original fields) must parse,
     /// keep its stored values, and fill new fields with defaults — upgrading
     /// must never wipe the user's settings.
+    /// L14: settings are written off the calling thread, so two writes can
+    /// finish out of order — the older snapshot must never be the one left on
+    /// disk.
+    #[test]
+    fn an_older_settings_snapshot_never_overwrites_a_newer_one() {
+        let dir = std::env::temp_dir().join(format!("lanbeam-setseq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("settings.json");
+        let stamp = || SAVE_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        let older = SaveJob {
+            path: path.clone(),
+            json: "\"older\"".into(),
+            seq: stamp(),
+        };
+        let newer = SaveJob {
+            path: path.clone(),
+            json: "\"newer\"".into(),
+            seq: stamp(),
+        };
+        newer.write();
+        older.write();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "\"newer\"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The scale is clamped, and a NaN — which a hand-edited settings.json or a bad
     /// float can produce — falls back to 1.0. It must never reach `set_min_size`: a
     /// NaN window size resolves to no window at all.

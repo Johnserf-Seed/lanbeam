@@ -21,10 +21,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Runtime};
 
-/// Same clamp as `set_device_name`: names come from the UI *or from a peer's
-/// self-declared `DeviceInfo`*, and a hostile peer must not grow the persisted
-/// file (or the UI list) with an unbounded string.
-const MAX_NAME_CHARS: usize = 63;
+// Same clamp as `set_device_name`: names come from the UI *or from a peer's
+// self-declared `DeviceInfo`*, and a hostile peer must not grow the persisted
+// file (or the UI list) with an unbounded string.
+use crate::consts::MAX_NAME_CHARS;
 
 /// One trusted peer, keyed by its Device ID in [`TrustStore`].
 ///

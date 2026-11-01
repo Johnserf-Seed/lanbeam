@@ -144,6 +144,10 @@ export default function TrustedPage() {
   const escRef = useRef(false);
   const trustWrapRef = useRef<HTMLDivElement | null>(null);
   const listWrapRef = useRef<HTMLDivElement | null>(null);
+  // How to drop the window listeners of a drag in progress (L24): leaving the
+  // page mid-drag left them attached to the window for good.
+  const endDrag = useRef<(() => void) | null>(null);
+  useEffect(() => () => endDrag.current?.(), []);
   const roRef = useRef<ResizeObserver | null>(null);
 
   /* measure the circle cell (works for both the circle and list cells) */
@@ -328,9 +332,20 @@ export default function TrustedPage() {
       last = { x: nx, y: ny };
       setDrag({ id, pos: last });
     };
-    const up = () => {
+    // A cancelled pointer (the OS took it: a gesture, a lost capture) used to
+    // leave the drag stuck mid-air with its listeners attached (L24).
+    const stop = () => {
       window.removeEventListener("pointermove", mv);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      endDrag.current = null;
+    };
+    const cancel = () => {
+      stop();
+      setDrag(null);
+    };
+    const up = () => {
+      stop();
       setDrag(null);
       if (!moved) {
         setSel(id);
@@ -387,6 +402,8 @@ export default function TrustedPage() {
     };
     window.addEventListener("pointermove", mv);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    endDrag.current = stop;
   };
 
   /* ── drag: list-mode overview dots ──────────────────────────────────── */
@@ -415,9 +432,18 @@ export default function TrustedPage() {
       };
       setDrag({ id, pos: last });
     };
-    const up = () => {
+    const stop = () => {
       window.removeEventListener("pointermove", mv);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      endDrag.current = null;
+    };
+    const cancel = () => {
+      stop();
+      setDrag(null);
+    };
+    const up = () => {
+      stop();
       setDrag(null);
       if (!moved) {
         setSel(id);
@@ -434,6 +460,8 @@ export default function TrustedPage() {
     };
     window.addEventListener("pointermove", mv);
     window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    endDrag.current = stop;
   };
 
   /* ── list rows (search + trusted first) ─────────────────────────────── */

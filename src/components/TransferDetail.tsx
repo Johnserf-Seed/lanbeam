@@ -365,6 +365,8 @@ export default function TransferDetail() {
           </span>
           <button
             type="button"
+            aria-label={t("common.close")}
+            title={t("common.close")}
             onClick={() => setDetail(null)}
             style={{
               marginLeft: "auto",
@@ -394,7 +396,10 @@ export default function TransferDetail() {
             {firstName}
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2 }}>
-            {t("detail.sizeLine", { n: filesN, size: fmtBytes(tr.totalSize) })}
+            {t("detail.sizeLine", {
+              count: filesN,
+              size: fmtBytes(tr.totalSize),
+            })}
           </div>
           {!isDone && (
             <>

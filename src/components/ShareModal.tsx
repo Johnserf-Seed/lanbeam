@@ -322,7 +322,7 @@ export default function ShareModal() {
     : [];
   const shown = sharedFiles.length ? sharedFiles : pending;
   const sub = t("share.sub", {
-    n: entry?.fileCount ?? shown.length,
+    count: entry?.fileCount ?? shown.length,
     size: entry
       ? fmtBytes(entry.totalSize)
       : fmtBytes(shown.reduce((a, f) => a + (f.size ?? 0), 0)),
@@ -495,7 +495,7 @@ export default function ShareModal() {
                   fontVariantNumeric: "tabular-nums",
                 }}
               >
-                {t("share.dlCount", { n: entry?.downloads ?? 0 })}
+                {t("share.dlCount", { count: entry?.downloads ?? 0 })}
               </div>
             )}
             {link && (

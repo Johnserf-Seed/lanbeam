@@ -46,8 +46,14 @@ function flatKeys(o: Record<string, unknown>, p = ""): string[] {
       : [`${p}${k}`],
   );
 }
-const EN = new Set(flatKeys(en));
-const ZH = new Set(flatKeys(zh));
+/** A plural form's base key: `send.devLine_one` → `send.devLine`. The two
+ *  languages have different plural forms (English one/other, Chinese only
+ *  other), so they are compared by base key. */
+const PLURAL = /_(zero|one|two|few|many|other)$/;
+const EN_FULL = flatKeys(en);
+const ZH_FULL = flatKeys(zh);
+const EN = new Set(EN_FULL.map((k) => k.replace(PLURAL, "")));
+const ZH = new Set(ZH_FULL.map((k) => k.replace(PLURAL, "")));
 
 describe("the backend error contract", () => {
   it("parses the enum it guards (so a parser bug can't pass the rest)", () => {
@@ -107,5 +113,22 @@ describe("the backend error contract", () => {
   it("the two languages carry exactly the same keys", () => {
     expect([...EN].filter((k) => !ZH.has(k))).toEqual([]);
     expect([...ZH].filter((k) => !EN.has(k))).toEqual([]);
+  });
+
+  it("a plural has every form its language needs (L27)", () => {
+    // English needs one and other; Chinese has only other. A missing form
+    // renders the key name instead of the text.
+    const plurals = new Set(
+      [...EN_FULL, ...ZH_FULL]
+        .filter((k) => PLURAL.test(k))
+        .map((k) => k.replace(PLURAL, "")),
+    );
+    expect(plurals.size).toBeGreaterThan(0);
+    const missing = [...plurals].flatMap((k) => [
+      ...(EN_FULL.includes(`${k}_one`) ? [] : [`en ${k}_one`]),
+      ...(EN_FULL.includes(`${k}_other`) ? [] : [`en ${k}_other`]),
+      ...(ZH_FULL.includes(`${k}_other`) ? [] : [`zh ${k}_other`]),
+    ]);
+    expect(missing).toEqual([]);
   });
 });

@@ -174,10 +174,10 @@ export default function SendModal() {
       ? targets.length === 1
         ? t("send.subFilesTo", { name: targets[0].name })
         : targets.length > 1
-          ? t("send.subFilesToN", { n: targets.length })
+          ? t("send.subFilesToN", { count: targets.length })
           : t("send.subFilesPick")
       : step === "device"
-        ? t("send.subDevice", { n: selFiles.length, size: totalStr })
+        ? t("send.subDevice", { count: selFiles.length, size: totalStr })
         : step === "confirm"
           ? t("send.subConfirm")
           : t("send.subWaiting");
@@ -267,9 +267,9 @@ export default function SendModal() {
       closeSend();
       showToast(
         trusted.length > 1
-          ? t("send.startTrustedToast", { n: trusted.length })
+          ? t("send.startTrustedToast", { count: trusted.length })
           : t("devices.startSendToast", {
-              n: selFiles.length,
+              count: selFiles.length,
               name: trusted[0].name,
             }),
       );
@@ -624,7 +624,7 @@ export default function SendModal() {
                 }}
               >
                 {send.deviceIds.length
-                  ? t("send.devLine", { n: send.deviceIds.length })
+                  ? t("send.devLine", { count: send.deviceIds.length })
                   : t("send.devNone")}
               </div>
               <button
@@ -814,7 +814,7 @@ export default function SendModal() {
                     color: "var(--muted)",
                   }}
                 >
-                  {t("send.moreFiles", { n: selFiles.length - 4 })}
+                  {t("send.moreFiles", { count: selFiles.length - 4 })}
                 </div>
               )}
               <div
@@ -826,7 +826,7 @@ export default function SendModal() {
                 }}
               >
                 <span style={{ fontSize: 11.5, color: "var(--muted2)" }}>
-                  {t("send.totalFiles", { n: selFiles.length })}
+                  {t("send.totalFiles", { count: selFiles.length })}
                 </span>
                 <span
                   style={{
@@ -904,7 +904,7 @@ export default function SendModal() {
               >
                 <span style={{ fontSize: 14, lineHeight: 1 }}>↑</span>
                 {targets.length > 1
-                  ? t("send.startN", { n: targets.length })
+                  ? t("send.startN", { count: targets.length })
                   : t("send.start")}
               </button>
             </div>
@@ -937,7 +937,7 @@ export default function SendModal() {
                   color: "var(--success)",
                 }}
               >
-                ✓ {t("send.waitingNote", { n: send.startedTrusted })}
+                ✓ {t("send.waitingNote", { count: send.startedTrusted })}
               </div>
             )}
             <div

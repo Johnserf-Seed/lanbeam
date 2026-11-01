@@ -224,7 +224,7 @@ export type TransferEvent = {
   /** the peer — on a queued send (M25), the first event the row gets */
   deviceId?: string;
 };
-/** connect_device (fingerprint re-verify) emits sas_code without a session. */
+/** The SAS of an outgoing send, emitted once the connection is up (H10). */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };
 /** Silent network degradations surfaced by the backend (M4.6).
  *  Known kinds: "udp_recv_fallback" | "tcp_port_fallback"; future kinds must
@@ -708,12 +708,6 @@ export const listDiscoveredDevices = () =>
         })),
       );
 
-// M2: open an authenticated Noise channel to a peer; returns the SAS.
-export const connectDevice = (deviceId: string) =>
-  isTauri
-    ? invoke<string>("connect_device", { deviceId })
-    : Promise.resolve("483921");
-
 // M2: loopback self-test of the encrypted handshake; returns the SAS.
 
 // M3: file transfer. `stripExif` (M9.1) removes photo metadata (location,
@@ -764,8 +758,16 @@ export const resumeTransfer = (sessionId: string) =>
 
 // M6.4: discard the persisted resume state for a peer (forget every partial and
 // delete the half-written files). The counterpart to letting a transfer resume.
-/** One interrupted receive still holding bytes in the download folder. */
-export type Partial = {
+/** Requests still waiting for an answer (L23): a window that loaded after
+ *  their `incoming_file_request` events missed them. */
+export const pendingRequests = (): Promise<IncomingRequest[]> =>
+  isTauri
+    ? invoke<IncomingRequest[]>("pending_requests")
+    : Promise.resolve([] as IncomingRequest[]);
+
+/** One interrupted receive still holding bytes in the download folder. Not
+ *  `Partial`: that name shadowed TypeScript's own `Partial<T>` (L28). */
+export type PartialFile = {
   deviceId: string;
   name: string;
   written: number;
@@ -776,8 +778,8 @@ export type Partial = {
  *  `holiday.mp4`, 1.2 GB of 4 GB — so the download folder shows something that
  *  looks perfectly normal and plays for thirty seconds. The backend has always
  *  known about them (it is what makes resume work); nothing ever asked. */
-export const listPartials = (): Promise<Partial[]> =>
-  isTauri ? invoke<Partial[]>("list_partials") : Promise.resolve([]);
+export const listPartials = (): Promise<PartialFile[]> =>
+  isTauri ? invoke<PartialFile[]>("list_partials") : Promise.resolve([]);
 
 export const discardPartials = (deviceId: string) =>
   isTauri ? invoke<void>("discard_partials", { deviceId }) : Promise.resolve();

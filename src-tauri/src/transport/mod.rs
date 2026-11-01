@@ -174,9 +174,15 @@ pub fn spawn_listener(ctx: TransportCtx, degraded: Arc<Mutex<Vec<NetDegraded>>>,
                 let _ = ctx.app.emit("net_degraded", &event);
             }
         }
+        // Back off on accept errors (L8). They are usually not about one
+        // connection — out of file descriptors (EMFILE), out of memory — so an
+        // immediate retry fails again at once: it spun a core and filled the
+        // log until the condition passed.
+        let mut backoff = ACCEPT_BACKOFF_MIN;
         loop {
             match listener.accept().await {
                 Ok((stream, peer)) => {
+                    backoff = ACCEPT_BACKOFF_MIN;
                     let _ = stream.set_nodelay(true);
                     let c = ctx.clone();
                     tokio::spawn(async move {
@@ -194,10 +200,23 @@ pub fn spawn_listener(ctx: TransportCtx, degraded: Arc<Mutex<Vec<NetDegraded>>>,
                         }
                     });
                 }
-                Err(e) => log::warn!("accept error: {e}"),
+                Err(e) => {
+                    log::warn!("accept error: {e}; retrying in {backoff:?}");
+                    tokio::time::sleep(backoff).await;
+                    backoff = next_accept_backoff(backoff);
+                }
             }
         }
     });
+}
+
+/// The first wait after a failed `accept`, and the most it grows to (L8).
+const ACCEPT_BACKOFF_MIN: Duration = Duration::from_millis(50);
+const ACCEPT_BACKOFF_MAX: Duration = Duration::from_secs(2);
+
+/// Double the wait, up to [`ACCEPT_BACKOFF_MAX`].
+fn next_accept_backoff(cur: Duration) -> Duration {
+    (cur * 2).min(ACCEPT_BACKOFF_MAX)
 }
 
 /// Dial a peer and open an authenticated Noise channel, pinning `expected_id`.
@@ -255,6 +274,20 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L8: the wait after a failed accept doubles from 50 ms and stops at 2 s.
+    #[test]
+    fn accept_backoff_doubles_up_to_a_cap() {
+        let mut d = ACCEPT_BACKOFF_MIN;
+        let mut seen = vec![d];
+        for _ in 0..10 {
+            d = next_accept_backoff(d);
+            seen.push(d);
+        }
+        assert_eq!(seen[1], Duration::from_millis(100));
+        assert_eq!(*seen.last().unwrap(), ACCEPT_BACKOFF_MAX);
+        assert!(seen.windows(2).all(|w| w[0] <= w[1]));
+    }
     use crate::consts::NOISE_PARAMS;
     use snow::Builder;
 

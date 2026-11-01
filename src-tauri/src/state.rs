@@ -34,14 +34,24 @@ pub struct NetDegraded {
     pub detail: String,
 }
 
-/// Incoming prompts awaiting a UI answer: session_id → (park generation,
-/// decision sender). The generation is stamped at park time so the post-prompt
-/// cleanup only removes its OWN entry — a successor session that re-parked the
-/// same sender-chosen id in the interim must survive. See
-/// `transfer::park_pending`. The payload is a [`ReplyDecision`] (not a bare
-/// `bool`) so the ConflictModal (M6.5) can fold its collision choice into the
-/// same single ordered answer per prompt.
-pub type PendingMap = HashMap<String, (u64, oneshot::Sender<ReplyDecision>)>;
+/// Incoming prompts awaiting a UI answer, by session id. See
+/// `transfer::park_pending`.
+pub type PendingMap = HashMap<String, Parked>;
+
+/// One prompt waiting for the UI's answer.
+pub struct Parked {
+    /// Stamped at park time so the post-prompt cleanup only removes its OWN
+    /// entry — a successor session that re-parked the same sender-chosen id in
+    /// the interim must survive.
+    pub generation: u64,
+    /// Where the answer goes: a [`ReplyDecision`] (not a bare `bool`) so the
+    /// ConflictModal (M6.5) can fold its collision choice into the same single
+    /// ordered answer per prompt.
+    pub reply: oneshot::Sender<ReplyDecision>,
+    /// The `incoming_file_request` payload the prompt went out with — so a
+    /// window that loaded after the event can still show it (L23).
+    pub request: serde_json::Value,
+}
 
 /// How the receiver resolves a name that collides with an existing file on
 /// disk (M6.5). Chosen once per transfer — from the `conflict` setting, or,
@@ -93,10 +103,12 @@ impl ReplyDecision {
 }
 
 /// Shared registry of live per-session transfer controls (M6.1/6.2), keyed by
-/// session id. One entry exists for the whole chunk phase of a send/receive —
-/// registered when byte streaming starts, removed by [`TransferCtlGuard`] on
-/// every exit path — so cancel/pause/resume act on exactly the sessions moving
-/// bytes right now, and no-op gracefully for an id that already finished.
+/// session id. An entry exists for as long as a transfer can be cancelled — a
+/// send registers before it dials (so a cancel while it sets up or queues is
+/// honored), a receive once it is accepted — and [`TransferCtlGuard`] removes it
+/// on every exit path, so cancel/pause/resume act on exactly the live sessions
+/// and no-op gracefully for an id that already finished. Also what an inbound
+/// session's id is checked against, so it can't borrow one of ours (L12).
 /// Shared between [`AppState`] (the commands) and the listener's
 /// `TransportCtx` (receive registration).
 pub type TransfersCtl = Arc<Mutex<HashMap<String, TransferControl>>>;
@@ -450,9 +462,11 @@ pub struct PairRateLimiter {
 }
 
 impl PairRateLimiter {
-    /// Whether `ip` may still attempt: prunes its expired failures first, then
-    /// reports whether the surviving count is under the cap. Drops an emptied
-    /// entry so an IP that only ever succeeded (or aged out) leaves no residue.
+    /// Whether `ip` may still attempt, WITHOUT reserving anything — a probe for
+    /// tests. The pairing path always goes through [`reserve_attempt`].
+    ///
+    /// [`reserve_attempt`]: PairRateLimiter::reserve_attempt
+    #[cfg(test)]
     pub fn allowed(&mut self, ip: IpAddr, now: Instant) -> bool {
         match self.failures.get_mut(&ip) {
             None => true,
@@ -460,27 +474,8 @@ impl PairRateLimiter {
                 recent.retain(|t| {
                     now.saturating_duration_since(*t) < crate::consts::PAIR_FAILURE_WINDOW
                 });
-                let ok = (recent.len() as u32) < crate::consts::MAX_PAIR_FAILURES;
-                if recent.is_empty() {
-                    self.failures.remove(&ip);
-                }
-                ok
+                (recent.len() as u32) < crate::consts::MAX_PAIR_FAILURES
             }
-        }
-    }
-
-    /// Record one failed attempt for `ip` (a wrong/expired code). Bounds the map
-    /// afterwards so a source that fails once and never returns — leaving an entry
-    /// nothing would otherwise prune — cannot accumulate without limit.
-    pub fn record_failure(&mut self, ip: IpAddr, now: Instant) {
-        self.failures.entry(ip).or_default().push(now);
-        if self.failures.len() > crate::consts::MAX_PAIR_TRACKED_IPS {
-            evict_over_cap(
-                &mut self.failures,
-                now,
-                crate::consts::MAX_PAIR_TRACKED_IPS,
-                crate::consts::PAIR_FAILURE_WINDOW,
-            );
         }
     }
 
@@ -490,8 +485,8 @@ impl PairRateLimiter {
     /// (reserving its slot) and return `true`; at or over the cap, record nothing
     /// and return `false`.
     ///
-    /// WHY reserve at the gate instead of a read-only [`allowed`] now and a
-    /// [`record_failure`] later: those two lock acquisitions leave a window in
+    /// WHY reserve at the gate instead of checking now and recording a failure
+    /// later (which is how this started): two lock acquisitions leave a window in
     /// which N concurrent requests from one IP all read the same stale count and
     /// all pass before any records its failure — a brute-force burst far past the
     /// per-window budget. Reserving under the same guard as the check makes each
@@ -502,8 +497,6 @@ impl PairRateLimiter {
     /// successful pair drops it wholesale via [`clear`].
     ///
     /// [`MAX_PAIR_FAILURES`]: crate::consts::MAX_PAIR_FAILURES
-    /// [`allowed`]: PairRateLimiter::allowed
-    /// [`record_failure`]: PairRateLimiter::record_failure
     /// [`unreserve`]: PairRateLimiter::unreserve
     /// [`clear`]: PairRateLimiter::clear
     pub fn reserve_attempt(&mut self, ip: IpAddr, now: Instant) -> bool {
@@ -1092,15 +1085,15 @@ mod tests {
         let ip: IpAddr = Ipv4Addr::new(192, 168, 1, 9).into();
         let t0 = Instant::now();
 
-        // A source that never failed is always allowed, and leaves no residue.
-        assert!(r.allowed(ip, t0));
-
-        // Fill the failure budget within the window.
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, t0);
+        // Each attempt reserves a slot of the budget within the window.
+        for i in 0..MAX_PAIR_FAILURES {
+            assert!(
+                r.reserve_attempt(ip, t0),
+                "attempt {i} is within the budget"
+            );
         }
         assert!(
-            !r.allowed(ip, t0),
+            !r.reserve_attempt(ip, t0),
             "at the cap, further attempts are refused"
         );
 
@@ -1108,24 +1101,22 @@ mod tests {
         // admitted again.
         let later = t0 + PAIR_FAILURE_WINDOW + std::time::Duration::from_secs(1);
         assert!(
-            r.allowed(ip, later),
+            r.reserve_attempt(ip, later),
             "the window rolling off re-admits the source"
         );
 
         // A success (clear) forgets the tally at once, even mid-window.
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, later);
-        }
-        assert!(!r.allowed(ip, later));
+        while r.reserve_attempt(ip, later) {}
         r.clear(&ip);
-        assert!(r.allowed(ip, later), "clear resets the source immediately");
+        assert!(
+            r.reserve_attempt(ip, later),
+            "clear resets the source immediately"
+        );
 
         // A different source is unaffected by another's failures.
         let other: IpAddr = Ipv4Addr::new(10, 0, 0, 1).into();
-        for _ in 0..MAX_PAIR_FAILURES {
-            r.record_failure(ip, later);
-        }
-        assert!(r.allowed(other, later), "throttling is per-source");
+        while r.reserve_attempt(ip, later) {}
+        assert!(r.reserve_attempt(other, later), "throttling is per-source");
     }
 
     /// The failure map is bounded: recording one failure each from far more
@@ -1139,7 +1130,7 @@ mod tests {
         // Each IP fails exactly once and never returns — nothing would prune it.
         for i in 0..(MAX_PAIR_TRACKED_IPS as u32 + 500) {
             let ip: IpAddr = Ipv4Addr::from(i.wrapping_add(1)).into();
-            r.record_failure(ip, now);
+            r.reserve_attempt(ip, now);
         }
         assert!(
             r.tracked() <= MAX_PAIR_TRACKED_IPS,

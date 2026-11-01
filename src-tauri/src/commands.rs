@@ -146,39 +146,24 @@ pub fn get_listen_port(state: State<'_, AppState>) -> u16 {
     state.tcp_port.load(Ordering::Relaxed)
 }
 
-/// Open an authenticated Noise channel to a discovered peer, pinning its Device ID.
-/// Returns the 6-digit SAS; emits `sas_code`.
-#[tauri::command]
-pub async fn connect_device(
-    app: AppHandle,
-    state: State<'_, AppState>,
-    device_id: String,
-) -> Result<String, LanBeamError> {
-    let (addr, port, expected) = resolve_peer(&state, &device_id)?;
-    let local_private = *state.identity.private_bytes();
-    let mut sess = transport::connect(addr, port, &local_private, expected).await?;
-    let sas = sess.sas().to_string();
-    // Real opening dialogue instead of M2's plaintext probe (which the peer's
-    // decoder rejected as an unknown frame kind): introduce ourselves, read
-    // the peer's introduction, then bow out with a deliberate `Bye` that the
-    // responder swallows silently (M4.3). The SAS is only returned once that
-    // round-trip proves the channel speaks the real protocol.
-    let peer =
-        transfer::initiator_hello(&mut sess, transfer::local_device_name(&state.settings)).await?;
-    transfer::send_bye(&mut sess).await?;
-    log::info!(
-        "connect_device: {device_id} verified (proto v{}, name {:?})",
-        peer.version,
-        peer.name
-    );
-    let _ = app.emit(
-        "sas_code",
-        serde_json::json!({ "deviceId": device_id, "sas": sas }),
-    );
-    Ok(sas)
-}
-
 // ── pairing + IP direct connect (M7.1/7.2) ─────────────────────────────
+
+/// Keep a device reached by IP or pairing code dialable: in the manual table,
+/// which discovery's expiry never touches.
+fn remember_manual_peer(state: &AppState, device_id: &str, name: &str, ip: Ipv4Addr, port: u16) {
+    if let Ok(mut manual) = state.manual_peers.lock() {
+        crate::state::insert_manual_peer(
+            &mut manual,
+            device_id.to_string(),
+            ManualPeer {
+                name: name.to_string(),
+                addr: ip,
+                port,
+                last_used: Instant::now(),
+            },
+        );
+    }
+}
 
 /// A fresh pairing invitation: the 6-digit code, the pair link (`qr` — the
 /// same string a QR would carry), the address the other side must dial, and
@@ -349,11 +334,7 @@ pub async fn join_by_code(
             reason.unwrap_or_else(|| "pairing rejected".into()),
         ));
     }
-    let name = if peer_name.trim().is_empty() {
-        device_id.chars().take(8).collect()
-    } else {
-        peer_name
-    };
+    let name = transfer::peer_display_name(Some(&peer_name), &device_id, || None);
     // NO trust is granted here — the UI records it once the human has compared
     // the SAS below. See this command's doc comment.
     //
@@ -363,18 +344,7 @@ pub async fn join_by_code(
     // from `list_discovered_devices` and `resolve_peer` — a trusted peer no later
     // `send_text`/`send_files` could reach (PeerNotFound). The manual table keeps
     // it visible and dialable, independent of the discovery table's expiry.
-    if let Ok(mut manual) = state.manual_peers.lock() {
-        crate::state::insert_manual_peer(
-            &mut manual,
-            device_id.clone(),
-            ManualPeer {
-                name: name.clone(),
-                addr: target.ip,
-                port: target.port,
-                last_used: Instant::now(),
-            },
-        );
-    }
+    remember_manual_peer(&state, &device_id, &name, target.ip, target.port);
     Ok(ConnectResult {
         device_id,
         name,
@@ -406,31 +376,14 @@ pub async fn connect_by_addr(
     }
     let my_name = transfer::local_device_name(&state.settings);
     let peer = transfer::initiator_hello(&mut sess, my_name).await?;
-    // Bow out cleanly (like connect_device): the responder swallows the Bye.
+    // Bow out cleanly: the responder swallows the Bye.
     transfer::send_bye(&mut sess).await?;
-    let name = peer
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|n| !n.is_empty())
-        .map(String::from)
-        .unwrap_or_else(|| device_id.chars().take(8).collect());
+    let name = transfer::peer_display_name(peer.name.as_deref(), &device_id, || None);
     // Remember it so `list_discovered_devices` shows it and a later send can
     // reach it — discovery never announced it (a different subnet, or discovery
     // off on that box), so it lives in the manual table rather than the
     // discovery table (which the expiry loop would evict).
-    if let Ok(mut manual) = state.manual_peers.lock() {
-        crate::state::insert_manual_peer(
-            &mut manual,
-            device_id.clone(),
-            ManualPeer {
-                name: name.clone(),
-                addr: target.ip,
-                port: target.port,
-                last_used: Instant::now(),
-            },
-        );
-    }
+    remember_manual_peer(&state, &device_id, &name, target.ip, target.port);
     Ok(ConnectResult {
         device_id,
         name,
@@ -744,13 +697,7 @@ pub async fn send_files(
     // Per-transfer scratch dir for stripped temp copies (M9.1): app-private
     // cache, NOT the download dir, and its own subfolder so concurrent sends
     // never collide. The returned guard deletes it (and every temp) on drop.
-    let scratch_base = app
-        .path()
-        .app_cache_dir()
-        .unwrap_or_else(|_| std::env::temp_dir())
-        .join("lanbeam")
-        .join("send-scratch")
-        .join(&transfer_id);
+    let scratch_base = send_scratch_root(&app).join(&transfer_id);
     let (items, _scratch) = tauri::async_runtime::spawn_blocking(move || {
         // Refuse what the receiver would refuse — too many files, a name it
         // can't save — BEFORE hashing a single file (H7).
@@ -907,6 +854,34 @@ pub async fn send_files(
     }
 }
 
+/// Where the per-send scratch copies (stripped photos, M9.1) live.
+pub(crate) fn send_scratch_root(app: &AppHandle) -> PathBuf {
+    app.path()
+        .app_cache_dir()
+        .unwrap_or_else(|_| std::env::temp_dir())
+        .join("lanbeam")
+        .join("send-scratch")
+}
+
+/// Delete the scratch folders of sends that ended before `started` (L18). A
+/// send removes its own folder when it ends, but a crash or a kill skips that —
+/// and those are copies of the user's photos, left in a cache nothing else
+/// ever reads. Folders from this run are left alone.
+pub(crate) fn sweep_send_scratch(root: &Path, started: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t < started);
+        if stale {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
 /// Answer an incoming file request (fires the receive task's awaited oneshot).
 /// Removal is deliberately unconditional — whatever prompt is parked under
 /// this id right now is the one the user just answered; the parking session's
@@ -936,9 +911,23 @@ pub fn reply_file_request(
         };
         pending.remove(&session_id)
     };
-    if let Some((_, tx)) = taken {
-        let _ = tx.send(ReplyDecision { accept, conflict });
+    if let Some(parked) = taken {
+        let _ = parked.reply.send(ReplyDecision { accept, conflict });
     }
+}
+
+/// The requests still waiting for an answer, as their `incoming_file_request`
+/// payloads (L23). A request that arrived before the window had loaded — at
+/// login, with LanBeam starting minimized — emitted its event to nobody; the
+/// window asks for these once it is up, or the prompt would never show and
+/// the request would time out unanswered.
+#[tauri::command]
+pub fn pending_requests(state: State<'_, AppState>) -> Vec<serde_json::Value> {
+    state
+        .pending
+        .lock()
+        .map(|m| m.values().map(|p| p.request.clone()).collect())
+        .unwrap_or_default()
 }
 
 /// One interrupted file still on disk, waiting to be resumed or discarded.
@@ -1808,7 +1797,11 @@ fn update_settings(app: &AppHandle, state: &AppState, f: impl FnOnce(&mut settin
 
 #[tauri::command]
 pub fn set_device_name(app: AppHandle, state: State<'_, AppState>, name: String) {
-    let clamped: String = name.trim().chars().take(63).collect();
+    let clamped: String = name
+        .trim()
+        .chars()
+        .take(crate::consts::MAX_NAME_CHARS)
+        .collect();
     update_settings(&app, &state, |s| {
         s.device_name = if clamped.is_empty() {
             settings::default_device_name()
@@ -2240,6 +2233,24 @@ pub async fn reset_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// L18: scratch folders older than this run are removed; this run's stay.
+    #[test]
+    fn sweep_removes_scratch_left_by_an_earlier_run() {
+        let root = std::env::temp_dir().join(format!("lanbeam-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("old-send")).unwrap();
+        std::fs::write(root.join("old-send").join("IMG.jpg"), b"x").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let started = std::time::SystemTime::now();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::create_dir_all(root.join("this-run")).unwrap();
+
+        sweep_send_scratch(&root, started);
+        assert!(!root.join("old-send").exists(), "left by a crashed run");
+        assert!(root.join("this-run").exists(), "a send of this run");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// M2: a discard deletes a partial only in the folder it was written to,
     /// and only while it is still the length recorded. After a download-folder

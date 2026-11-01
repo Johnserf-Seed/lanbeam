@@ -157,7 +157,7 @@ export default function SettingsPage() {
   // Half-written files still in the download folder (M6.4). Loaded on mount and
   // after a clear; a transfer that ends while the page is open is rare enough
   // that a re-poll isn't worth the noise.
-  const [partials, setPartials] = useState<api.Partial[]>([]);
+  const [partials, setPartials] = useState<api.PartialFile[]>([]);
   const refreshPartials = () =>
     void api
       .listPartials()
@@ -168,7 +168,7 @@ export default function SettingsPage() {
   const discardAllPartials = async () => {
     const devices = [...new Set(partials.map((p) => p.deviceId))];
     await Promise.all(devices.map((d) => api.discardPartials(d)));
-    showToast(t("settings.partialsClearedToast", { n: partials.length }));
+    showToast(t("settings.partialsClearedToast", { count: partials.length }));
     refreshPartials();
   };
 
@@ -676,7 +676,7 @@ export default function SettingsPage() {
               <div className="set-label">{t("settings.partials")}</div>
               <div className="set-desc">
                 {t("settings.partialsDesc", {
-                  n: partials.length,
+                  count: partials.length,
                   size: fmtBytes(partials.reduce((a, p) => a + p.written, 0)),
                 })}
               </div>
