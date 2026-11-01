@@ -623,7 +623,12 @@ pub fn run() {
             // Global concurrency cap (M6.7): ONE gate shared by AppState (the
             // send command) and the listener's TransportCtx (receive), so the
             // cap bounds all in-flight transfers, both directions, together.
-            let concurrency = Arc::new(state::ConcurrencyGate::new());
+            // `set_max_concurrent` moves the cap from here on.
+            let concurrency = Arc::new(state::ConcurrencyGate::new(
+                settings::clamp_max_concurrent(
+                    settings.read().map(|s| s.max_concurrent).unwrap_or(0),
+                ),
+            ));
 
             // Pairing state (M7.1): the active code + per-source failure throttle,
             // shared by AppState (start/cancel commands) and the listener's
@@ -704,6 +709,8 @@ pub fn run() {
                     // text has no accept-prompt, so this bounds inbound text_received
                     // spam. Like in_flight, no AppState mirror.
                     text_rate: Arc::new(Mutex::new(state::TextRateLimiter::default())),
+                    // Listener-only per-source file-request throttle (M18).
+                    file_rate: Arc::new(Mutex::new(state::FileRequestRateLimiter::default())),
                 },
                 degraded.clone(),
                 listen_port,

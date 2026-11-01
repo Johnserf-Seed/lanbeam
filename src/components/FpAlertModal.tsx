@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import {
   showToast,
   trustList,
+  trustName,
   useData,
   useOverlays,
   useTrust,
@@ -81,7 +82,7 @@ export default function FpAlertModal() {
 
   if (!fpAlert || !record || !newDevice) return null;
   const close = () => setFpAlert(null);
-  const name = record.name;
+  const name = trustName(record) ?? record.name;
 
   /* Delete the remembered device. The key it stood for is not coming back — and
      if the new one really is that machine, it will earn its own record by

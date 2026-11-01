@@ -13,7 +13,7 @@ import TransfersPage from "./TransfersPage";
 // The page calls copyText (text rows) and resendTransfer (failed sends) on
 // interaction; mock both so we can assert the calls in browser mode.
 vi.mock("../lib/sendops", () => ({
-  copyText: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(true),
   resendTransfer: vi.fn(),
 }));
 import { copyText, resendTransfer } from "../lib/sendops";
@@ -133,6 +133,32 @@ describe("TransfersPage", () => {
         { exact: false },
       ),
     ).toBeNull();
+  });
+
+  it("a running receive says what has really been checked (M15)", () => {
+    // It said 「SHA-256 校验」 the whole time, checksums or not.
+    const recv = { ...active, direction: "receive" as const };
+    useTransfers.setState({ transfers: { act: recv } });
+    renderUI(<TransfersPage />);
+    expect(
+      screen.getByText(i18n.t("transfers.inFlight"), { exact: false }),
+    ).toBeTruthy();
+
+    act(() => {
+      useTransfers.setState({
+        transfers: {
+          act: {
+            ...recv,
+            fileStat: { 0: { percent: 100, done: true, verified: true } },
+          },
+        },
+      });
+    });
+    expect(
+      screen.getByText(i18n.t("transfers.verifiedSoFar", { n: 1 }), {
+        exact: false,
+      }),
+    ).toBeTruthy();
   });
 
   it("segmented filter hides History on 'active' and Running on 'done'", () => {

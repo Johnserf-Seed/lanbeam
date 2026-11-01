@@ -40,6 +40,7 @@ import {
   shortFp,
   showToast,
   syncTrustFromBackend,
+  trustName,
   useData,
   useInbox,
   useOverlays,
@@ -69,8 +70,8 @@ import {
  *  sender declared for this very session (M4.2), then discovery, then the
  *  fingerprint — never blank. */
 function peerNameOf(deviceId: string, senderName?: string): string {
-  const rec = useTrust.getState().records[deviceId];
-  if (rec?.name) return rec.name;
+  const known = trustName(useTrust.getState().records[deviceId]);
+  if (known) return known;
   if (senderName) return senderName;
   const dev = useData.getState().devices.find((d) => d.deviceId === deviceId);
   return dev?.name ?? shortFp(deviceId);
@@ -214,8 +215,15 @@ export default function AppShell() {
     return () => mq.removeEventListener("change", fn);
   }, []);
 
-  // Ghost mode auto-restore (临时隐身 1 小时后恢复).
+  // Ghost mode auto-restore (临时隐身 1 小时后恢复) — only once the backend's
+  // settings are in (M27). Restoring on mount raced the startup load: the
+  // restore cleared the ghost timer and turned discovery on, then the
+  // `get_settings` issued before it came back with discoverable=false and
+  // overwrote the optimistic value. The machine was visible; the UI and tray
+  // said hidden, and nothing would ever correct them.
+  const settingsLoaded = useData((s) => s.settings !== null);
   useEffect(() => {
+    if (!settingsLoaded) return;
     const check = () => {
       const { ghostUntil } = usePrefs.getState();
       const settings = useData.getState().settings;
@@ -232,7 +240,7 @@ export default function AppShell() {
     check();
     const id = setInterval(check, 30_000);
     return () => clearInterval(id);
-  }, []);
+  }, [settingsLoaded]);
 
   // Strip the browser out of the WebView: Ctrl+F's find bar, Ctrl+P, Ctrl+S,
   // Ctrl+U… none of that belongs in a packaged desktop app. See the module for
@@ -486,6 +494,18 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<TransferEvent>("transfer_started", (p) => {
+        // The collision question for an auto-accepted transfer went unanswered
+        // and the backend has carried on, keeping both (M6). The dialog still
+        // up for it is asking about something already decided: an answer now
+        // would be a no-op that claimed to have worked.
+        const ov = useOverlays.getState();
+        const asked = ov.conflict;
+        if (asked?.request.sessionId === p.sessionId) {
+          // What an answer would have recorded: the row's names and peer.
+          useTransfers.getState().acceptMeta(asked.request, asked.peerName);
+          ov.setConflict(null);
+          showToast(i18n.t("conflict.timedOutToast"));
+        }
         useTransfers.getState().upsert({
           sessionId: p.sessionId,
           direction: p.direction,
@@ -519,10 +539,19 @@ export default function AppShell() {
   useEffect(
     () =>
       api.onEvent<TransferEvent>("transfer_queued", (p) => {
+        // A queued send is the first event its row gets. A send this window
+        // started brings its record along (H11); for any other, the event
+        // names the device, or the row sat there blank (M25).
+        const tr = useTransfers.getState().transfers[p.sessionId];
+        const known =
+          tr?.peerId || useTransfers.getState().pendingSend[p.sessionId];
         useTransfers.getState().upsert({
           sessionId: p.sessionId,
           direction: p.direction,
           status: "queued",
+          ...(p.deviceId && !known
+            ? { peerId: p.deviceId, peerName: peerNameOf(p.deviceId) }
+            : {}),
         });
       }),
     [],
@@ -634,6 +663,11 @@ export default function AppShell() {
           error: p.error,
           errorCode: p.code,
         });
+        // Cancelled HERE — by this user, who already got 「已取消传输」 from the
+        // button they pressed. Saying 「传输失败 · 已取消」 on top of it (with the
+        // failure sound) treated their own click as something that went wrong
+        // (M21). The row still moves to history as cancelled.
+        if (p.code === "cancelled") return;
         // Say it out loud. Success gets a toast AND an OS notification; failure
         // used to get a row quietly turning red on a page nobody was looking at
         // — so a receive that ran for ten minutes and then deleted a corrupt

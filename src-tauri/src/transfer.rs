@@ -1578,7 +1578,13 @@ async fn send_reply_full(
 enum FileDisposition {
     /// Continue the partial at `disk_rel` (relative to the download root) from
     /// `offset` bytes — reopened as-is, its prefix folded back into the hasher.
-    Resume { disk_rel: PathBuf, offset: u64 },
+    /// `commit_name`: an overwrite's temp copy, to be renamed onto this name in
+    /// the same folder once the transfer succeeds (see `PartialRecord`).
+    Resume {
+        disk_rel: PathBuf,
+        offset: u64,
+        commit_name: Option<String>,
+    },
     /// A new file at `rel` (auto-organize prefix already applied) — resolve a
     /// collision with `conflict`.
     Fresh {
@@ -1663,6 +1669,9 @@ struct FileProgress {
     /// on interruption exactly as before M6.4.
     hashed: bool,
     bytes_written: u64,
+    /// Set while `path` is an overwrite's temp copy: the name, in the same
+    /// folder, it replaces once the whole transfer succeeds.
+    commit_name: Option<String>,
     /// Fully written, synced, and (if hashed) digest-matched. Such a file is
     /// whole, not partial — the error path leaves it on disk instead of deleting
     /// it because a LATER file in the same batch went bad. (Under `overwrite`
@@ -1787,10 +1796,11 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
             // Open per the plan. Resume reopens the exact recorded partial; a
             // fresh file resolves its collision (rename de-dupes, overwrite
             // replaces) — both uphold the sanitizer's containment invariant.
-            let (path, disk_rel, std_file, start_offset) = match &plan[i] {
+            let (path, disk_rel, std_file, start_offset, commit_name) = match &plan[i] {
                 FileDisposition::Resume {
                     disk_rel,
                     offset: recorded,
+                    commit_name,
                 } => {
                     // Use the EFFECTIVE offset (`resume_offsets_for_reply` may have
                     // zeroed it to a fresh restart), not the plan's original, so a
@@ -1818,31 +1828,57 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                             path.display()
                         )));
                     }
+                    // The temp copy of an interrupted overwrite: still owed its
+                    // rename onto the file it replaces (M9). Only ever a sibling
+                    // — one clean name component, joined to the partial's own
+                    // folder — so the containment the open above proved for that
+                    // folder covers the rename target too.
+                    let commit_name = commit_name.as_deref().filter(|n| is_single_clean_name(n));
+                    if let Some(name) = commit_name {
+                        overwrite_renames.push((path.clone(), path.with_file_name(name)));
+                    }
                     (
                         path,
                         disk_rel.to_string_lossy().replace('\\', "/"),
                         file,
                         offset,
+                        commit_name.map(String::from),
                     )
                 }
                 FileDisposition::Fresh { rel, conflict } => {
-                    let (path, file) = match conflict {
+                    let (path, file, commit_name) = match conflict {
                         ConflictAction::Overwrite => {
                             // Stream into a de-duped temp sibling; the replace of
                             // the real target happens only in the success arm, so
                             // an abort never destroys the original (finding).
                             let (temp, file, target) =
                                 sanitize::resolve_and_open_overwrite(rel, download_root)?;
-                            overwrite_renames.push((temp.clone(), target));
-                            (temp, file)
+                            // Nothing there to replace, and the "temp" IS the
+                            // target: a file like any other, not one waiting on
+                            // a commit. Treated as a temp, an interruption deleted
+                            // it even after it had arrived whole (M1).
+                            let commit_name = if temp != target {
+                                let name = target
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned());
+                                overwrite_renames.push((temp.clone(), target));
+                                name
+                            } else {
+                                None
+                            };
+                            (temp, file, commit_name)
                         }
-                        ConflictAction::Rename => sanitize::resolve_and_open(rel, download_root)?,
+                        ConflictAction::Rename => {
+                            let (path, file) = sanitize::resolve_and_open(rel, download_root)?;
+                            (path, file, None)
+                        }
                     };
                     (
                         path.clone(),
                         disk_rel_under_root(download_root, &path),
                         file,
                         0u64,
+                        commit_name,
                     )
                 }
             };
@@ -1860,6 +1896,7 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                 path: path.clone(),
                 hashed,
                 bytes_written: start_offset,
+                commit_name,
                 done: false,
             });
             let pi = progress.len() - 1;
@@ -1937,7 +1974,8 @@ async fn run_receive_core<F: FnMut(u64, u64)>(
                         on_progress(received, manifest.total_size);
                         on_file(FileEvent::Streaming {
                             index: i,
-                            name: &f.name,
+                            // The sanitized name, as on the prompt (M4).
+                            name: &progress[pi].identity.rel,
                             done: progress[pi].bytes_written,
                             total: f.size,
                         });
@@ -2108,6 +2146,43 @@ async fn fold_prefix(file: &mut tokio::fs::File, n: u64, hasher: &mut Sha256) ->
         remaining -= want as u64;
     }
     Ok(())
+}
+
+/// The file-request throttle (M18): a device in the trust store passes; anyone
+/// else is counted against its source address. A poisoned lock admits — the
+/// throttle is a nuisance guard, and failing it closed would stop every
+/// transfer from strangers for the rest of the run.
+fn admit_file_request<R: Runtime>(
+    ctx: &TransportCtx<R>,
+    session: &NoiseSession,
+    device_id: &str,
+) -> bool {
+    let known = ctx
+        .trusted
+        .read()
+        .map(|t| t.get(device_id).is_some())
+        .unwrap_or(false);
+    if known {
+        return true;
+    }
+    let Some(ip) = session.peer_addr().map(|a| a.ip()) else {
+        return true;
+    };
+    ctx.file_rate
+        .lock()
+        .map(|mut r| r.admit(ip, Instant::now()))
+        .unwrap_or(true)
+}
+
+/// Whether `name` is a single file name the sanitizer keeps exactly as it is:
+/// no separator, no `..`, nothing it would clean. A recorded commit name must
+/// be one before it is joined onto a folder (M9) — it comes from our own
+/// partials file, which is still no reason to ever rename onto `../x`.
+fn is_single_clean_name(name: &str) -> bool {
+    matches!(
+        sanitize::validate(name),
+        Decision::Accept(p) if p.components().count() == 1 && p.as_os_str() == name
+    )
 }
 
 /// The on-disk path of `path` RELATIVE to `download_root`, forward-slashed —
@@ -2391,6 +2466,17 @@ pub async fn handle_incoming<R: Runtime>(
         peer.version
     );
 
+    // Flood guard (M18), before anything costs: a stranger opening request
+    // after request would otherwise get a disk check per listed file, an event
+    // and — on the prompt path — a system notification, every time. Paired
+    // devices are known and not counted. Declined "busy", without a word to
+    // the UI: there is nothing to show anyone.
+    if !admit_file_request(ctx, &session, &device_id) {
+        log::warn!("declining {session_id} from {device_id}: too many requests from its address");
+        let _ = send_reply(&mut session, &session_id, false, Some(REPLY_BUSY.into())).await;
+        return Ok(());
+    }
+
     // Reject unsafe manifests before involving the user.
     if let Err(e) = validate_manifest(&manifest) {
         let _ = send_reply(
@@ -2496,16 +2582,20 @@ pub async fn handle_incoming<R: Runtime>(
     .await
     .map_err(|e| LanBeamError::Io(format!("file analysis task failed: {e}")))?;
 
-    let files: Vec<_> = manifest
-        .files
+    // Every name the prompt shows is the SANITIZED one (M4) — what the file
+    // will actually be called. The sender's own string can carry bidi controls
+    // and zero-width characters: "photo\u{202E}gnp.exe" reads as "photoexe.png"
+    // on the prompt while the file saved is "photognp.exe".
+    let files: Vec<_> = analyses
         .iter()
-        .map(|f| json!({ "name": f.name, "size": f.size }))
+        .zip(&manifest.files)
+        .map(|(a, f)| json!({ "name": a.identity.rel, "size": f.size }))
         .collect();
     // Files a fresh write would collide with — the ConflictModal's input (M6.5).
     let conflicts: Vec<_> = analyses
         .iter()
         .filter(|a| a.collides)
-        .map(|a| a.name.clone())
+        .map(|a| a.identity.rel.clone())
         .collect();
     // Files continuing a partial (M6.4) — informational for the UI.
     let resuming: Vec<_> = analyses
@@ -2513,7 +2603,7 @@ pub async fn handle_incoming<R: Runtime>(
         .filter_map(|a| {
             a.resume
                 .as_ref()
-                .map(|(_, off)| json!({ "name": a.name, "offset": off }))
+                .map(|r| json!({ "name": a.identity.rel, "offset": r.offset }))
         })
         .collect();
     let request_payload = json!({
@@ -2555,6 +2645,18 @@ pub async fn handle_incoming<R: Runtime>(
         let _ = ctx.app.emit("incoming_file_request", request_payload);
         (true, None)
     } else {
+        // A queue of unanswered prompts has an upper bound too (M18) — nobody
+        // answers sixteen at once, and each is another notification.
+        let crowded = ctx
+            .pending
+            .lock()
+            .map(|p| p.len() >= crate::consts::MAX_PENDING_PROMPTS)
+            .unwrap_or(false);
+        if crowded {
+            log::warn!("declining {session_id} from {device_id}: too many prompts already waiting");
+            let _ = send_reply(&mut session, &session_id, false, Some(REPLY_BUSY.into())).await;
+            return Ok(());
+        }
         // Ask the UI and wait for `reply_file_request` (timeout = decline).
         // The in-flight guard above already rejected duplicates, so a `None`
         // here means the pending lock is poisoned — decline defensively.
@@ -2592,7 +2694,25 @@ pub async fn handle_incoming<R: Runtime>(
             ),
         );
 
-        let decision = match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        // Wait for the answer — or for the sender to stop waiting (M12): it
+        // cancelled, quit, or lost the network. Nothing else would notice until
+        // someone answered a prompt with nobody on the other end, which then
+        // failed. `closed` reads nothing, so the answer winning leaves the stream
+        // untouched for the reply.
+        let answer = tokio::select! {
+            r = tokio::time::timeout(Duration::from_secs(120), rx) => r,
+            () = session.closed() => {
+                remove_pending_if_owner(&ctx.pending, &session_id, generation);
+                let e = LanBeamError::ConnectionLost("the sender hung up before an answer".into());
+                log::info!("{session_id}: {e}; withdrawing the prompt");
+                let _ = ctx.app.emit(
+                    "transfer_error",
+                    json!({ "sessionId": session_id, "error": e.to_string(), "code": e.ui_code() }),
+                );
+                return Err(e);
+            }
+        };
+        let decision = match answer {
             Ok(Ok(d)) => d,
             // Nobody answered. What that MEANS depends on what was asked. An
             // accept prompt unanswered is a "no" — silence must never become
@@ -2656,9 +2776,10 @@ pub async fn handle_incoming<R: Runtime>(
     let plan: Vec<FileDisposition> = analyses
         .iter()
         .map(|a| match &a.resume {
-            Some((disk_rel, offset)) => FileDisposition::Resume {
-                disk_rel: disk_rel.clone(),
-                offset: *offset,
+            Some(r) => FileDisposition::Resume {
+                disk_rel: r.disk_rel.clone(),
+                offset: r.offset,
+                commit_name: r.commit_name.clone(),
             },
             None => FileDisposition::Fresh {
                 rel: a.organized_rel.clone(),
@@ -2685,19 +2806,15 @@ pub async fn handle_incoming<R: Runtime>(
     // by what remains of the sender's `REPLY_TIMEOUT` (finding): if the gate
     // can't drain before that deadline, sending an accept would land on a socket
     // the sender already closed, so we decline "busy" instead and let both peers
-    // resolve deterministically. The rate cap (M6.7) is read at the same point,
-    // both from one settings read.
-    let (limit, rate_limit) = ctx
+    // resolve deterministically. Our own sends still waiting on THEIR receivers
+    // don't count here (see `ConcurrencyGate`). The rate cap (M6.7) is read at
+    // the same point.
+    let rate_limit = ctx
         .settings
         .read()
-        .map(|s| {
-            (
-                crate::settings::clamp_max_concurrent(s.max_concurrent),
-                crate::settings::rate_limit_bytes_per_sec(&s.rate_limit),
-            )
-        })
-        .unwrap_or((crate::settings::clamp_max_concurrent(0), None));
-    let _slot = match ctx.concurrency.try_acquire(limit) {
+        .map(|s| crate::settings::rate_limit_bytes_per_sec(&s.rate_limit))
+        .unwrap_or(None);
+    let _slot = match ctx.concurrency.try_acquire_receive() {
         Some(guard) => guard,
         None => {
             let _ = ctx.app.emit(
@@ -2731,7 +2848,7 @@ pub async fn handle_incoming<R: Runtime>(
                     );
                     return Err(LanBeamError::Cancelled);
                 }
-                r = tokio::time::timeout(gate_deadline, ctx.concurrency.acquire(limit)) => match r {
+                r = tokio::time::timeout(gate_deadline, ctx.concurrency.acquire_receive()) => match r {
                     Ok(g) => g,
                     Err(_) => {
                         let _ = send_reply(&mut session, &session_id, false, Some(REPLY_BUSY.into())).await;
@@ -2837,6 +2954,8 @@ pub async fn handle_incoming<R: Runtime>(
                     sha256: w.identity.sha256.clone(),
                     disk_rel: w.disk_rel.clone(),
                     bytes_written: w.bytes_written,
+                    commit_name: w.commit_name.clone(),
+                    root: Some(download_root.to_string_lossy().into_owned()),
                 })
                 .collect();
             // Scope removal to files this session OPENED (finding-1), NOT every
@@ -3261,13 +3380,19 @@ struct FileAnalysis {
     identity: FileIdentity,
     /// Where a FRESH copy lands (auto-organize prefix applied, pre-de-dupe).
     organized_rel: PathBuf,
-    /// `Some((disk_rel, offset))` when a valid persisted partial lets this file
-    /// continue instead of starting over.
-    resume: Option<(PathBuf, u64)>,
+    /// Set when a valid persisted partial lets this file continue instead of
+    /// starting over.
+    resume: Option<ResumeFrom>,
     /// A fresh write would collide with an existing file (feeds the conflict UI).
     collides: bool,
-    /// The sender's declared name, for event display.
-    name: String,
+}
+
+/// A persisted partial a file can continue from (M6.4) — `PartialRecord`'s
+/// fields that the receive needs.
+struct ResumeFrom {
+    disk_rel: PathBuf,
+    offset: u64,
+    commit_name: Option<String>,
 }
 
 /// Analyze every manifest file for resume (M6.4) and collision (M6.5). Resume is
@@ -3302,12 +3427,19 @@ fn analyze_files(
                 Some(p) => p.join(&rel),
                 None => rel.clone(),
             };
-            // Resume only a hashed file with a matching, intact on-disk partial.
+            // Resume only a hashed file with a matching, intact on-disk partial,
+            // written under the folder we are receiving into now: a partial left
+            // in the old folder is not the file of that name in the new one (M2).
             let resume = if f.sha256.is_some() {
                 partials
                     .read()
                     .ok()
                     .and_then(|s| s.lookup(device_id, &identity))
+                    .filter(|rec| {
+                        rec.root
+                            .as_deref()
+                            .is_none_or(|r| Path::new(r) == download_root)
+                    })
                     .filter(|rec| {
                         let disk = download_root.join(&rec.disk_rel);
                         match std::fs::symlink_metadata(&disk) {
@@ -3315,7 +3447,11 @@ fn analyze_files(
                             _ => false,
                         }
                     })
-                    .map(|rec| (PathBuf::from(&rec.disk_rel), rec.bytes_written))
+                    .map(|rec| ResumeFrom {
+                        disk_rel: PathBuf::from(&rec.disk_rel),
+                        offset: rec.bytes_written,
+                        commit_name: rec.commit_name.clone(),
+                    })
             } else {
                 None
             };
@@ -3327,7 +3463,6 @@ fn analyze_files(
                 organized_rel,
                 resume,
                 collides,
-                name: f.name.clone(),
             }
         })
         .collect()
@@ -5630,6 +5765,7 @@ mod tests {
         let plan = vec![FileDisposition::Resume {
             disk_rel: PathBuf::from("resumed.bin"),
             offset,
+            commit_name: None,
         }];
         let saved = loopback_planned(items, "t-resume", dl_dir.clone(), plan)
             .await
@@ -5780,6 +5916,324 @@ mod tests {
             !dl_dir.join("clash (1).bin").exists(),
             "the failed overwrite temp must be cleaned up"
         );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// `loopback_planned`, for a transfer expected to FAIL: the send's own
+    /// error is ignored, and the receive's result comes back with what it left
+    /// in its progress accumulator.
+    async fn loopback_failing(
+        items: Vec<SendItem>,
+        transfer_id: &'static str,
+        dl: PathBuf,
+        plan: Vec<FileDisposition>,
+    ) -> (Result<Vec<PathBuf>>, Vec<FileProgress>) {
+        let a_priv = priv_key();
+        let b_priv = priv_key();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut s = NoiseSession::handshake_responder(stream, &b_priv)
+                .await
+                .unwrap();
+            let manifest = read_manifest(&mut s).await.unwrap();
+            let mut progress = Vec::new();
+            let mut opened = Vec::new();
+            let res = run_receive_core(
+                &mut s,
+                &manifest,
+                &dl,
+                &TransferControl::neutral(),
+                &plan,
+                &mut progress,
+                &mut opened,
+                None,
+                &mut |_| {},
+                |_, _| {},
+            )
+            .await;
+            (res, progress)
+        });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
+            .await
+            .unwrap();
+        let _ = run_send(
+            &mut s,
+            transfer_id,
+            &items,
+            &TransferControl::neutral(),
+            None,
+            &mut |_| {},
+            |_, _| {},
+        )
+        .await;
+        drop(s);
+        receiver.await.unwrap()
+    }
+
+    /// M1: under the overwrite policy a file with NOTHING to replace is written
+    /// straight to its own name — it is not a temp copy waiting on a commit — so
+    /// a later file failing must leave it alone, exactly as under "rename". It
+    /// was treated as an uncommitted temp and deleted, finished or not.
+    #[tokio::test]
+    async fn overwrite_failure_keeps_finished_files_that_replaced_nothing() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m1-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        let first = src_dir.join("first.bin");
+        let second = src_dir.join("second.bin");
+        std::fs::write(&first, b"arrived whole").unwrap();
+        std::fs::write(&second, b"will fail its checksum").unwrap();
+
+        let mut items = build_send_list(&[first, second], true).unwrap();
+        assert_eq!(items[1].meta.name, "second.bin");
+        items[1].meta.sha256 = Some("00".repeat(32));
+        let plan = vec![
+            FileDisposition::Fresh {
+                rel: PathBuf::from("first.bin"),
+                conflict: ConflictAction::Overwrite,
+            },
+            FileDisposition::Fresh {
+                rel: PathBuf::from("second.bin"),
+                conflict: ConflictAction::Overwrite,
+            },
+        ];
+        let (res, _) = loopback_failing(items, "t-m1", dl_dir.clone(), plan).await;
+        assert!(matches!(res, Err(LanBeamError::Integrity(_))), "{res:?}");
+        assert_eq!(
+            std::fs::read(dl_dir.join("first.bin")).unwrap(),
+            b"arrived whole",
+            "the finished file that replaced nothing stays"
+        );
+        assert!(!dl_dir.join("second.bin").exists(), "the corrupt one goes");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// M9, the recording half: an overwrite interrupted mid-file keeps its temp
+    /// copy for a resume AND remembers which file that copy is to replace.
+    #[tokio::test]
+    async fn interrupted_overwrite_records_the_name_it_replaces() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m9rec-{}", std::process::id()));
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        std::fs::write(dl_dir.join("clash.bin"), b"the original").unwrap();
+
+        let a_priv = priv_key();
+        let b_priv = priv_key();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let declared = 100_000u64;
+        let sender = tokio::spawn(async move {
+            let stream = TcpStream::connect(addr).await.unwrap();
+            let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
+                .await
+                .unwrap();
+            for msg in [
+                AppMessage::FileListBegin {
+                    transfer_id: "t-m9rec".into(),
+                    total_size: declared,
+                    file_count: 1,
+                },
+                AppMessage::FileListEntry {
+                    file: FileMeta {
+                        name: "clash.bin".into(),
+                        size: declared,
+                        mtime: 0,
+                        mode: 0,
+                        sha256: Some("ab".repeat(32)),
+                    },
+                },
+                AppMessage::FileListEnd {
+                    transfer_id: "t-m9rec".into(),
+                },
+            ] {
+                send_control(&mut s, &msg).await.unwrap();
+            }
+            match recv_control(&mut s).await.unwrap() {
+                AppMessage::FileSendReply { accept: true, .. } => {}
+                other => panic!("expected accept, got {other:?}"),
+            }
+            s.write_msg(&protocol::encode_file_chunk(0, &vec![7u8; 30_000]).unwrap())
+                .await
+                .unwrap();
+            drop(s); // vanish mid-file
+        });
+
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut s = NoiseSession::handshake_responder(stream, &b_priv)
+            .await
+            .unwrap();
+        let manifest = read_manifest(&mut s).await.unwrap();
+        let plan = vec![FileDisposition::Fresh {
+            rel: PathBuf::from("clash.bin"),
+            conflict: ConflictAction::Overwrite,
+        }];
+        let mut progress = Vec::new();
+        let mut opened = Vec::new();
+        let res = run_receive_core(
+            &mut s,
+            &manifest,
+            &dl_dir,
+            &TransferControl::neutral(),
+            &plan,
+            &mut progress,
+            &mut opened,
+            None,
+            &mut |_| {},
+            |_, _| {},
+        )
+        .await;
+        sender.await.unwrap();
+
+        assert!(res.is_err(), "a truncated stream fails the receive");
+        assert_eq!(progress.len(), 1, "the temp copy is kept for a resume");
+        assert_eq!(progress[0].disk_rel, "clash (1).bin");
+        assert_eq!(progress[0].commit_name.as_deref(), Some("clash.bin"));
+        assert_eq!(
+            std::fs::read(dl_dir.join("clash.bin")).unwrap(),
+            b"the original",
+            "nothing is replaced until the whole transfer succeeds"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// M9, the resuming half: the continued temp copy ends where the overwrite
+    /// was always going to put it — on the original's name — instead of staying
+    /// a "(1)" second copy beside it.
+    #[tokio::test]
+    async fn resumed_overwrite_finishes_on_the_name_it_replaces() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m9res-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        let payload: Vec<u8> = (0..250_000u32).map(|i| (i % 251) as u8).collect();
+        let offset = 100_000u64;
+        let src_file = src_dir.join("clash.bin");
+        std::fs::write(&src_file, &payload).unwrap();
+        std::fs::write(dl_dir.join("clash.bin"), b"the original").unwrap();
+        std::fs::write(dl_dir.join("clash (1).bin"), &payload[..offset as usize]).unwrap();
+
+        let items = build_send_list(std::slice::from_ref(&src_file), true).unwrap();
+        let plan = vec![FileDisposition::Resume {
+            disk_rel: PathBuf::from("clash (1).bin"),
+            offset,
+            commit_name: Some("clash.bin".into()),
+        }];
+        let saved = loopback_planned(items, "t-m9res", dl_dir.clone(), plan)
+            .await
+            .expect("the resume completes");
+        assert_eq!(saved, vec![dl_dir.join("clash.bin")]);
+        assert_eq!(std::fs::read(dl_dir.join("clash.bin")).unwrap(), payload);
+        assert!(
+            !dl_dir.join("clash (1).bin").exists(),
+            "no second copy left behind"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// A recorded commit name is only ever a sibling's name: anything that is
+    /// not exactly one clean name component is ignored, and the resumed file
+    /// simply stays where it is.
+    #[tokio::test]
+    async fn a_commit_name_is_only_ever_one_clean_name() {
+        assert!(is_single_clean_name("clash.bin"));
+        assert!(!is_single_clean_name("../clash.bin"));
+        assert!(!is_single_clean_name("sub/clash.bin"));
+        assert!(!is_single_clean_name(""));
+        assert!(
+            !is_single_clean_name("photo\u{202E}gnp.exe"),
+            "a name the sanitizer would change is not clean"
+        );
+
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m9esc-{}", std::process::id()));
+        let src_dir = tmp.join("src");
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        let payload = b"0123456789abcdef".to_vec();
+        let src_file = src_dir.join("x.bin");
+        std::fs::write(&src_file, &payload).unwrap();
+        std::fs::write(dl_dir.join("x (1).bin"), &payload[..4]).unwrap();
+        let items = build_send_list(std::slice::from_ref(&src_file), true).unwrap();
+        let plan = vec![FileDisposition::Resume {
+            disk_rel: PathBuf::from("x (1).bin"),
+            offset: 4,
+            commit_name: Some("../x.bin".into()),
+        }];
+        let saved = loopback_planned(items, "t-m9esc", dl_dir.clone(), plan)
+            .await
+            .expect("the resume completes");
+        assert_eq!(saved, vec![dl_dir.join("x (1).bin")], "left where it was");
+        assert!(
+            !tmp.join("x.bin").exists(),
+            "nothing renamed out of the folder"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// M2: a partial recorded under one download folder is not resumed in
+    /// another — joined to the NEW folder its path names some other file. One
+    /// recorded before the field existed, or under this folder, still resumes.
+    #[test]
+    fn a_partial_from_another_download_folder_is_not_resumed() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m2an-{}", std::process::id()));
+        let dl_dir = tmp.join("downloads");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&dl_dir).unwrap();
+        std::fs::write(dl_dir.join("big.bin"), vec![0u8; 400]).unwrap();
+        let manifest = Manifest {
+            transfer_id: "t-m2".into(),
+            total_size: 1000,
+            files: vec![FileMeta {
+                name: "big.bin".into(),
+                size: 1000,
+                mtime: 0,
+                mode: 0,
+                sha256: Some("ab".repeat(32)),
+            }],
+        };
+        let analyse = |root: Option<String>| {
+            let store = RwLock::new(crate::partials::PartialsStore::load(tmp.join("p.json")));
+            store.write().unwrap().set_files(
+                "dev",
+                &[],
+                vec![PartialRecord {
+                    rel: "big.bin".into(),
+                    size: 1000,
+                    sha256: Some("ab".repeat(32)),
+                    disk_rel: "big.bin".into(),
+                    bytes_written: 400,
+                    commit_name: None,
+                    root,
+                }],
+            );
+            analyze_files(&manifest, &dl_dir, None, "dev", &store)
+        };
+        let elsewhere = tmp.join("old-downloads").to_string_lossy().into_owned();
+        assert!(
+            analyse(Some(elsewhere))[0].resume.is_none(),
+            "another folder"
+        );
+        assert!(
+            analyse(None)[0].resume.is_some(),
+            "a record from before the field"
+        );
+        let here = dl_dir.to_string_lossy().into_owned();
+        assert!(analyse(Some(here))[0].resume.is_some(), "this folder");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -6139,10 +6593,10 @@ mod tests {
     async fn queued_transfer_cancel_wins_over_full_gate() {
         use std::sync::Arc;
 
-        let gate = Arc::new(crate::state::ConcurrencyGate::new());
-        let _held = gate.try_acquire(1).expect("first slot is free");
+        let gate = Arc::new(crate::state::ConcurrencyGate::new(1));
+        let _held = gate.try_acquire_receive().expect("first slot is free");
         assert!(
-            gate.try_acquire(1).is_none(),
+            gate.try_acquire_receive().is_none(),
             "the gate is now full — the next transfer queues"
         );
 
@@ -6152,7 +6606,7 @@ mod tests {
         let outcome: Result<()> = tokio::select! {
             biased;
             _ = ctl.cancel.cancelled() => Err(LanBeamError::Cancelled),
-            _g = gate.acquire(1) => Ok(()),
+            _g = gate.acquire_receive() => Ok(()),
         };
         assert!(
             matches!(outcome, Err(LanBeamError::Cancelled)),

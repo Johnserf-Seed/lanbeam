@@ -20,6 +20,7 @@ import { isMac } from "../lib/platform";
 import { setZoom, UI_ZOOMS } from "../lib/uiZoom";
 import { playSound } from "../lib/sound";
 import type { SoundKind } from "../lib/sound";
+import { APP_VERSION } from "../lib/version";
 
 /* fingerprint display: 4 groups of 4 from the deviceId's alphanumerics */
 function fpGroups(deviceId: string): string {
@@ -364,11 +365,12 @@ export default function SettingsPage() {
     if (v === "ghost") showToast(t("vis.ghostToast"));
   };
 
-  const copyFp = () => {
+  const copyFp = async () => {
     const id = identity?.deviceId;
     if (!id) return;
-    copyText(id);
-    showToast(t("settings.fpCopied"));
+    showToast(
+      (await copyText(id)) ? t("settings.fpCopied") : t("common.copyFailed"),
+    );
   };
 
   const pill: { fg: string; bg: string; label: string } =
@@ -1267,13 +1269,15 @@ export default function SettingsPage() {
               className="set-desc"
               style={{ fontFamily: "var(--mono)", fontSize: 11 }}
             >
-              LanBeam v0.1.0
+              LanBeam v{APP_VERSION}
             </div>
           </div>
           <button
             type="button"
             className="btn sm ink"
-            onClick={() => showToast(t("settings.updateManual"))}
+            onClick={() =>
+              showToast(t("settings.updateManual", { v: APP_VERSION }))
+            }
           >
             {t("settings.checkUpdate")}
           </button>

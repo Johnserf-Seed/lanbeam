@@ -779,24 +779,22 @@ pub async fn send_files(
     // Concurrency gate (M6.7): cap simultaneously-streaming transfers across both
     // directions (the receive side draws from the same gate). Acquired BEFORE the
     // dial, so a queued send opens no socket until a slot frees; a lowered cap
-    // applies to sends not yet past this gate. The rate cap is read here too,
-    // from one settings read, and rides into run_send below.
-    let (limit, rate_limit) = state
+    // applies to sends not yet past this gate. Until the receiver accepts, the
+    // slot doesn't hold back receives (see `ConcurrencyGate`). The rate cap
+    // rides into run_send below.
+    let rate_limit = state
         .settings
         .read()
-        .map(|s| {
-            (
-                settings::clamp_max_concurrent(s.max_concurrent),
-                settings::rate_limit_bytes_per_sec(&s.rate_limit),
-            )
-        })
-        .unwrap_or((settings::clamp_max_concurrent(0), None));
-    let _slot = match state.concurrency.try_acquire(limit) {
+        .map(|s| settings::rate_limit_bytes_per_sec(&s.rate_limit))
+        .unwrap_or(None);
+    let slot = match state.concurrency.try_acquire_send() {
         Some(guard) => guard,
         None => {
+            // The device too (M25): a queued send is the first the transfer
+            // list hears of this session, and without it the row has no peer.
             let _ = app.emit(
                 "transfer_queued",
-                serde_json::json!({ "sessionId": transfer_id, "direction": "send" }),
+                serde_json::json!({ "sessionId": transfer_id, "direction": "send", "deviceId": device_id }),
             );
             // A cancel issued while QUEUED must win over the wait: without this
             // biased select the acquire ignores the already-registered cancel
@@ -813,7 +811,7 @@ pub async fn send_files(
                     );
                     return Err(LanBeamError::Cancelled);
                 }
-                g = state.concurrency.acquire(limit) => g,
+                g = state.concurrency.acquire_send() => g,
             }
         }
     };
@@ -854,7 +852,14 @@ pub async fn send_files(
     let mut last_pct = -1i64;
     let my_name = transfer::local_device_name(&state.settings);
     // Per-file progress/completion events (M6.8), shared impl with the receive side.
-    let mut on_file = transfer::file_event_sink(app.clone(), transfer_id.clone());
+    // The accept is also when this send starts counting against receives.
+    let mut sink = transfer::file_event_sink(app.clone(), transfer_id.clone());
+    let mut on_file = |event: transfer::FileEvent<'_>| {
+        if matches!(event, transfer::FileEvent::Accepted) {
+            slot.streaming();
+        }
+        sink(event);
+    };
     let res = async {
         // Introduce ourselves and learn the peer's version BEFORE the manifest
         // (M4.2) — the receiver shows our friendly name on its accept prompt,
@@ -1001,13 +1006,32 @@ pub fn discard_partials(state: State<'_, AppState>, device_id: String) {
     };
     // Snapshot the download root to resolve each partial's on-disk path; never
     // hold the settings/dir lock across the deletes.
-    let root = state.download_dir.read().ok().map(|d| d.clone());
-    if let Some(root) = root {
-        for rec in &removed {
-            let _ = std::fs::remove_file(root.join(&rec.disk_rel));
+    let current = state.download_dir.read().ok().map(|d| d.clone());
+    for rec in &removed {
+        if let Some(path) = partial_on_disk(rec, current.as_deref()) {
+            let _ = std::fs::remove_file(path);
         }
     }
     crate::partials::persist_async(snapshot);
+}
+
+/// The file a partial record names, if it is still the partial LanBeam wrote:
+/// under the folder it was written into (`root`; a record older than that field
+/// can only be taken to be under `current`), a regular file, and exactly the
+/// length recorded. Anything else is somebody's file that happens to have the
+/// name — after a download-folder change the same relative path names a file
+/// in the NEW folder, and a discard used to delete it (M2).
+fn partial_on_disk(
+    rec: &crate::partials::PartialRecord,
+    current: Option<&Path>,
+) -> Option<PathBuf> {
+    let root = match rec.root.as_deref() {
+        Some(r) => PathBuf::from(r),
+        None => current?.to_path_buf(),
+    };
+    let path = root.join(&rec.disk_rel);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    (meta.is_file() && meta.len() == rec.bytes_written).then_some(path)
 }
 
 // ── transfer control (M6.1/6.2) ────────────────────────────────────────
@@ -2092,6 +2116,8 @@ pub fn set_ui_zoom(app: AppHandle, state: State<'_, AppState>, zoom: f64) {
 pub fn set_max_concurrent(app: AppHandle, state: State<'_, AppState>, max: u32) {
     let clamped = settings::clamp_max_concurrent(max);
     update_settings(&app, &state, |s| s.max_concurrent = clamped);
+    // Live: a raise admits transfers already queued (M17).
+    state.concurrency.set_limit(clamped);
 }
 
 /// Set the per-transfer throughput cap (M6.7): `"unlimited"` or a positive
@@ -2214,6 +2240,45 @@ pub async fn reset_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// M2: a discard deletes a partial only in the folder it was written to,
+    /// and only while it is still the length recorded. After a download-folder
+    /// change the same relative name in the new folder is somebody's file.
+    #[test]
+    fn discard_only_touches_the_partial_it_recorded() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-m2d-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (old, new) = (tmp.join("old"), tmp.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join("a.bin"), vec![0u8; 400]).unwrap();
+        std::fs::write(new.join("a.bin"), vec![0u8; 400]).unwrap();
+        let rec = crate::partials::PartialRecord {
+            rel: "a.bin".into(),
+            size: 1000,
+            sha256: None,
+            disk_rel: "a.bin".into(),
+            bytes_written: 400,
+            commit_name: None,
+            root: Some(old.to_string_lossy().into_owned()),
+        };
+        assert_eq!(partial_on_disk(&rec, Some(&new)), Some(old.join("a.bin")));
+
+        let legacy = crate::partials::PartialRecord { root: None, ..rec };
+        assert_eq!(
+            partial_on_disk(&legacy, Some(&new)),
+            Some(new.join("a.bin")),
+            "a record from before the field: the current folder"
+        );
+        assert_eq!(partial_on_disk(&legacy, None), None);
+        std::fs::write(new.join("a.bin"), vec![0u8; 1000]).unwrap();
+        assert_eq!(
+            partial_on_disk(&legacy, Some(&new)),
+            None,
+            "not the length recorded: not ours"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     /// Known calendar anchors: the epoch itself, a famous round number
     /// (1e9 = 2001-09-09 01:46:40 UTC), and a leap day.
@@ -2487,7 +2552,7 @@ mod tests {
             partials: Arc::new(RwLock::new(crate::partials::PartialsStore::load(
                 tmp.join("partials.json"),
             ))),
-            concurrency: Arc::new(crate::state::ConcurrencyGate::new()),
+            concurrency: Arc::new(crate::state::ConcurrencyGate::new(3)),
             pairing: Arc::new(crate::state::PairingState::default()),
             manual_peers: Arc::new(Mutex::new(HashMap::new())),
             shares: crate::share::new_registry(),

@@ -406,9 +406,8 @@ function CopyButton({
         cursor: disabled ? "default" : "pointer",
         flex: "none",
       }}
-      onClick={() => {
-        copyText(value);
-        showToast(toast);
+      onClick={async () => {
+        showToast((await copyText(value)) ? toast : t("common.copyFailed"));
       }}
     >
       {t("common.copy")}
@@ -611,9 +610,12 @@ function HostView({
               type="button"
               className="btn sm"
               style={{ flex: "none", height: 28, fontSize: 11.5 }}
-              onClick={() => {
-                copyText(inv.qr);
-                showToast(t("pair.linkCopied"));
+              onClick={async () => {
+                showToast(
+                  (await copyText(inv.qr))
+                    ? t("pair.linkCopied")
+                    : t("common.copyFailed"),
+                );
               }}
             >
               {t("pair.copyLink")}

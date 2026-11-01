@@ -79,7 +79,6 @@ export default function TransferDetail() {
   const removeTransfer = useTransfers((s) => s.removeTransfer);
   const downloadDir = useData((s) => s.downloadDir);
   const port = usePrefs((s) => s.port);
-  const verifyHash = usePrefs((s) => s.verifyHash);
   const recents = useRecents((s) => s.items);
   useEscape(!!tr && tr.kind !== "text" && tr.via !== "browser", () =>
     setDetail(null),
@@ -118,6 +117,14 @@ export default function TransferDetail() {
   const pct = Math.min(tr.percent, 100);
   const doneBytes = (tr.totalSize * pct) / 100;
   const filesN = tr.files?.length ?? tr.fileCount ?? 1;
+  // What was actually verified (M13): the files whose own completion event
+  // said so. It used to be this machine's 完整性校验 setting — which decides
+  // what THIS machine sends; whether a receive carries checksums is the
+  // sender's setting, so the drawer reported 「SHA-256 校验通过 n/n」 for files
+  // nobody had checked.
+  const verifiedN = Object.values(tr.fileStat ?? {}).filter(
+    (f) => f.done && f.verified,
+  ).length;
   const etaStr = etaClock(tr.totalSize, tr.percent, tr.speedBps);
 
   const hist = tr.hist.slice(-40);
@@ -188,14 +195,14 @@ export default function TransferDetail() {
         when: tr.doneAt ? fmtWhen(tr.doneAt) : t("transfers.justNow"),
       }),
     });
-    if (verifyHash)
+    if (verifiedN > 0)
       evs.push({
         k: "verified",
         tm: `${durS}s`,
         dot: "var(--success)",
         tc: "var(--success)",
         title: t("detail.evVerified"),
-        sub: t("detail.evVerifiedSub", { n: filesN, total: filesN }),
+        sub: t("detail.evVerifiedSub", { n: verifiedN, total: filesN }),
       });
   } else if (isError) {
     evs.push({
@@ -256,10 +263,8 @@ export default function TransferDetail() {
       label = isCanceled ? t("detail.fileCanceled") : t("detail.fileFailed");
       color = isCanceled ? "var(--muted)" : "var(--danger)";
     } else if (isDone || doneBytes >= acc - 1) {
-      label =
-        dir === "receive" && isDone && verifyHash
-          ? t("detail.fileVerified")
-          : t("detail.fileDone");
+      // No event for this file, so nothing says it was verified.
+      label = t("detail.fileDone");
       color = "var(--success)";
     } else if (doneBytes > start) {
       hasBar = true;
@@ -302,9 +307,9 @@ export default function TransferDetail() {
 
   const footLeft =
     dir === "receive" && isDone
-      ? verifyHash
-        ? t("detail.footVerified", { n: filesN, total: filesN })
-        : t("detail.footVerifyOff")
+      ? verifiedN > 0
+        ? t("detail.footVerified", { n: verifiedN, total: filesN })
+        : t("detail.footNotVerified")
       : t("app.name");
   const footRight = dir === "receive" ? downloadDir : t("detail.footSendDir");
 

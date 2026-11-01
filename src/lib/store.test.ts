@@ -14,11 +14,14 @@ import {
   histWindowMs,
   inboxFromText,
   inboxFromTransfer,
+  KEPT_TEXT_CHARS,
+  keepRecentTexts,
   resolvedTheme,
   sendFileFromPath,
   shortFp,
   transferList,
   trustList,
+  trustName,
   useData,
   useInbox,
   useOverlays,
@@ -714,6 +717,69 @@ describe("useTrust.touch", () => {
   });
 });
 
+describe("useTrust.rename (M7)", () => {
+  const dev = (id: string, name: string): DiscoveredDevice => ({
+    deviceId: id,
+    name,
+    address: "1.1.1.1",
+    port: 1,
+  });
+
+  it("is a local alias the device's own name can't overwrite", () => {
+    useTrust.getState().setTrust({ deviceId: "d1", name: "MacBook" }, true);
+    useTrust.getState().rename("d1", "Desk");
+    // Every discovery event and every received transfer refreshes the
+    // device's own name — they used to take the rename with them.
+    useTrust.getState().touch("d1", "MacBook Pro");
+    useTrust.getState().hydrate([
+      {
+        deviceId: "d1",
+        name: "MacBook Pro",
+        autoAccept: true,
+        pairedAt: 1,
+        lastSeen: 2,
+      },
+    ]);
+    const r = useTrust.getState().records.d1;
+    expect(r.name).toBe("MacBook Pro");
+    expect(r.alias).toBe("Desk");
+    expect(trustName(r)).toBe("Desk");
+    expect(trustList([], useTrust.getState().records)[0].name).toBe("Desk");
+    expect(
+      trustList([dev("d1", "MacBook Pro")], useTrust.getState().records)[0]
+        .name,
+    ).toBe("Desk");
+  });
+
+  it("renaming back to the device's own name clears the alias", () => {
+    useTrust.getState().setTrust({ deviceId: "d1", name: "MacBook" }, true);
+    useTrust.getState().rename("d1", "Desk");
+    useTrust.getState().rename("d1", "MacBook");
+    expect(useTrust.getState().records.d1.alias).toBeUndefined();
+  });
+
+  it("an unknown device's rename keeps its live name as its own", () => {
+    useData.setState({ devices: [dev("u1", "Phone")] });
+    useTrust.getState().rename("u1", "Kid's phone");
+    expect(useTrust.getState().records.u1).toMatchObject({
+      name: "Phone",
+      alias: "Kid's phone",
+      trusted: false,
+    });
+  });
+
+  it("the fingerprint check still compares the device's own name", () => {
+    useTrust.getState().setTrust({ deviceId: "old", name: "Laptop" }, true);
+    useTrust.getState().rename("old", "Work");
+    const row = trustList(
+      [dev("new", "Laptop")],
+      useTrust.getState().records,
+    ).find((r) => r.deviceId === "old");
+    expect(row?.name).toBe("Work");
+    expect(row?.fpChanged).toEqual({ newDeviceId: "new" });
+  });
+});
+
 describe("useTrust.remove", () => {
   it("deletes a record and clears the selection if it pointed at it", () => {
     useTrust.getState().setTrust({ deviceId: "d1", name: "A" }, true);
@@ -1075,6 +1141,56 @@ describe("历史记录保留 (histKeep)", () => {
     expect(useTransfers.getState().transfers.justNow).toBeDefined();
   });
 
+  it("「不保留」 drops the history restored at launch, and clears it from disk (M22)", () => {
+    // History from an earlier run — exactly what 「不保留」 says not to keep —
+    // used to stay on screen AND on disk (nothing was written) until some
+    // transfer happened to finish, so it came back on every restart.
+    localStorage.setItem(
+      "lanbeam.transfers",
+      JSON.stringify({
+        state: {
+          transfers: { old: { sessionId: "old", status: "done", doneAt: 1 } },
+        },
+      }),
+    );
+    useTransfers.setState({
+      transfers: {
+        old: { sessionId: "old", status: "done", doneAt: 1 } as never,
+        justNow: {
+          sessionId: "justNow",
+          status: "done",
+          doneAt: Date.now(),
+        } as never,
+      },
+    });
+    usePrefs.getState().set({ histKeep: "none" });
+    useTransfers.getState().pruneHistory();
+    const left = useTransfers.getState().transfers;
+    expect(left.old).toBeUndefined();
+    expect(left.justNow).toBeDefined();
+    const saved = localStorage.getItem("lanbeam.transfers");
+    expect(saved ? JSON.parse(saved).state.transfers : {}).toEqual({});
+  });
+
+  it("「不保留」 also takes this run's finished rows off the disk (M22)", () => {
+    // Finished under 30 天 — so it was saved — then the setting changed. The
+    // row stays on screen this run; it must not come back after a restart.
+    usePrefs.getState().set({ histKeep: "30d" });
+    useTransfers.getState().upsert({
+      sessionId: "today",
+      direction: "send",
+      status: "done",
+      doneAt: Date.now(),
+    });
+    expect(localStorage.getItem("lanbeam.transfers")).toContain("today");
+    usePrefs.getState().set({ histKeep: "none" });
+    useTransfers.getState().pruneHistory();
+    expect(useTransfers.getState().transfers.today).toBeDefined();
+    expect(localStorage.getItem("lanbeam.transfers") ?? "").not.toContain(
+      "today",
+    );
+  });
+
   it("「永久保留」 keeps even an ancient row", () => {
     useTransfers.setState({
       transfers: {
@@ -1088,6 +1204,70 @@ describe("历史记录保留 (histKeep)", () => {
     usePrefs.getState().set({ histKeep: "forever" });
     useTransfers.getState().pruneHistory();
     expect(useTransfers.getState().transfers.ancient).toBeDefined();
+  });
+});
+
+describe("saving to localStorage (M23)", () => {
+  const txt = (id: string, chars: number) => ({
+    ...inboxFromText("Peer", "x".repeat(chars), Date.now()),
+    id,
+  });
+
+  it("keeps the newest text bodies within the budget, older ones as previews", () => {
+    const rows = [
+      { text: "a".repeat(KEPT_TEXT_CHARS - 10) },
+      { name: "a file" } as { text?: string },
+      { text: "b".repeat(10) },
+      { text: "c" },
+    ];
+    const kept = keepRecentTexts(rows);
+    expect(kept[0].text).toHaveLength(KEPT_TEXT_CHARS - 10);
+    expect(kept[1]).toBe(rows[1]);
+    expect(kept[2].text).toHaveLength(10); // exactly at the budget
+    expect(kept[3].text).toBeUndefined();
+  });
+
+  it("the inbox saves only recent text bodies — this run keeps them all", () => {
+    for (let i = 0; i < 6; i++) useInbox.getState().add(txt(`t${i}`, 60_000));
+    const saved = JSON.parse(localStorage.getItem("lanbeam.inbox") ?? "{}")
+      .state.items as { id: string; text?: string; name: string }[];
+    expect(saved.map((i) => i.text !== undefined)).toEqual([
+      true,
+      true,
+      true,
+      true,
+      false,
+      false,
+    ]);
+    expect(saved[5].name).toBeTruthy(); // the preview stays
+    expect(
+      useInbox.getState().items.every((i) => i.text?.length === 60_000),
+    ).toBe(true);
+  });
+
+  it("a full localStorage doesn't throw out of the store", () => {
+    // On the instance: happy-dom's localStorage stops going through
+    // Storage.prototype once anything has used it.
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementation(() => {
+      throw new DOMException("full", "QuotaExceededError");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(() => useInbox.getState().add(txt("q", 10))).not.toThrow();
+      expect(setItem).toHaveBeenCalled(); // the write was attempted, and failed
+      expect(useInbox.getState().items[0].id).toBe("q");
+      expect(() =>
+        useTransfers.getState().addTextTransfer({
+          direction: "receive",
+          peerId: "p",
+          peerName: "P",
+          text: "hi",
+        }),
+      ).not.toThrow();
+    } finally {
+      setItem.mockRestore();
+      warn.mockRestore();
+    }
   });
 });
 

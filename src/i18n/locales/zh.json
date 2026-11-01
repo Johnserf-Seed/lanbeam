@@ -53,6 +53,7 @@
     "done": "完成",
     "copy": "复制",
     "copied": "已复制",
+    "copyFailed": "复制失败",
     "rename": "重命名",
     "change": "更改…",
     "view": "查看",
@@ -120,7 +121,8 @@
     "cancel": "取消",
     "eta": "剩余 {{t}}",
     "speedPaused": "已暂停",
-    "shaChecking": "SHA-256 校验",
+    "inFlight": "传输中",
+    "verifiedSoFar": "已校验 {{n}} 个",
     "queued": "等待空闲槽位",
     "awaitingAccept": "等待对方接受",
     "awaitingAcceptSas": "等待对方接受 · 校验码 {{sas}}",
@@ -175,7 +177,7 @@
     "removeRecord": "从记录中移除",
     "removedToast": "已从记录中移除",
     "footVerified": "SHA-256 已校验 {{n}}/{{total}}",
-    "footVerifyOff": "完整性校验已关闭",
+    "footNotVerified": "未做完整性校验 · 发送方没有附带校验值",
     "footRecvDir": "{{dir}}",
     "footSendDir": "保存位置由接收方决定",
     "statusInterrupted": "已中断",
@@ -230,6 +232,8 @@
     "revealToast": "已在文件管理器中显示",
     "noPathToast": "找不到文件位置 — 记录来自旧会话",
     "charCount": "{{n}} 字",
+    "previewOnly": "仅预览",
+    "textNotKept": "这条文字只保存了预览 · 全文只为最近的文字保留",
     "fwdBatchPartial": "只转发了 {{ok}}/{{n}} 项 · {{err}}"
   },
   "trusted": {
@@ -361,7 +365,7 @@
     "secAbout": "关于",
     "version": "版本",
     "checkUpdate": "检查更新",
-    "updateManual": "当前 v0.1.0 · 自动更新暂未启用",
+    "updateManual": "当前 v{{v}} · 自动更新暂未启用",
     "license": "开源许可",
     "licenseDesc": "MIT License · 第三方组件清单",
     "licenseTitle": "开源许可",
@@ -415,6 +419,7 @@
     "failedState": "发送失败",
     "sasLabel": "校验码 · 与对方屏幕一致",
     "sasNote": "每台设备是独立加密会话 · 校验码由会话密钥派生",
+    "waitingCanceledToast": "已取消未确认的请求",
     "cancelWaiting": "取消未确认的请求",
     "canceledToast": "已关闭 — 已发出的请求由对方决定",
     "browserRecv": "对方没装 LanBeam？浏览器接收 →",
@@ -506,7 +511,8 @@
     "skipSub": "保留现有文件 — 将拒绝此次接收",
     "recommended": "推荐",
     "cancel": "取消接收",
-    "go": "继续"
+    "go": "继续",
+    "timedOutToast": "等了太久没有回答 · 已按「保留两者」开始接收"
   },
   "pair": {
     "title": "配对设备",
@@ -571,6 +577,8 @@
     "placeholder": "输入文字、链接…",
     "clipToo": "请求同时写入对方剪贴板",
     "send": "发送",
+    "offlineOption": "{{name}}（已离线）",
+    "targetOffline": "「{{name}}」已离线 · 选另一台，或等它回来",
     "sentToast": "已发送到 {{name}}",
     "sendFailed": "发送失败：{{err}}",
     "foot": "端到端加密 · 对方在线即达 · 也可用全局快捷键唤起"

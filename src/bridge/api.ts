@@ -221,6 +221,8 @@ export type TransferEvent = {
   error?: string;
   code?: TransferErrorCode;
   savedNames?: string[];
+  /** the peer — on a queued send (M25), the first event the row gets */
+  deviceId?: string;
 };
 /** connect_device (fingerprint re-verify) emits sas_code without a session. */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };

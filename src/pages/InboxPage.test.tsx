@@ -3,7 +3,7 @@
 // real sendops helpers would only toast browser-mode stubs — we mock the whole
 // module and assert the component calls the right op with the right args.
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, renderUI, screen } from "../test/render";
+import { fireEvent, renderUI, screen, waitFor } from "../test/render";
 import i18n from "../i18n";
 import type { DiscoveredDevice } from "../bridge/api";
 import {
@@ -21,7 +21,7 @@ import InboxPage from "./InboxPage";
 // without touching the clipboard / opener plugins. errText stays a pass-through
 // so the forward-error path (which the component wraps in a toast) never throws.
 vi.mock("../lib/sendops", () => ({
-  copyText: vi.fn(),
+  copyText: vi.fn().mockResolvedValue(true),
   errText: (e: unknown) => String(e),
   openDir: vi.fn(() => Promise.resolve()),
   openFile: vi.fn(() => Promise.resolve()),
@@ -167,7 +167,7 @@ describe("InboxPage row actions", () => {
     expect(sendops.openFile).toHaveBeenCalledWith("/dl/vacation.png");
   });
 
-  it("copies a text item's content via its 'copy' link", () => {
+  it("copies a text item's content via its 'copy' link", async () => {
     useInbox.setState({ items: [textItem()], unread: 0 });
     renderUI(<InboxPage />);
 
@@ -175,7 +175,22 @@ describe("InboxPage row actions", () => {
 
     expect(sendops.copyText).toHaveBeenCalledWith("remember the milk");
     // and the confirmation toast fired
-    expect(useToast.getState().msg).toBe(t("inbox.copiedText"));
+    await waitFor(() =>
+      expect(useToast.getState().msg).toBe(t("inbox.copiedText")),
+    );
+  });
+
+  it("a text saved without its body says so instead of copying nothing (M23)", () => {
+    const { text: _body, ...preview } = textItem();
+    useInbox.setState({ items: [preview], unread: 0 });
+    renderUI(<InboxPage />);
+
+    expect(
+      screen.getByText(new RegExp(t("inbox.previewOnly"))),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByText(t("inbox.copyAction")));
+    expect(sendops.copyText).not.toHaveBeenCalled();
+    expect(useToast.getState().msg).toBe(t("inbox.textNotKept"));
   });
 });
 

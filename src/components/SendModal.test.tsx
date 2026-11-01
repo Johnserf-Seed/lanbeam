@@ -25,6 +25,12 @@ vi.mock("../lib/sendops", () => ({
   pickFiles: vi.fn(async () => [] as SendFile[]),
 }));
 import { beginSend } from "../lib/sendops";
+// The waiting step's 取消未确认的请求 cancels for real (M20); observe it.
+vi.mock("../bridge/api", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../bridge/api")>()),
+  cancelTransfer: vi.fn(async () => {}),
+}));
+import { cancelTransfer } from "../bridge/api";
 
 // ── clean-state snapshots ────────────────────────────────────────────────────
 const overlays0 = { ...useOverlays.getState() };
@@ -192,6 +198,31 @@ describe("SendModal · the waiting step", () => {
     expect(useToast.getState().msg).toBe(
       i18n.t("send.sentOneToast", { name: "Mini" }),
     );
+  });
+
+  it("取消未确认的请求 cancels the requests still waiting — not just the window (M20)", async () => {
+    useData.setState({ devices: [mini] });
+    useOverlays.getState().openSend("demo-mini", [fileA], [fileA]);
+    useOverlays.getState().patchSend({
+      step: "waiting",
+      pending: [
+        { deviceId: "demo-mini", name: "Mini", sessionId: "waits", ok: false },
+        { deviceId: "demo-mini", name: "Mini", sessionId: "took", ok: false },
+      ],
+    });
+    useTransfers.getState().upsert({
+      sessionId: "took",
+      direction: "send",
+      status: "active",
+      accepted: true,
+    });
+    renderUI(<SendModal />);
+
+    fireEvent.click(screen.getByText(i18n.t("send.cancelWaiting")));
+    expect(cancelTransfer).toHaveBeenCalledTimes(1);
+    expect(cancelTransfer).toHaveBeenCalledWith("waits");
+    expect(useOverlays.getState().send).toBeNull();
+    expect(useToast.getState().msg).toBe(i18n.t("send.waitingCanceledToast"));
   });
 
   it("follows ITS session, not the newest send to the same device", async () => {

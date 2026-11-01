@@ -53,6 +53,7 @@
     "done": "Done",
     "copy": "Copy",
     "copied": "Copied",
+    "copyFailed": "Couldn't copy",
     "rename": "Rename",
     "change": "Change…",
     "view": "View",
@@ -120,7 +121,8 @@
     "cancel": "Cancel",
     "eta": "{{t}} left",
     "speedPaused": "Paused",
-    "shaChecking": "SHA-256 verify",
+    "inFlight": "Transferring",
+    "verifiedSoFar": "{{n}} verified",
     "queued": "Waiting for a free slot",
     "awaitingAccept": "Waiting for them to accept",
     "awaitingAcceptSas": "Waiting for them to accept · verification code {{sas}}",
@@ -175,7 +177,7 @@
     "removeRecord": "Remove from history",
     "removedToast": "Removed from history",
     "footVerified": "SHA-256 verified {{n}}/{{total}}",
-    "footVerifyOff": "Integrity check is off",
+    "footNotVerified": "Not integrity-checked — the sender attached no checksums",
     "footRecvDir": "{{dir}}",
     "footSendDir": "Save location is up to the receiver",
     "statusInterrupted": "Interrupted",
@@ -230,6 +232,8 @@
     "revealToast": "Shown in file manager",
     "noPathToast": "File location unknown — record from an old session",
     "charCount": "{{n}} chars",
+    "previewOnly": "Preview only",
+    "textNotKept": "Only a preview of this text was kept — full text is saved for recent texts only",
     "fwdBatchPartial": "Forwarded {{ok}} of {{n}} — {{err}}"
   },
   "trusted": {
@@ -361,7 +365,7 @@
     "secAbout": "About",
     "version": "Version",
     "checkUpdate": "Check for updates",
-    "updateManual": "Currently v0.1.0 · auto-update not configured yet",
+    "updateManual": "Currently v{{v}} · auto-update not configured yet",
     "license": "Open-source licenses",
     "licenseDesc": "MIT License · third-party components",
     "licenseTitle": "Open-source licenses",
@@ -415,6 +419,7 @@
     "failedState": "Send failed",
     "sasLabel": "Verification code · must match the other screen",
     "sasNote": "Each device is an independent encrypted session · codes derive from session keys",
+    "waitingCanceledToast": "Unconfirmed requests cancelled",
     "cancelWaiting": "Cancel unconfirmed requests",
     "canceledToast": "Closed — sent requests are up to the peers",
     "browserRecv": "No LanBeam on their side? Browser receive →",
@@ -506,7 +511,8 @@
     "skipSub": "Keep the existing file — declines this transfer",
     "recommended": "Recommended",
     "cancel": "Cancel receiving",
-    "go": "Continue"
+    "go": "Continue",
+    "timedOutToast": "No answer in time — receiving with “Keep both”"
   },
   "pair": {
     "title": "Pair a device",
@@ -571,6 +577,8 @@
     "placeholder": "Type text or a link…",
     "clipToo": "Ask to also write to their clipboard",
     "send": "Send",
+    "offlineOption": "{{name}} (offline)",
+    "targetOffline": "“{{name}}” went offline — pick another, or wait for it to come back",
     "sentToast": "Sent to {{name}}",
     "sendFailed": "Send failed: {{err}}",
     "foot": "End-to-end encrypted · instant while online · also via the global shortcut"
