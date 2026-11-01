@@ -383,7 +383,7 @@ Uses a locally installed Chrome or Edge (or `CHROME_PATH`); see
 ├── src/                  # React + TypeScript frontend
 │   ├── bridge/api.ts     #   typed wrappers over Tauri commands/events (+ browser stubs)
 │   ├── lib/
-│   │   ├── store.ts      #     zustand stores (persisted where relevant)
+│   │   ├── store/        #     zustand stores, one module each (persisted where relevant)
 │   │   ├── deepLink.ts   #     lanbeam:// allowlist + parsing (the security contract)
 │   │   ├── demo*.ts      #     ?demo=1 sample content, in the UI's language
 │   │   └── browserShortcuts.ts  # strip the browser out of the WebView
@@ -394,13 +394,13 @@ Uses a locally installed Chrome or Edge (or `CHROME_PATH`); see
 │   └── src/
 │       ├── discovery/    #   UDP LAN discovery + interface enumeration
 │       ├── transport/    #   Noise handshake + framing
-│       ├── transfer.rs   #   send/receive state machine, resume, integrity, conflicts
+│       ├── transfer/     #   send/receive state machine, resume, integrity, conflicts
 │       ├── share.rs      #   axum one‑shot browser‑share server + its landing page
 │       ├── tray.rs       #   the tray "remote" (Rust owns show/quit; the UI owns the rest)
 │       ├── paths.rs      #   where files live — named LanBeam, not the bundle id
 │       ├── sanitize.rs   #   received‑path safety (the single write choke point)
 │       ├── trust.rs      #   trust store  ·  exif.rs — metadata stripping
-│       └── commands.rs   #   the Tauri command surface
+│       └── commands/     #   the Tauri command surface, one module per area
 ├── ROADMAP.md            # backend milestones (M4–M8 shipped; M9 = EXIF done, updater pending)
 └── vitest.config.ts
 ```

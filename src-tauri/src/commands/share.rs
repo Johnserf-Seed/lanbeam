@@ -225,6 +225,8 @@ fn share_base_url(state: &AppState) -> Result<String, LanBeamError> {
 /// choice), else the best-ranked address (see [`lan_ip_rank`] — a real NIC beats a
 /// Docker/WSL/APIPA adapter; ties break on the numeric IP for stability). `None`
 /// when the machine has no non-loopback IPv4.
+///
+/// [`lan_ip_rank`]: super::pairing::lan_ip_rank
 fn share_lan_ip(state: &AppState) -> Option<Ipv4Addr> {
     let filter = state.settings.read().ok().and_then(|s| {
         s.iface_filter
