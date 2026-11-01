@@ -80,6 +80,13 @@ describe("SendModal · files step", () => {
     ).toBeTruthy();
   });
 
+  it("with nothing recent to pick, says where files come from (§5)", () => {
+    useData.setState({ devices: [mini] });
+    useOverlays.getState().openSend("demo-mini", []);
+    renderUI(<SendModal />);
+    expect(screen.getByText(i18n.t("send.poolEmpty"))).toBeInTheDocument();
+  });
+
   it("toggles a file's selection when its row is clicked", () => {
     useData.setState({ devices: [mini] });
     // no presel → nothing selected initially

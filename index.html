@@ -5,6 +5,26 @@
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>LanBeam</title>
+    <script>
+      // Settle the theme before the first paint. AppShell sets it too, but only
+      // once the app has loaded: until then a dark-mode user got a white window
+      // on every launch. Same rule as resolvedTheme() over the saved prefs, with
+      // the store's default; src/lib/theme.test.ts holds the two together.
+      (function () {
+        var mode = "system";
+        try {
+          var saved = JSON.parse(localStorage.getItem("lanbeam.prefs") || "null");
+          var m = saved && saved.state && saved.state.themeMode;
+          if (m === "light" || m === "dark" || m === "system") mode = m;
+        } catch (e) {}
+        var dark =
+          mode === "dark" ||
+          (mode === "system" &&
+            !!window.matchMedia &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        document.documentElement.setAttribute("data-theme", dark ? "dark" : "light");
+      })();
+    </script>
   </head>
 
   <body>

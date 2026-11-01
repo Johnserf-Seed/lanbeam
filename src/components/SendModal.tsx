@@ -19,7 +19,7 @@ import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
 import { beginSend, pickFiles } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
-import { ExtChip, ModalHead } from "./ui";
+import { ExtChip, MODAL_W, ModalHead } from "./ui";
 
 type WaitState = "waiting" | "ok" | "failed";
 
@@ -305,7 +305,7 @@ export default function SendModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ width: 500, fontFamily: "var(--font)" }}
+        style={{ width: MODAL_W.wide, fontFamily: "var(--font)" }}
         onClick={(e) => e.stopPropagation()}
       >
         <ModalHead
@@ -406,6 +406,20 @@ export default function SendModal() {
                   </div>
                 );
               })}
+              {send.pool.length === 0 && (
+                // Nothing recent to pick from: say where files come from
+                // instead of an empty box between the header and the footer.
+                <div
+                  style={{
+                    padding: "30px 24px",
+                    textAlign: "center",
+                    fontSize: 12,
+                    color: "var(--muted)",
+                  }}
+                >
+                  {t("send.poolEmpty")}
+                </div>
+              )}
             </div>
             <div
               style={{

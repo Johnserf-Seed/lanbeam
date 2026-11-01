@@ -9,7 +9,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { DiscoveredDevice } from "../bridge/api";
 import i18n from "../i18n";
 import type { TrustRecord } from "../lib/store";
-import { shortFp, useData, useTrust } from "../lib/store";
+import { CHIP_TEXT_MAX } from "../lib/format";
+import { shortFp, useData, useOverlays, useTrust } from "../lib/store";
 import { act, fireEvent, renderUI, screen } from "../test/render";
 
 // Mock only the two trust writes; keep every other export real so the store
@@ -74,6 +75,35 @@ beforeEach(() => {
 });
 
 describe("TrustedPage", () => {
+  it("with no device at all, says where devices come from and offers to pair (§5)", () => {
+    seed([], {});
+    renderUI(<TrustedPage />);
+    expect(screen.getByText(i18n.t("trusted.emptyLead"))).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("trusted.emptyPair") }),
+    );
+    expect(useOverlays.getState().pairOpen).toBe(true);
+  });
+
+  it("cuts a long name short on its chip, keeping the whole name on hover (§5)", () => {
+    const long =
+      "研发部 · 张三的 MacBook Pro 16 寸（2023 款）· 第二台备用机器".repeat(2);
+    seed([], {
+      p1: {
+        deviceId: "p1",
+        name: long,
+        trusted: true,
+        autoAccept: true,
+        addedAt: 1,
+        lastSeen: 1,
+      },
+    });
+    renderUI(<TrustedPage />);
+    const chip = screen.getAllByTitle(long)[0];
+    expect(chip.style.maxWidth).toBe(`${CHIP_TEXT_MAX}px`);
+    expect(chip.style.textOverflow).toBe("ellipsis");
+  });
+
   it("renders the seeded trusted peers and the trust-circle chrome", () => {
     seed([dev("d1", "Alice"), dev("d2", "Bob")], {
       d1: rec({ deviceId: "d1", name: "Alice" }),

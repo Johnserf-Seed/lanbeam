@@ -121,7 +121,8 @@ interface PrefsState {
 export const usePrefs = create<PrefsState>()(
   persist(
     (set) => ({
-      themeMode: "light",
+      // Follow the system until someone picks (index.html assumes the same).
+      themeMode: "system",
       ghostUntil: null,
       recvPolicy: "trusted",
       conflict: "ask",

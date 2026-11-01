@@ -17,6 +17,23 @@ import {
 import { errText } from "../lib/sendops";
 import { fmtBytes, fmtSas } from "../lib/format";
 
+/** Where the stack sits: above the page and the detail drawer (45/46), BELOW
+ *  every modal's scrim (50–56, and the decision dialogs at 62). At 60 it drew
+ *  over an open modal's own controls; under the scrim it waits, dimmed, and is
+ *  back in front the moment the modal closes. */
+const STACK_Z = 49;
+
+/** "3 waiting" beside the sender's name. */
+const queueBadge = {
+  fontSize: 10,
+  fontWeight: 600,
+  color: "var(--accent-ink)",
+  background: "var(--accent-soft)",
+  borderRadius: 99,
+  padding: "2px 8px",
+  flex: "none",
+} as const;
+
 const chipStyle = {
   fontFamily: "var(--mono)",
   fontSize: 10.5,
@@ -39,6 +56,8 @@ export default function IncomingStack() {
   const [leaving, setLeaving] = useState<"accept" | "decline" | null>(null);
   const [stackHover, setStackHover] = useState(false);
   const [cardHover, setCardHover] = useState(false);
+  // 收起: the card folds to one line so it stops covering the page under it.
+  const [collapsed, setCollapsed] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   useEffect(() => () => clearTimeout(timer.current), []);
@@ -60,9 +79,12 @@ export default function IncomingStack() {
   // aimed at the old peer can't silently grant trust+autoAccept to the new one.
   // frontSessionId is only a re-run TRIGGER (reset the checkbox when the front
   // card swaps out), deliberately not read in the effect body.
+  // A new front card also arrives unfolded: a new request is news, even to
+  // someone who folded away the last one.
   const frontSessionId = incomings[0]?.sessionId;
   useEffect(() => {
     setTrustPending(false);
+    setCollapsed(false);
   }, [frontSessionId]);
 
   const front = incomings[0];
@@ -133,12 +155,92 @@ export default function IncomingStack() {
     }, 240);
   };
 
+  // Folded: one line in the same corner — who is waiting, and how many. The
+  // request is still pending; one click brings the card back to answer it.
+  if (collapsed) {
+    return (
+      <div style={{ position: "fixed", right: 22, top: 76, zIndex: STACK_Z }}>
+        <button
+          type="button"
+          aria-label={t("incoming.expandLabel", { name: peerName })}
+          onClick={() => setCollapsed(false)}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 9,
+            maxWidth: 302,
+            padding: "6px 13px 6px 7px",
+            background: "var(--panel)",
+            border: "1px solid var(--border2)",
+            borderRadius: 99,
+            boxShadow: "var(--shadow)",
+            color: "var(--ink)",
+            font: "inherit",
+            cursor: "pointer",
+            animation: "lbFade .2s ease",
+          }}
+        >
+          <span
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: "50%",
+              background: "var(--accent-soft)",
+              color: "var(--accent-ink)",
+              display: "grid",
+              placeItems: "center",
+              fontSize: 11,
+              fontWeight: 600,
+              flex: "none",
+            }}
+          >
+            {peerName.trim().charAt(0)}
+          </span>
+          <span
+            style={{
+              fontSize: 12.5,
+              fontWeight: 600,
+              color: "var(--ink2)",
+              minWidth: 0,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {peerName}
+          </span>
+          {incomings.length > 1 && (
+            <span style={queueBadge}>
+              {t("incoming.queue", { n: incomings.length })}
+            </span>
+          )}
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              color: "var(--accent-ink)",
+              flex: "none",
+            }}
+          >
+            {t("incoming.expand")}
+          </span>
+        </button>
+      </div>
+    );
+  }
+
   return (
     // biome-ignore lint/a11y/noStaticElementInteractions: hover-only presentational stack container — pointer hover expands the card fan, no keyboard action to expose.
     <div
       onMouseEnter={() => setStackHover(true)}
       onMouseLeave={() => setStackHover(false)}
-      style={{ position: "fixed", right: 22, top: 76, zIndex: 60, width: 302 }}
+      style={{
+        position: "fixed",
+        right: 22,
+        top: 76,
+        zIndex: STACK_Z,
+        width: 302,
+      }}
     >
       {incomings.slice(1, 3).map((q, i) => {
         const top = (i + 1) * (stackHover ? 26 : 10);
@@ -224,20 +326,32 @@ export default function IncomingStack() {
             </div>
           </div>
           {incomings.length > 1 && (
-            <span
-              style={{
-                fontSize: 10,
-                fontWeight: 600,
-                color: "var(--accent-ink)",
-                background: "var(--accent-soft)",
-                borderRadius: 99,
-                padding: "2px 8px",
-                flex: "none",
-              }}
-            >
+            <span style={queueBadge}>
               {t("incoming.queue", { n: incomings.length })}
             </span>
           )}
+          <button
+            type="button"
+            title={t("incoming.collapse")}
+            aria-label={t("incoming.collapse")}
+            disabled={leaving !== null}
+            onClick={() => setCollapsed(true)}
+            style={{
+              width: 22,
+              height: 22,
+              padding: 0,
+              border: "none",
+              borderRadius: 6,
+              background: "none",
+              color: "var(--muted2)",
+              fontSize: 15,
+              lineHeight: 1,
+              cursor: "pointer",
+              flex: "none",
+            }}
+          >
+            –
+          </button>
         </div>
 
         <div

@@ -15,7 +15,7 @@ import { copyText, errText, pickFiles } from "../lib/sendops";
 import { showToast, useOverlays, type SendFile } from "../lib/store";
 import { useEscape } from "../lib/useEscape";
 import Qr from "./Qr";
-import { ModalHead } from "./ui";
+import { MODAL_W, ModalHead } from "./ui";
 
 function MenuItem({
   label,
@@ -386,7 +386,11 @@ export default function ShareModal() {
       {/* biome-ignore lint/a11y/useKeyWithClickEvents: same */}
       <div
         className="modal"
-        style={{ position: "relative", width: 434, fontFamily: "var(--font)" }}
+        style={{
+          position: "relative",
+          width: MODAL_W.narrow,
+          fontFamily: "var(--font)",
+        }}
         onClick={(e) => e.stopPropagation()}
       >
         {menu !== null && (

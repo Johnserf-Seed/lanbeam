@@ -40,37 +40,44 @@ describe("hashId", () => {
 
 describe("radarBasePos", () => {
   it("produces deterministic coordinates for known inputs", () => {
-    expect(radarBasePos("dev-a", 0)).toEqual({ x: 471, y: 309 });
-    expect(radarBasePos("dev-b", 1)).toEqual({ x: 215, y: 327 });
-    expect(radarBasePos("phone", 2)).toEqual({ x: 513, y: 183 });
-    expect(radarBasePos("x", 0)).toEqual({ x: 445, y: 280 });
+    expect(radarBasePos("dev-a")).toEqual({ x: 161, y: 289 });
+    expect(radarBasePos("dev-b")).toEqual({ x: 579, y: 256 });
+    expect(radarBasePos("phone")).toEqual({ x: 195, y: 255 });
+    expect(radarBasePos("x")).toEqual({ x: 248, y: 168 });
   });
 
-  it("is stable across calls (no hidden state)", () => {
-    expect(radarBasePos("dev-a", 0)).toEqual(radarBasePos("dev-a", 0));
+  it("depends on the id alone — a device keeps its spot whoever else is online", () => {
+    // Placed by discovery order, every device after one that went offline
+    // moved. The id is all it gets now, so there is nothing else to shift it.
+    const online = ["dev-a", "dev-b", "phone"].map((id) => radarBasePos(id));
+    const later = ["dev-b", "phone"].map((id) => radarBasePos(id));
+    expect(later).toEqual(online.slice(1));
   });
 
   it("returns integer coordinates", () => {
-    const p = radarBasePos("integer-check", 4);
+    const p = radarBasePos("integer-check");
     expect(Number.isInteger(p.x)).toBe(true);
     expect(Number.isInteger(p.y)).toBe(true);
   });
 
-  it("keeps points within the golden-angle ring envelope of the canvas", () => {
-    // radius <= 150 + 2*42 + 18 = 252; y uses a 0.72 vertical squash.
+  it("keeps points on the three rings of the canvas", () => {
+    // radius is 150, 192 or 234; y uses a 0.72 vertical squash.
     for (let i = 0; i < 30; i++) {
-      const p = radarBasePos(`device-${i}`, i);
-      const dx = p.x - 345;
-      const dy = (p.y - 250) / 0.72;
-      const r = Math.hypot(dx, dy);
-      expect(r).toBeLessThanOrEqual(252 + 1); // +1 for rounding slack
+      const p = radarBasePos(`device-${i}`);
+      const r = Math.hypot(p.x - 345, (p.y - 250) / 0.72);
+      expect(r).toBeGreaterThanOrEqual(150 - 1);
+      expect(r).toBeLessThanOrEqual(234 + 1); // +1 for rounding slack
     }
   });
 
-  it("spreads consecutive indices apart (does not stack)", () => {
-    const a = radarBasePos("same-id", 0);
-    const b = radarBasePos("same-id", 1);
-    expect(a).not.toEqual(b);
+  it("spreads ids all the way around", () => {
+    const quadrants = new Set<number>();
+    for (let i = 0; i < 40; i++) {
+      const p = radarBasePos(`device-${i}`);
+      quadrants.add((p.x > 345 ? 1 : 0) + (p.y > 250 ? 2 : 0));
+    }
+    expect(quadrants.size).toBe(4);
+    expect(radarBasePos("dev-a")).not.toEqual(radarBasePos("dev-b"));
   });
 });
 

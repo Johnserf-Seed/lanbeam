@@ -8,6 +8,7 @@ import {
   useOverlays,
   useTrust,
 } from "../lib/store";
+import { MODAL_W } from "./ui";
 
 /** Full display fingerprint: 4 groups of 4 alnum chars from the device key. */
 function fpFull(deviceId: string): string {
@@ -118,7 +119,7 @@ export default function FpAlertModal() {
       <div
         className="modal"
         style={{
-          width: 420,
+          width: MODAL_W.narrow,
           fontFamily: "var(--font)",
           animation: "lbFade .18s ease",
         }}
