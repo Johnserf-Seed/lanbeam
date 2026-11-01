@@ -20,7 +20,7 @@ use crate::consts::{
     ACK_DRAIN_RATE, ACK_TIMEOUT, ACK_TIMEOUT_MAX, CHUNK_IDLE_TIMEOUT, MANIFEST_TIMEOUT,
     MAX_FILE_DATA, MAX_MANIFEST_FILES, MAX_MANIFEST_NAME_BYTES, MAX_MANIFEST_NAME_TOTAL,
     MAX_PAUSE_PARK, MAX_PLAINTEXT, MAX_TEXT_BYTES, RECEIVE_SYNC_INTERVAL, REPLY_TIMEOUT,
-    TRANSFER_V2,
+    TRANSFER_V2, TRANSFER_V3,
 };
 use crate::error::{LanBeamError, Result};
 use crate::exif;
@@ -1028,6 +1028,9 @@ pub enum FileEvent<'a> {
     /// `transfer_started` (the connection is open) used to be read as "they
     /// accepted", which closed the sender's SAS before anyone could look at it.
     Accepted,
+    /// SEND side only: before answering, the receiver said where the request
+    /// stands (F4). The sink emits `transfer_pending`.
+    Pending(PendingState),
 }
 
 /// Build the per-file event sink (M6.8) shared by `send_files` and
@@ -1093,6 +1096,14 @@ pub fn file_event_sink<R: Runtime>(
             let _ = app.emit(
                 "transfer_accepted",
                 json!({ "sessionId": session_id, "direction": "send" }),
+            );
+        }
+        FileEvent::Pending(state) => {
+            // Still waiting, and now the UI can say on what: a person, or a
+            // free slot on a receiver that already said yes.
+            let _ = app.emit(
+                "transfer_pending",
+                json!({ "sessionId": session_id, "direction": "send", "state": state.as_wire() }),
             );
         }
     }
@@ -1176,12 +1187,26 @@ pub async fn run_send<F: FnMut(u64, u64)>(
     // while the receiver's accept prompt is up is not observed until the first
     // chunk after the peer answers — up to REPLY_TIMEOUT (150s) with the slot
     // held. Mirrors the chunk loop's biased select.
-    let reply = tokio::select! {
-        biased;
-        _ = ctl.cancel.cancelled() => return Err(LanBeamError::Cancelled),
-        r = tokio::time::timeout(REPLY_TIMEOUT, recv_control(session)) => match r {
-            Ok(res) => res?,
-            Err(_) => return Err(LanBeamError::Timeout),
+    // A v3 receiver may first say where the request stands (F4) — on its screen,
+    // or queued there for a slot — any number of times; the wait goes on under
+    // the same deadline, so no stream of notices can stretch it.
+    let deadline = tokio::time::Instant::now() + REPLY_TIMEOUT;
+    let reply = loop {
+        let msg = tokio::select! {
+            biased;
+            _ = ctl.cancel.cancelled() => return Err(LanBeamError::Cancelled),
+            r = tokio::time::timeout_at(deadline, recv_control(session)) => match r {
+                Ok(res) => res?,
+                Err(_) => return Err(LanBeamError::Timeout),
+            }
+        };
+        match msg {
+            AppMessage::Pending { state, .. } => {
+                if let Some(state) = PendingState::from_wire(&state) {
+                    on_file(FileEvent::Pending(state));
+                }
+            }
+            other => break other,
         }
     };
     // Per-file resume offsets (M6.4): a receiver that holds a verified prefix of
@@ -1498,6 +1523,60 @@ pub(crate) const REPLY_DUPLICATE_ID: &str = "duplicate transfer id";
 /// The receiver accepted, then cancelled while the transfer waited for a
 /// concurrency slot (L15). An older sender reads it as a plain refusal.
 pub(crate) const REPLY_CANCELLED: &str = "cancelled";
+
+/// Where a request stands on the receiver while its sender waits for the reply
+/// (F4), as it travels in `AppMessage::Pending.state` — written by the receiver
+/// ([`send_pending`]) and read back by the sender ([`PendingState::from_wire`]),
+/// so the two cannot drift.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PendingState {
+    /// On screen there, waiting for a person to answer.
+    Prompted,
+    /// Accepted there, waiting for one of its transfer slots to free up.
+    Queued,
+}
+
+impl PendingState {
+    fn as_wire(self) -> &'static str {
+        match self {
+            PendingState::Prompted => "prompted",
+            PendingState::Queued => "queued",
+        }
+    }
+
+    /// The state a token names — `None` for one a later build sends, which the
+    /// sender simply doesn't show.
+    fn from_wire(token: &str) -> Option<Self> {
+        [PendingState::Prompted, PendingState::Queued]
+            .into_iter()
+            .find(|s| s.as_wire() == token)
+    }
+}
+
+/// Tell a waiting sender where its request stands (F4) — if it negotiated v3.
+/// An older sender is waiting for exactly the reply and would fail on anything
+/// else, so it is told nothing. Best-effort: a sender that has gone is noticed
+/// by the wait that follows, not here.
+async fn send_pending(
+    session: &mut NoiseSession,
+    peer_version: u8,
+    transfer_id: &str,
+    state: PendingState,
+) {
+    if peer_version < TRANSFER_V3 {
+        return;
+    }
+    let msg = AppMessage::Pending {
+        transfer_id: transfer_id.to_string(),
+        state: state.as_wire().to_string(),
+    };
+    if let Err(e) = send_control(session, &msg).await {
+        log::debug!(
+            "{transfer_id}: could not say it is {}: {e}",
+            state.as_wire()
+        );
+    }
+}
 
 /// What a receiver's "no" means on the sending side (H6). Only a person
 /// declining is `Rejected` — the UI then drops the row and says "they
@@ -2750,6 +2829,15 @@ pub async fn handle_incoming<R: Runtime>(
                 human_size(manifest.total_size)
             ),
         );
+        // And tell the sender it is on screen now (F4), so its "waiting for
+        // them" can say what it is waiting on.
+        send_pending(
+            &mut session,
+            peer.version,
+            &session_id,
+            PendingState::Prompted,
+        )
+        .await;
 
         // Wait for the answer — or for the sender to stop waiting (M12): it
         // cancelled, quit, or lost the network. Nothing else would notice until
@@ -2878,6 +2966,15 @@ pub async fn handle_incoming<R: Runtime>(
                 "transfer_queued",
                 json!({ "sessionId": session_id, "direction": "receive" }),
             );
+            // The sender has its yes, and is now waiting on a free slot here —
+            // not on anyone to answer. Tell it so (F4).
+            send_pending(
+                &mut session,
+                peer.version,
+                &session_id,
+                PendingState::Queued,
+            )
+            .await;
             // A cancel issued while QUEUED must win over the wait (finding-2):
             // without this select the acquire ignores the already-registered
             // cancel token, so the transfer stays parked and only aborts once a
@@ -2907,6 +3004,19 @@ pub async fn handle_incoming<R: Runtime>(
                         json!({ "sessionId": session_id, "error": LanBeamError::Cancelled.to_string(), "code": LanBeamError::Cancelled.ui_code() }),
                     );
                     return Err(LanBeamError::Cancelled);
+                }
+                // The sender stopped waiting while this sat in the queue (M12's
+                // case, one step later): it cancelled, quit or lost the network.
+                // Say so now — not once a slot frees and the accept meets a dead
+                // socket.
+                () = session.closed() => {
+                    let e = LanBeamError::ConnectionLost("the sender hung up while the transfer was queued".into());
+                    log::info!("{session_id}: {e}");
+                    let _ = ctx.app.emit(
+                        "transfer_error",
+                        json!({ "sessionId": session_id, "error": e.to_string(), "code": e.ui_code() }),
+                    );
+                    return Err(e);
                 }
                 r = tokio::time::timeout(gate_deadline, ctx.concurrency.acquire_receive()) => match r {
                     Ok(g) => g,

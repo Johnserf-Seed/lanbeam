@@ -5,16 +5,19 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::consts::{KIND_CONTROL, KIND_FILE_CHUNK, MAX_FILE_DATA, TRANSFER_V1, TRANSFER_V2};
+use crate::consts::{
+    KIND_CONTROL, KIND_FILE_CHUNK, MAX_FILE_DATA, TRANSFER_V1, TRANSFER_V2, TRANSFER_V3,
+};
 use crate::error::{LanBeamError, Result};
 
 /// Transfer versions this build speaks, advertised in `Hello` (M4.2) and
 /// negotiated to the highest common. APPENDING a version (never renumbering)
 /// keeps older peers working: they still find their version in the overlap and
 /// the session degrades to that feature set instead of dying. `TRANSFER_V2` is
-/// M7 (pairing + quick text); it rides here so two current builds negotiate 2
-/// while an M4–M6 peer still negotiates `TRANSFER_V1`.
-pub const SUPPORTED_VERSIONS: &[u8] = &[TRANSFER_V1, TRANSFER_V2];
+/// M7 (pairing + quick text) and `TRANSFER_V3` is F4 (the receiver's `Pending`
+/// notices); they ride here so two current builds negotiate 3 while an M7 peer
+/// negotiates 2 and an M4–M6 peer still negotiates `TRANSFER_V1`.
+pub const SUPPORTED_VERSIONS: &[u8] = &[TRANSFER_V1, TRANSFER_V2, TRANSFER_V3];
 
 /// Highest protocol version both sides speak. `None` means no overlap — the
 /// session cannot proceed and must fail with a version error, never a guess.
@@ -103,6 +106,18 @@ pub enum AppMessage {
         transfer_id: String,
         ok: bool,
         error: Option<String>,
+    },
+    /// Where a request stands on the receiver while the sender waits for its
+    /// [`AppMessage::FileSendReply`] (F4), gated on `TRANSFER_V3`. `state` is a
+    /// coarse token — `"prompted"` (on screen there, waiting for a person) or
+    /// `"queued"` (accepted, waiting for a free transfer slot) — never a
+    /// sentence. Zero or more precede the reply, and a sender ignores a state it
+    /// doesn't know, so a later build can add one without another version.
+    /// Only ever sent to a peer whose `Hello` advertised 3: a v1/v2 sender is
+    /// waiting for exactly the reply and would fail on anything else.
+    Pending {
+        transfer_id: String,
+        state: String,
     },
     /// In-band pairing request (M7.1), gated on `TRANSFER_V2`: the initiator that
     /// redeemed a pairing code presents it so the responder can match it against
@@ -359,10 +374,6 @@ mod tests {
         assert_eq!(negotiate_version(&[]), None);
     }
 
-    /// The M7 gate (stage 7.0): with `SUPPORTED_VERSIONS = [1, 2]`, two current
-    /// builds negotiate the v2 feature level, while an M4–M6 peer that speaks
-    /// only v1 pins the session to 1 — always the highest COMMON version, never
-    /// a guess. This is what every v2-only send (pairing, text) checks before it
     /// The ack's delivery fields are ADDITIVE: a peer that predates them writes
     /// `{"t":"ack","of":"text"}`, which must decode to `delivered: None` — read by
     /// the sender as "it arrived", exactly what an ack meant in those builds. A
@@ -395,9 +406,15 @@ mod tests {
         );
     }
 
-    /// puts a `PairRequest`/`TextSend` on the wire.
+    /// The version gates: with `SUPPORTED_VERSIONS = [1, 2, 3]`, two current
+    /// builds negotiate 3 (F4's `Pending` notices), an M7 peer that speaks up
+    /// to 2 pins the session to 2 (pairing and text, no notices), and an M4–M6
+    /// peer that speaks only v1 pins it to 1 — always the highest COMMON
+    /// version, never a guess. This is what every gated send (pairing, text, a
+    /// pending notice) checks before it puts its message on the wire.
     #[test]
     fn negotiate_picks_highest_common_transfer_version() {
+        assert_eq!(negotiate_version(SUPPORTED_VERSIONS), Some(TRANSFER_V3));
         assert_eq!(
             negotiate_version(&[TRANSFER_V1, TRANSFER_V2]),
             Some(TRANSFER_V2)
@@ -405,8 +422,30 @@ mod tests {
         assert_eq!(negotiate_version(&[TRANSFER_V1]), Some(TRANSFER_V1));
         // Order-independent: the peer may advertise its versions in any order.
         assert_eq!(
-            negotiate_version(&[TRANSFER_V2, TRANSFER_V1]),
-            Some(TRANSFER_V2)
+            negotiate_version(&[TRANSFER_V3, TRANSFER_V2, TRANSFER_V1]),
+            Some(TRANSFER_V3)
+        );
+    }
+
+    /// A pending notice (F4, gated on `TRANSFER_V3`) round-trips, and its state
+    /// is an open token: one this build has never heard of still decodes, so a
+    /// later build can add a state without breaking this one's wait.
+    #[test]
+    fn pending_notice_roundtrips_and_takes_any_state() {
+        let m = AppMessage::Pending {
+            transfer_id: "t-p".into(),
+            state: "prompted".into(),
+        };
+        let enc = encode_control(&m).unwrap();
+        assert_eq!(decode(&enc).unwrap(), Frame::Control(m));
+
+        let later = br#"{"t":"pending","transfer_id":"t-p","state":"thinking-it-over"}"#;
+        assert_eq!(
+            serde_json::from_slice::<AppMessage>(later).unwrap(),
+            AppMessage::Pending {
+                transfer_id: "t-p".into(),
+                state: "thinking-it-over".into(),
+            }
         );
     }
 
