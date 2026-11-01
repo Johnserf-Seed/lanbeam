@@ -142,7 +142,11 @@ in Settings).
 - **Browser receive** — publish an explicit file set over a one‑shot HTTP share: an
   unguessable token URL with a TTL, a **per‑file** download cap (each file counts its own
   downloads), and instant stop — LAN‑only, files addressed by index (no path/traversal
-  surface). Every share — including a single‑file one — gets a branded landing page that
+  surface). Downloads are **resumable** (`Range` / `If-Range`, with an ETag and
+  Last-Modified to resume against): a device that already downloaded a file can pick a
+  broken download back up, or fetch it again, without spending another download — so a
+  “once” link that drops halfway still delivers the file, while a second device still
+  can't have it. Every share — including a single‑file one — gets a branded landing page that
   renders in **their** language (from `Accept-Language`), and every download
   comes straight back to you: a toast with the downloader's IP, a row in the transfer
   history, an OS notification, and a live counter on the open share panel. **Closing the
