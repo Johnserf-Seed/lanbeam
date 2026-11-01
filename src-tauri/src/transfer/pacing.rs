@@ -75,7 +75,7 @@ pub(super) async fn wait_while_paused_capped(ctl: &TransferControl, cap: Duratio
     }
 }
 
-// ── rate limiting + per-file progress (M6.7/6.8) ──────────────────────
+// ── rate limiting (M6.7) ──────────────────────────────────────────────
 /// Per-transfer byte-rate throttle (M6.7). `None` (the `"unlimited"` setting)
 /// is a true no-op — `throttle` returns on a single branch, so an unthrottled
 /// transfer pays nothing. `Some(bytes_per_sec)` paces the stream with a small

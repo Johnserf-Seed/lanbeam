@@ -291,7 +291,7 @@ pub(crate) fn sweep_send_scratch(root: &Path, started: std::time::SystemTime) {
 /// Answer an incoming file request (fires the receive task's awaited oneshot).
 /// Removal is deliberately unconditional — whatever prompt is parked under
 /// this id right now is the one the user just answered; the parking session's
-/// own cleanup is generation-checked instead (see `transfer::park_pending`).
+/// own cleanup is generation-checked instead (see `transfer::inbound::park_pending`).
 ///
 /// `conflict` (M6.5) is the ConflictModal's choice — `"rename"` or `"overwrite"`
 /// — folded into the SAME reply so there is one ordered answer per prompt. It is

@@ -75,7 +75,7 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// `pending` only covers the prompt window, and auto-accepted sessions
     /// never park there at all, so this set is what actually prevents a
     /// reused sender-chosen transfer_id from running concurrently with a
-    /// live session (see `transfer::InFlightGuard`).
+    /// live session (see `transfer::inbound::InFlightGuard`).
     pub in_flight: Arc<Mutex<HashSet<String>>>,
     pub completed: Arc<Mutex<CompletedLog>>,
     /// Trust store — consulted before the accept prompt so trusted peers (or

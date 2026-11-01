@@ -1,6 +1,6 @@
 //! File transfer over an authenticated Noise channel. Sender streams a paged manifest
 //! then chunked file bytes; receiver sanitizes every name, writes under the download
-//! root, and acks. DESIGN §1.4, §3.5. App wiring (events/commands) is in M3-B's lib/commands.
+//! root, and acks. DESIGN §1.4, §3.5. The commands that drive it are in `commands/`.
 //!
 //! One module per stage: the wire helpers, the send list, pacing, progress,
 //! the send side, the receive side, inbound orchestration, the pairing host and

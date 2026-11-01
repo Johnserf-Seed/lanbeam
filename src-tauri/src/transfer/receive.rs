@@ -137,7 +137,7 @@ pub(super) async fn read_manifest_entries(
 }
 
 /// Why a receiver said no, as it travels in `FileSendReply.reason`. Wire values —
-/// older builds send exactly these strings — written by the receiver below and
+/// older builds send exactly these strings — written by `handle_incoming` and
 /// read back by the sender in [`peer_reply_error`], so the two cannot drift.
 pub(crate) const REPLY_DECLINED: &str = "declined";
 pub(crate) const REPLY_BUSY: &str = "busy";

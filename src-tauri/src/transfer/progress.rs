@@ -36,6 +36,8 @@ pub enum FileEvent<'a> {
     /// (finding-4) — pause is bounded so it can never outlive the peer's idle
     /// timeout. NOT per-file: the sink emits `transfer_resumed` so the UI clears
     /// its optimistic `paused` flag (there is no other backend pause event).
+    ///
+    /// [`MAX_PAUSE_PARK`]: crate::consts::MAX_PAUSE_PARK
     PauseAutoResumed,
     /// SEND side only: the receiver answered `FileSendReply{accept:true}`. NOT
     /// per-file either: the sink emits `transfer_accepted`. Until this, the

@@ -1,6 +1,7 @@
-// quickTextSize mirrors the backend's two quick-text checks (commands.rs byte
-// cap, transfer.rs frame cap). The constants are hand-copied, so the contract
-// half of this file reads consts.rs and fails the moment either side moves.
+// quickTextSize mirrors the backend's two quick-text checks (the byte cap in
+// commands/transfer.rs, the frame cap in transfer/wire.rs). The constants are
+// hand-copied, so the contract half of this file reads consts.rs and fails the
+// moment either side moves.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";

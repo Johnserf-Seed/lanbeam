@@ -179,7 +179,7 @@ pub const CHUNK_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 /// directions, because the sender is write-only mid-stream and cannot read one
 /// (a keepalive can't cross a stalled write without splitting the Noise
 /// session) — so a symmetric bound is the framing-safe fix. See
-/// `transfer::wait_while_paused`.
+/// `transfer::pacing::wait_while_paused`.
 pub const MAX_PAUSE_PARK: Duration = Duration::from_secs(50);
 /// Sender's wait for the receiver's accept/decline `FileSendReply`. Must
 /// exceed the receiver's [`PROMPT_TIMEOUT`] window so a human answering at
@@ -195,7 +195,7 @@ pub const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
 /// still be flushing/syncing (later: hashing) large files after the last
 /// chunk lands. The actual deadline scales with the transfer size at
 /// [`ACK_DRAIN_RATE`], capped by [`ACK_TIMEOUT_MAX`] — see
-/// `transfer::ack_deadline`.
+/// `transfer::send::ack_deadline`.
 pub const ACK_TIMEOUT: Duration = Duration::from_secs(120);
 /// Ceiling of the size-scaled ack deadline: even a multi-terabyte transfer to
 /// glacial media must not pin the send task longer than this (M4.5).

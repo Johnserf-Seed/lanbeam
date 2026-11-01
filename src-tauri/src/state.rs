@@ -35,7 +35,7 @@ pub struct NetDegraded {
 }
 
 /// Incoming prompts awaiting a UI answer, by session id. See
-/// `transfer::park_pending`.
+/// `transfer::inbound::park_pending`.
 pub type PendingMap = HashMap<String, Parked>;
 
 /// One prompt waiting for the UI's answer.
@@ -155,7 +155,7 @@ impl Default for TransferControl {
 /// map. Held for the whole chunk phase; drop removes the entry so a finished,
 /// cancelled or errored session leaves no stale control behind (and a later
 /// cancel/pause of that id becomes a graceful no-op). Mirrors the ownership
-/// model of `transfer::InFlightGuard`.
+/// model of `transfer::inbound::InFlightGuard`.
 pub struct TransferCtlGuard {
     map: TransfersCtl,
     id: String,
