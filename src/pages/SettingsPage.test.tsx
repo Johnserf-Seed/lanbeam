@@ -10,7 +10,13 @@ import type { MyIdentity, NetworkInfo, Settings } from "../bridge/api";
 import i18n from "../i18n";
 import { copyText } from "../lib/sendops";
 import { useData, useOverlays, usePrefs, useToast } from "../lib/store";
-import { fireEvent, renderUI, screen, waitFor } from "../test/render";
+import {
+  checkForUpdate,
+  openReleasePage,
+  RELEASES_URL,
+  type UpdateCheck,
+} from "../lib/update";
+import { act, fireEvent, renderUI, screen, waitFor } from "../test/render";
 import SettingsPage from "./SettingsPage";
 
 vi.mock("../bridge/api", async (importOriginal) => {
@@ -35,6 +41,17 @@ vi.mock("../bridge/api", async (importOriginal) => {
 vi.mock("../lib/sendops", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../lib/sendops")>();
   return { ...actual, copyText: vi.fn().mockResolvedValue(true) };
+});
+
+// No test reaches GitHub: the check is answered by hand, and opening a page
+// is only recorded.
+vi.mock("../lib/update", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../lib/update")>();
+  return {
+    ...actual,
+    checkForUpdate: vi.fn(),
+    openReleasePage: vi.fn(() => Promise.resolve()),
+  };
 });
 
 // ── snapshots for reset ─────────────────────────────────────────────────────
@@ -221,6 +238,74 @@ describe("SettingsPage download-dir button (browser mode)", () => {
 
     expect(useToast.getState().msg).toBe(i18n.t("common.milestoneNote"));
     expect(vi.mocked(api.setDownloadDir)).not.toHaveBeenCalled();
+  });
+});
+
+describe("SettingsPage · 检查更新 (F2)", () => {
+  const checkButton = () =>
+    screen.getByRole<HTMLButtonElement>("button", {
+      name: i18n.t("settings.checkUpdate"),
+    });
+
+  it("asks nothing until pressed, then says a newer version is out and links to it", async () => {
+    let answer: (r: UpdateCheck) => void = () => {};
+    vi.mocked(checkForUpdate).mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    seed();
+    renderUI(<SettingsPage />);
+    expect(checkForUpdate).not.toHaveBeenCalled();
+    expect(screen.getByText(i18n.t("settings.updateDesc"))).toBeTruthy();
+
+    fireEvent.click(checkButton());
+    const checking = screen.getByRole<HTMLButtonElement>("button", {
+      name: i18n.t("settings.checkingUpdate"),
+    });
+    expect(checking.disabled).toBe(true);
+
+    const url = "https://github.com/Johnserf-Seed/lanbeam/releases/tag/v0.1.4";
+    await act(async () => answer({ kind: "newer", latest: "0.1.4", url }));
+    expect(
+      screen.getByText(i18n.t("settings.updateNewer", { latest: "0.1.4" }), {
+        exact: false,
+      }),
+    ).toBeTruthy();
+    fireEvent.click(
+      screen.getByRole("button", { name: i18n.t("settings.updateDownload") }),
+    );
+    expect(openReleasePage).toHaveBeenCalledWith(url);
+  });
+
+  it("says when this is the latest, and can be asked again", async () => {
+    vi.mocked(checkForUpdate).mockResolvedValue({
+      kind: "current",
+      latest: "0.1.3",
+    });
+    seed();
+    renderUI(<SettingsPage />);
+    fireEvent.click(checkButton());
+    expect(
+      await screen.findByText(i18n.t("settings.updateCurrent")),
+    ).toBeTruthy();
+    expect(checkButton().disabled).toBe(false);
+  });
+
+  it("says when it couldn't check, and offers the releases page instead", async () => {
+    vi.mocked(checkForUpdate).mockResolvedValue({ kind: "failed" });
+    seed();
+    renderUI(<SettingsPage />);
+    fireEvent.click(checkButton());
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: i18n.t("settings.updateOpenReleases"),
+      }),
+    );
+    expect(openReleasePage).toHaveBeenCalledWith(RELEASES_URL);
+    expect(
+      screen.getByText(i18n.t("settings.updateFailed"), { exact: false }),
+    ).toBeTruthy();
   });
 });
 

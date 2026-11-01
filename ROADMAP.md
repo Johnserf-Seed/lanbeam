@@ -14,7 +14,7 @@
 > - M7 配对码·QR / IP 直连 / 快传文本 + 剪贴板（传输层 version 2 门控）
 > - M8 浏览器接收（HTTP 回退）
 >
-> **M9 可选润色**：✅ **EXIF 抹除已交付**（`img-parts` 无重编码剥离 JPEG/PNG/WebP 的 EXIF/ICC/XMP + Extended-XMP；HEIC/TIFF/GIF/RAW 透传；剥离后 size+SHA-256 按流出字节重算、临时文件 RAII 全路径清理、Unix 0600/0700 权限；`stripExif` 开关真实化）。⬜ 检查更新（`tauri-plugin-updater`）：发布服务器**已就位**（GitHub Releases + `release.yml`，tauri-action 能直接生成 `latest.json`），**只差更新签名密钥**：`pnpm tauri signer generate` 生成密钥对 → 私钥存为仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（及其密码）→ 公钥写进 `tauri.conf.json` 的 updater 配置并开启 `bundle.createUpdaterArtifacts` → 把 `release.yml` 里的 `uploadUpdaterJson` 改为 true，再接前端· ~~⬜ 生效网络 SSID 检测~~ → **已放弃**：那个下拉框接的是空气（无后端字段、无命令、无读取方），而唯一诚实的实现是 Windows-only 的 WLAN FFI —— 在 macOS/Linux 上会静默失效，等于用一个新谎言换掉旧谎言。控件已从设置页移除；「可被发现」开关本来就在按需做这件事。
+> **M9 可选润色**：✅ **EXIF 抹除已交付**（`img-parts` 无重编码剥离 JPEG/PNG/WebP 的 EXIF/ICC/XMP + Extended-XMP；HEIC/TIFF/GIF/RAW 透传；剥离后 size+SHA-256 按流出字节重算、临时文件 RAII 全路径清理、Unix 0600/0700 权限；`stripExif` 开关真实化）。✅ **手动检查更新已交付**（设置页「检查更新」只在点击时向 GitHub Releases 读取最新版本号，比对后给出该版本的下载页；应用不会自己联网，也不下载、不安装）。⬜ 应用内自动更新（`tauri-plugin-updater`）：发布服务器**已就位**（GitHub Releases + `release.yml`，tauri-action 能直接生成 `latest.json`），**只差更新签名密钥**：`pnpm tauri signer generate` 生成密钥对 → 私钥存为仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（及其密码）→ 公钥写进 `tauri.conf.json` 的 updater 配置并开启 `bundle.createUpdaterArtifacts` → 把 `release.yml` 里的 `uploadUpdaterJson` 改为 true，再接前端· ~~⬜ 生效网络 SSID 检测~~ → **已放弃**：那个下拉框接的是空气（无后端字段、无命令、无读取方），而唯一诚实的实现是 Windows-only 的 WLAN FFI —— 在 macOS/Linux 上会静默失效，等于用一个新谎言换掉旧谎言。控件已从设置页移除；「可被发现」开关本来就在按需做这件事。
 >
 > **注**：暂停为「有时限」语义 —— 超过 50s 自动恢复（受帧层单向流 + Noise nonce 约束，无法安全加跨向 keepalive；已在代码中详述）。续传 offsets 用稀疏编码（仅非零、限帧预算），超预算文件回退到从头传。
 
@@ -80,7 +80,7 @@
 ## M9 · 媒体与润色（可选项）
 
 - EXIF 抹除（`img-parts`/`little_exif`，发送端临时副本，保证 size/hash 一致）→ stripExif 设置 + 发送前单次开关
-- 检查更新（`tauri-plugin-updater`）
+- 检查更新：✅ 手动检查（GitHub Releases，只在点击时）· ⬜ 应用内自动更新（`tauri-plugin-updater`，等签名密钥）
 
 ---
 
