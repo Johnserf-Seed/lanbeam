@@ -9,7 +9,7 @@ import { useOverlays, usePrefs, useTransfers, useTrust } from "../lib/store";
 import { fireEvent, renderUI, screen } from "../test/render";
 import ConflictModal from "./ConflictModal";
 
-// Partial mock: keep everything real (isTauri stays false, store.ts keeps its
+// Partial mock: keep everything real (isTauri stays false, the store keeps its
 // actual api) except replyFileRequest, which we spy on.
 vi.mock("../bridge/api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../bridge/api")>();

@@ -12,6 +12,28 @@ export function fmtBytes(bytes: number): string {
   return fmtMb(bytes / 1048576);
 }
 
+/** What a send is still waiting on, for its row and its detail (H10, F4): a free
+ *  slot on a receiver that already said yes, or a person — whose screen it is
+ *  already on, once the receiver says so. While a person has to look, the SAS
+ *  rides along. */
+export function awaitingText(tr: {
+  sas?: string;
+  peerState?: "prompted" | "queued";
+}): string {
+  if (tr.peerState === "queued") return i18n.t("transfers.awaitingSlot");
+  const shown = tr.peerState === "prompted";
+  if (!tr.sas)
+    return i18n.t(
+      shown ? "transfers.awaitingShown" : "transfers.awaitingAccept",
+    );
+  // The code never breaks across lines: half a code on each is no code to read.
+  const sas = fmtSas(tr.sas).replace(/ /g, "\u00a0");
+  return i18n.t(
+    shown ? "transfers.awaitingShownSas" : "transfers.awaitingAcceptSas",
+    { sas },
+  );
+}
+
 /** SAS codes render as spaced groups of three digits: `483 · 921 · 067`. */
 export function fmtSas(v: string | undefined | null): string {
   if (!v) return "";

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
-use lanbeam_lib::consts::TRANSFER_V2;
+use lanbeam_lib::consts::TRANSFER_V3;
 use lanbeam_lib::identity::generate_identity;
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
@@ -85,9 +85,9 @@ async fn bye_only_session_leaves_no_events_or_state() {
         .await
         .unwrap();
     let peer = initiator_hello(&mut s, "Prober".into()).await.unwrap();
-    // Two current builds negotiate the highest common version — v2 since M7
-    // (stage 7.0) appended it to SUPPORTED_VERSIONS.
-    assert_eq!(peer.version, TRANSFER_V2);
+    // Two current builds negotiate the highest common version — v3 since F4
+    // appended it to SUPPORTED_VERSIONS.
+    assert_eq!(peer.version, TRANSFER_V3);
     assert!(peer.name.is_some(), "responder must introduce itself");
     send_bye(&mut s).await.unwrap();
     drop(s);

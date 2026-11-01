@@ -13,8 +13,8 @@ import {
   useTransfers,
   useTrust,
 } from "../lib/store";
-import type { SendFile } from "../lib/store";
-import { fireEvent, renderUI, screen, waitFor } from "../test/render";
+import type { SendFile, UITransfer } from "../lib/store";
+import { act, fireEvent, renderUI, screen, waitFor } from "../test/render";
 import SendModal from "./SendModal";
 
 // beginSend is the real send entrypoint the confirm step fires; mock it so a
@@ -205,6 +205,27 @@ describe("SendModal · the waiting step", () => {
     expect(useToast.getState().msg).toBe(
       i18n.t("send.sentOneToast", { name: "Mini" }),
     );
+  });
+
+  it("says when the request is on their screen, and when they said yes but it waits for a slot (F4)", async () => {
+    waitOn();
+    const row = (patch: Partial<UITransfer>) =>
+      act(() =>
+        useTransfers.getState().upsert({
+          sessionId: "sess-1",
+          direction: "send",
+          status: "active",
+          ...patch,
+        }),
+      );
+    row({});
+    expect(screen.getByText(i18n.t("send.waitingState"))).toBeInTheDocument();
+    row({ peerState: "prompted" });
+    expect(screen.getByText(i18n.t("send.shownState"))).toBeInTheDocument();
+    row({ peerState: "queued" });
+    expect(screen.getByText(i18n.t("send.queuedState"))).toBeInTheDocument();
+    // Queued over there is not accepted yet: the step stays open until it is.
+    expect(useOverlays.getState().send?.step).toBe("waiting");
   });
 
   it("取消未确认的请求 cancels the requests still waiting — not just the window (M20)", async () => {

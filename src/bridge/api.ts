@@ -224,6 +224,15 @@ export type TransferEvent = {
   /** the peer — on a queued send (M25), the first event the row gets */
   deviceId?: string;
 };
+/** Where a send stands on the receiver while it waits for an answer
+ *  (`transfer_pending`, F4) — said only by a receiver new enough to: `prompted`
+ *  is on their screen, waiting for a person; `queued` is accepted there and
+ *  waiting for one of its transfer slots. */
+export type TransferPendingEvent = {
+  sessionId: string;
+  direction: "send";
+  state: "prompted" | "queued";
+};
 /** The SAS of an outgoing send, emitted once the connection is up (H10). */
 export type SasEvent = { sessionId?: string; sas: string; deviceId?: string };
 /** Silent network degradations surfaced by the backend (M4.6).

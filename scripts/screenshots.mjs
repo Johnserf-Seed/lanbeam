@@ -84,7 +84,7 @@ async function launchBrowser() {
 async function stage(page, shot) {
   await page.evaluate(
     async ({ quiet, scene }) => {
-      const S = await import("/src/lib/store.ts");
+      const S = await import("/src/lib/store/index.ts");
       const { demoContent } = await import("/src/lib/demoContent.ts");
       const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const c = demoContent();

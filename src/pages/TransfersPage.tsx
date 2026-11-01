@@ -4,7 +4,13 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip, Segmented } from "../components/ui";
-import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
+import {
+  awaitingText,
+  etaClock,
+  extOf,
+  fmtBytes,
+  fmtWhen,
+} from "../lib/format";
 import { copyText, resendTransfer } from "../lib/sendops";
 import {
   showToast,
@@ -278,9 +284,7 @@ function RunningRow({ tr }: { tr: UITransfer }) {
             {queued
               ? t("transfers.queued")
               : awaiting
-                ? tr.sas
-                  ? t("transfers.awaitingAcceptSas", { sas: fmtSas(tr.sas) })
-                  : t("transfers.awaitingAccept")
+                ? awaitingText(tr)
                 : tr.paused
                   ? t("transfers.speedPaused")
                   : verifiedN > 0

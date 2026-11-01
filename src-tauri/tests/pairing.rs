@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
-use lanbeam_lib::consts::{DEFAULT_TCP_PORT, TRANSFER_V2};
+use lanbeam_lib::consts::{DEFAULT_TCP_PORT, TRANSFER_V3};
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
@@ -146,8 +146,8 @@ async fn loopback_pairing_emits_pair_joined_and_trusts_nothing() {
         .await
         .unwrap();
     assert_eq!(
-        peer.version, TRANSFER_V2,
-        "two current builds negotiate v2 pairing"
+        peer.version, TRANSFER_V3,
+        "two current builds negotiate the newest version, pairing included"
     );
     send_pair_request(&mut sess, "482913", None).await.unwrap();
     let (accept, host_name, reason) = recv_pair_confirm(&mut sess).await.unwrap();

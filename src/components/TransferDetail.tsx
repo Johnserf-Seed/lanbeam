@@ -2,7 +2,13 @@ import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
-import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
+import {
+  awaitingText,
+  etaClock,
+  extOf,
+  fmtBytes,
+  fmtWhen,
+} from "../lib/format";
 import { resendTransfer, revealFile, transferErrText } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
 import {
@@ -434,7 +440,9 @@ export default function TransferDetail() {
                   style={{
                     fontSize: 11,
                     color: isError ? "var(--danger)" : speedColor,
-                    whiteSpace: "nowrap",
+                    // A waiting send's line carries the SAS both screens
+                    // compare: it wraps rather than lose the code to "…".
+                    whiteSpace: isAwaiting ? "normal" : "nowrap",
                     overflow: "hidden",
                     textOverflow: "ellipsis",
                   }}
@@ -444,11 +452,7 @@ export default function TransferDetail() {
                     : isQueued
                       ? t("transfers.queued")
                       : isAwaiting
-                        ? tr.sas
-                          ? t("transfers.awaitingAcceptSas", {
-                              sas: fmtSas(tr.sas),
-                            })
-                          : t("transfers.awaitingAccept")
+                        ? awaitingText(tr)
                         : `${(tr.speedBps / 1048576).toFixed(1)} MB/s`}
                 </span>
                 <span
