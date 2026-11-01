@@ -152,7 +152,7 @@ pub enum AppMessage {
     /// 同时写入对方剪贴板 toggle): additive + `#[serde(default)]`, so a peer that
     /// omits it decodes to `None`. It is only a request — the receiver still gates
     /// the clipboard write on its OWN `clip_share` consent setting (see
-    /// `transfer::handle_text_received`), so the receiver always has the final say.
+    /// `transfer::text::handle_text_received`), so the receiver always has the final say.
     TextSend {
         text: String,
         #[serde(default)]

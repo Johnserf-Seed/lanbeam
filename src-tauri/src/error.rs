@@ -137,7 +137,7 @@ impl LanBeamError {
     /// this match and fails on a code it has no words for.
     ///
     /// The receiver also sends its own code to the sender as the
-    /// `TransferAck.error` token; `transfer::peer_ack_error` turns it back into
+    /// `TransferAck.error` token; `transfer::receive::peer_ack_error` turns it back into
     /// the sender-side kind.
     /// WHY: the UI must tell "the peer said no" apart from a genuine failure
     /// without string-matching the human-oriented `error` text (M4.5), and the
