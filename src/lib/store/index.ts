@@ -6,7 +6,7 @@ import {
   type StateStorage,
   type StorageValue,
 } from "zustand/middleware";
-import * as api from "../bridge/api";
+import * as api from "../../bridge/api";
 import type {
   MyIdentity,
   Settings,
@@ -16,11 +16,11 @@ import type {
   NetworkInfo,
   TransferErrorCode,
   TrustedPeer,
-} from "../bridge/api";
-import { baseName, extOf } from "./format";
-import type { FileCat } from "./filecat";
-import { fileCat } from "./filecat";
-import { playSound, type SoundKind } from "./sound";
+} from "../../bridge/api";
+import { baseName, extOf } from "../format";
+import type { FileCat } from "../filecat";
+import { fileCat } from "../filecat";
+import { playSound, type SoundKind } from "../sound";
 
 /* ── persistence ────────────────────────────────────────────────────────── */
 
