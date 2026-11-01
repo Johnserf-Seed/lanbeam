@@ -102,11 +102,12 @@ export type TextReceivedEvent = {
   at: number;
 };
 
-/** A browser fetched one file from a live share (`share_download`). Fired once
- *  per successful download so the app can surface it — toast, history entry,
- *  OS notification and a live count on the open share panel. `downloads` is the
- *  whole-set count so far (matches ShareEntry.downloads); `peerIp` is who pulled
- *  it. */
+/** A browser downloaded one file from a live share (`share_download`). Fired
+ *  once per download — a device's first fetch of the file; the same device
+ *  resuming or re-fetching it fires nothing — so the app can surface it: toast,
+ *  history entry, OS notification and a live count on the open share panel.
+ *  `downloads` is the whole-set count so far (matches ShareEntry.downloads);
+ *  `peerIp` is who pulled it. */
 export type ShareDownloadEvent = {
   token: string;
   index: number;

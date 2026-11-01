@@ -24,12 +24,13 @@
 //! unguessable token plus the per-request limits are what keep it safe; nothing
 //! is served without a valid token.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
+use std::collections::{HashMap, HashSet};
+use std::io::SeekFrom;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use axum::{
     body::Body,
@@ -40,6 +41,7 @@ use axum::{
     Extension, Router,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
@@ -69,6 +71,12 @@ pub const MAX_SHARE_DOWNLOADS: u32 = 1000;
 /// granularity and stays under `tokio::fs::File`'s 2 MiB max-buffer, so each poll
 /// is still a single blocking read.
 const SHARE_STREAM_BUF: usize = 64 * 1024;
+
+/// How many devices one shared file remembers as having downloaded it (see
+/// [`Share::admit`]). A capped file can't pass its cap, which is at most
+/// [`MAX_SHARE_DOWNLOADS`]; this bounds an UNLIMITED one, where a device past it
+/// simply counts again each time it comes back.
+const MAX_HOLDERS_PER_FILE: usize = MAX_SHARE_DOWNLOADS as usize;
 
 /// Clamp a requested TTL (seconds) into [`SHARE_TTL_RANGE_SECS`] and return it
 /// as the [`Duration`] [`create_share`]/[`update_share`] take.
@@ -117,12 +125,17 @@ pub struct Share {
     /// The PER-FILE download cap, or `None` for unlimited: "N 次" means each
     /// shared file may be fetched N times.
     max_downloads: Option<u32>,
-    /// How many times each file has been fetched, by index — a served file bumps
-    /// its OWN count, under the registry lock at the START of the serve (see
-    /// [`download`]); a HEAD probe never does (it delivers no bytes). Per file
+    /// How many times each file has been downloaded, by index — a device's FIRST
+    /// fetch of a file bumps that file's OWN count, under the registry lock at
+    /// the START of the serve (see [`Share::admit`]); the same device coming back
+    /// never does, and neither does a HEAD probe (it delivers no bytes). Per file
     /// (M3): one pooled tally against `N × files.len()` let a single file of a
     /// three-file "once each" share be fetched three times.
     fetches: Vec<u32>,
+    /// Who has downloaded each file, by index: the source addresses whose fetch
+    /// spent one of its downloads. Coming back — to resume, to seek, or to start
+    /// over — costs them nothing.
+    holders: Vec<HashSet<IpAddr>>,
     /// Cleared by [`stop_share`]; a stopped share answers 410 on every request
     /// until the sweep reclaims it.
     active: bool,
@@ -145,11 +158,10 @@ enum Denied {
 }
 
 impl Share {
-    /// Whether the share may serve RIGHT NOW, given the caller's `now`. Passing
-    /// `now` in (rather than reading the clock here) keeps the gate a pure
-    /// function the tests pin down deterministically. Order of refusal does not
-    /// matter — any failing check means "not serveable".
-    fn check(&self, now: Instant) -> std::result::Result<(), Denied> {
+    /// Whether the share is still up — not stopped, not past its TTL — given the
+    /// caller's `now`. Passing `now` in (rather than reading the clock here)
+    /// keeps the gates pure functions the tests pin down deterministically.
+    fn live(&self, now: Instant) -> std::result::Result<(), Denied> {
         if !self.active {
             return Err(Denied::Gone);
         }
@@ -158,6 +170,14 @@ impl Share {
         if now.duration_since(self.created) >= self.ttl {
             return Err(Denied::Gone);
         }
+        Ok(())
+    }
+
+    /// Whether the share may serve a device that hasn't downloaded from it yet,
+    /// RIGHT NOW: live, with a download left on some file. Order of refusal does
+    /// not matter — any failing check means "not serveable".
+    fn check(&self, now: Instant) -> std::result::Result<(), Denied> {
+        self.live(now)?;
         // Serveable while ANY file has a download left; each file's own count
         // is checked when it is fetched (`file_has_budget`).
         if let Some(per_file) = self.max_downloads {
@@ -181,6 +201,52 @@ impl Share {
     fn whole_set_downloads(&self) -> u32 {
         self.fetches.iter().copied().min().unwrap_or(0)
     }
+
+    /// Whether the device at `ip` has downloaded any file of this share.
+    fn has_holder(&self, ip: IpAddr) -> bool {
+        self.holders.iter().any(|h| h.contains(&ip))
+    }
+
+    /// Let the device at `ip` fetch file `index`, or say why not. Returns whether
+    /// the fetch SPENT one of the file's downloads.
+    ///
+    /// A device that already downloaded this file is back for that same download
+    /// — resuming one that broke off, seeking, or a browser that retries from the
+    /// top — so it is served without spending anything, even once the file's
+    /// downloads are gone: a "once" link that dies the first time the Wi-Fi
+    /// blinks has given nobody the file. Any other device spends one (when
+    /// `spend`: a HEAD delivers nothing, so it spends nothing) and is remembered
+    /// as holding the file. The device is its source address, which on a LAN
+    /// stays put for as long as a download takes.
+    fn admit(
+        &mut self,
+        index: usize,
+        ip: IpAddr,
+        spend: bool,
+        now: Instant,
+    ) -> std::result::Result<bool, Denied> {
+        self.live(now)?;
+        if index >= self.files.len() {
+            // A valid token but no such file index — a fabricated or stale link.
+            return Err(Denied::NotFound);
+        }
+        if self.holders[index].contains(&ip) {
+            return Ok(false);
+        }
+        // THIS file's downloads are spent, even if others' are not (M3).
+        if !self.file_has_budget(index) {
+            return Err(Denied::Gone);
+        }
+        if !spend {
+            return Ok(false);
+        }
+        self.fetches[index] += 1;
+        let holders = &mut self.holders[index];
+        if holders.len() < MAX_HOLDERS_PER_FILE {
+            holders.insert(ip);
+        }
+        Ok(true)
+    }
 }
 
 /// The shared registry of live shares: token → [`Share`]. Cloned (Arc) into both
@@ -194,10 +260,12 @@ pub fn new_registry() -> ShareRegistry {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-/// Emitted once for every file a browser actually fetches over a live share, so
+/// Emitted once for every file a device actually downloads over a live share, so
 /// the app can surface the download (toast / history / notification / live
-/// count). Fired on a real, successful GET only — never a HEAD probe or a fetch
-/// whose file vanished. Serialized camelCase to match the frontend event shape.
+/// count). Fired on a device's first real, successful GET of the file only —
+/// never a HEAD probe, a fetch that delivered nothing, or the same device coming
+/// back to resume or re-fetch it. Serialized camelCase to match the frontend
+/// event shape.
 #[derive(Clone, Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareDownloadEvent {
@@ -220,7 +288,8 @@ pub struct ShareDownloadEvent {
     pub peer_ip: String,
 }
 
-/// An optional sink the download handler calls once per successful file fetch.
+/// An optional sink the download handler calls once per download (see
+/// [`ShareDownloadEvent`]).
 /// `None` in tests (and anywhere without a Tauri app); the real app wires it to
 /// emit the [`ShareDownloadEvent`] + fire an OS notification. Cloneable + thread
 /// safe so it can ride an axum `Extension` layer into the handler.
@@ -275,6 +344,7 @@ pub fn create_share(
     let share = Share {
         token: token.clone(),
         fetches: vec![0; share_files.len()],
+        holders: vec![HashSet::new(); share_files.len()],
         files: share_files,
         created: Instant::now(),
         ttl,
@@ -329,7 +399,8 @@ pub fn sweep(registry: &ShareRegistry, now: Instant) -> bool {
 /// change, never from the original mint (which would surprise the user
 /// reconfiguring an old share). The download COUNTER is left as-is: slots
 /// already spent stay spent, so lowering the cap below the current count simply
-/// retires the share (its next request 410s), the honest outcome. Returns the
+/// retires the share — the next new device gets a 410, the honest outcome (one
+/// that already downloaded can still finish; see [`Share::admit`]). Returns the
 /// new display expiry (unix seconds), or `None` for an unknown, already-stopped,
 /// or already-expired token — a no-op-safe call either way.
 pub fn update_share(
@@ -444,14 +515,21 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// Refund one download slot for `token` after a reserved serve failed to start
-/// (the file vanished between registration and the request). Best-effort: a
-/// missing share or poisoned lock is a no-op — the worst case is one download
-/// counted that did not deliver, which errs toward serving fewer, never more.
-fn refund(registry: &ShareRegistry, token: &str, index: usize) {
+/// Give back the download a fetch by `ip` spent on file `index` of `token` when
+/// the fetch then delivered nothing (the file vanished since it was registered,
+/// or the range asked for names no byte of it), and forget that device as
+/// holding the file. Best-effort: a missing share or poisoned lock is a no-op —
+/// the worst case is one download counted that did not deliver, which errs
+/// toward serving fewer, never more.
+fn refund(registry: &ShareRegistry, token: &str, index: usize, ip: IpAddr) {
     if let Ok(mut map) = registry.lock() {
-        if let Some(n) = map.get_mut(token).and_then(|s| s.fetches.get_mut(index)) {
-            *n = n.saturating_sub(1);
+        if let Some(s) = map.get_mut(token) {
+            if let Some(n) = s.fetches.get_mut(index) {
+                *n = n.saturating_sub(1);
+            }
+            if let Some(h) = s.holders.get_mut(index) {
+                h.remove(&ip);
+            }
         }
     }
 }
@@ -605,7 +683,9 @@ async fn lan_only(
 /// `GET /s/:token` — the entry point a shared link points at. Validates the token
 /// and renders the landing page: the brand, the file list, one download link per
 /// index. This route never counts against the download budget — only fetching a
-/// file does.
+/// file does. A device that already downloaded from the share keeps its page
+/// once the downloads are spent: it is how that device gets back to a download
+/// that broke off.
 ///
 /// A single-file share used to 302 straight to the download, which quietly meant
 /// the landing page was skipped in the most common case there is. That page is not
@@ -615,6 +695,7 @@ async fn lan_only(
 /// point of having it.
 async fn landing(
     State(reg): State<ShareRegistry>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     UrlPath(token): UrlPath<String>,
 ) -> Response {
@@ -635,7 +716,13 @@ async fn landing(
             Some(s) => s,
             None => return denied(Denied::NotFound, lang),
         };
-        if let Err(d) = share.check(Instant::now()) {
+        let now = Instant::now();
+        let verdict = if share.has_holder(peer.ip()) {
+            share.live(now)
+        } else {
+            share.check(now)
+        };
+        if let Err(d) = verdict {
             return denied(d, lang);
         }
         share
@@ -647,13 +734,15 @@ async fn landing(
     Html(render_landing(&token, &listing, lang)).into_response()
 }
 
-/// `GET /s/:token/:index` — stream one registered file as an attachment (a HEAD
-/// on the same route returns those headers only, spending no slot). Validates
-/// the token, bounds-checks the index and reserves a download slot ALL under the
-/// registry lock, so N concurrent requests can never collectively exceed the
-/// file's budget (the per-file cap). The file is then opened
-/// and streamed with the lock released (never held across `.await`); a file that
-/// vanished since creation refunds its slot and 404s.
+/// `GET /s/:token/:index` — stream one registered file as an attachment, whole
+/// or the one byte range a `Range` asks for (a HEAD on the same route returns
+/// the headers only, spending nothing). The token, the index and this device's
+/// standing are settled ALL under the registry lock ([`Share::admit`]), so N
+/// concurrent first fetches can never collectively exceed the file's budget (the
+/// per-file cap). The file is then opened and streamed with the lock released
+/// (never held across `.await`); a fetch that turns out to deliver nothing — the
+/// file vanished since creation, or the range names no byte of it — refunds the
+/// download it spent.
 async fn download(
     State(reg): State<ShareRegistry>,
     Extension(on_download): Extension<DownloadHook>,
@@ -672,6 +761,8 @@ async fn download(
             .get(header::ACCEPT_LANGUAGE)
             .and_then(|v| v.to_str().ok()),
     );
+    let ip = peer.ip();
+    let i = index as usize;
 
     let (path, name, size, ev) = {
         let mut map = match reg.lock() {
@@ -682,86 +773,120 @@ async fn download(
             Some(s) => s,
             None => return denied(Denied::NotFound, lang),
         };
-        if let Err(d) = share.check(Instant::now()) {
-            return denied(d, lang);
-        }
-        let (path, name, size) = match share.files.get(index as usize) {
-            Some(f) => (f.path.clone(), f.name.clone(), f.size),
-            // A valid token but no such file index — a fabricated or stale link.
-            None => return denied(Denied::NotFound, lang),
+        let spent = match share.admit(i, ip, !is_head, Instant::now()) {
+            Ok(spent) => spent,
+            Err(d) => return denied(d, lang),
         };
-        // THIS file's downloads are spent, even if others' are not (M3).
-        if !share.file_has_budget(index as usize) {
-            return denied(Denied::Gone, lang);
+        let f = &share.files[i];
+        // A download is assembled here (counts consistent under the lock) but
+        // only FIRED once the response is sure to carry bytes — a fetch that
+        // delivers nothing refunds what it spent and surfaces nothing. A device
+        // coming back for a download it already has surfaces nothing either: it
+        // was surfaced the first time.
+        let ev = spent.then(|| ShareDownloadEvent {
+            token: token.clone(),
+            index,
+            name: f.name.clone(),
+            size: f.size,
+            // Whole-SET count, matching ShareInfo.downloads.
+            downloads: share.whole_set_downloads(),
+            max_downloads: share.max_downloads,
+            file_count: share.files.len().max(1),
+            peer_ip: ip.to_string(),
+        });
+        (f.path.clone(), f.name.clone(), f.size, ev)
+    };
+    let spent = ev.is_some();
+    let give_back = || {
+        if spent {
+            refund(&reg, &token, i, ip);
         }
-        // Reserve the slot atomically with the checks above — but only for a
-        // real GET. A HEAD delivers no bytes, so it reserves nothing. The event
-        // is assembled here (counts consistent under the lock) but only FIRED
-        // later, once the file actually opens — a vanished file refunds the slot
-        // and surfaces nothing.
-        let ev = if is_head {
-            None
-        } else {
-            share.fetches[index as usize] += 1;
-            let file_count = share.files.len().max(1);
-            Some(ShareDownloadEvent {
-                token: token.clone(),
-                index,
-                name: name.clone(),
-                size,
-                // Whole-SET count, matching ShareInfo.downloads.
-                downloads: share.whole_set_downloads(),
-                max_downloads: share.max_downloads,
-                file_count,
-                peer_ip: peer.ip().to_string(),
-            })
-        };
-        (path, name, size, ev)
     };
 
-    // HEAD: advertise the captured metadata and stop — no file open, no body,
-    // no slot spent. Content-Length is the size captured at creation (the same
-    // value a GET falls back to when the live metadata is unreadable).
+    // HEAD: advertise what a GET would carry and stop — no file open, no body,
+    // no slot spent. The live length and validators where the file can be
+    // stat'ed; otherwise the size captured at creation.
     if is_head {
+        let meta = tokio::fs::metadata(&path).await.ok();
         let mut resp = Response::new(Body::empty());
-        apply_file_headers(resp.headers_mut(), size, &name);
+        apply_file_headers(
+            resp.headers_mut(),
+            meta.as_ref().map_or(size, |m| m.len()),
+            &name,
+            meta.as_ref().and_then(Validators::of).as_ref(),
+        );
         return resp;
     }
 
-    match tokio::fs::File::open(&path).await {
-        Ok(file) => {
-            // Prefer the live length so Content-Length matches the bytes we
-            // actually stream; fall back to the size captured at creation.
-            let len = match file.metadata().await {
-                Ok(m) => m.len(),
-                Err(_) => size,
-            };
-            let body = Body::from_stream(ReaderStream::with_capacity(file, SHARE_STREAM_BUF));
-            let mut resp = Response::new(body);
-            apply_file_headers(resp.headers_mut(), len, &name);
-            // The file opened and is about to stream — a real download. Surface
-            // it to the app. (`ev` is None for a HEAD, and this arm is never
-            // reached when the file vanished, so no false positives.)
-            if let (Some(ev), Some(hook)) = (ev, &on_download) {
-                hook(ev);
-            }
-            resp
-        }
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(f) => f,
         Err(e) => {
             // The file is gone since it was registered — give the slot back and
             // report it as missing rather than leaking the OS error.
-            refund(&reg, &token, index as usize);
+            give_back();
             log::warn!("share file {} unavailable: {e}", path.display());
-            denied(Denied::NotFound, lang)
+            return denied(Denied::NotFound, lang);
+        }
+    };
+    // Prefer the live length so Content-Length matches the bytes we actually
+    // stream; fall back to the size captured at creation.
+    let meta = file.metadata().await.ok();
+    let len = meta.as_ref().map_or(size, |m| m.len());
+    let validators = meta.as_ref().and_then(Validators::of);
+    let range = headers.get(header::RANGE).and_then(|v| v.to_str().ok());
+    let if_range = headers.get(header::IF_RANGE).and_then(|v| v.to_str().ok());
+    let wanted = if range_applies(if_range, validators.as_ref()) {
+        requested_range(range, len)
+    } else {
+        Requested::Whole
+    };
+    let (status, first, count) = match wanted {
+        Requested::Whole => (StatusCode::OK, 0, len),
+        Requested::Part { first, last } => (StatusCode::PARTIAL_CONTENT, first, last - first + 1),
+        Requested::Unsatisfiable => {
+            give_back();
+            return unsatisfiable(len);
+        }
+    };
+    if first > 0 {
+        if let Err(e) = file.seek(SeekFrom::Start(first)).await {
+            give_back();
+            log::warn!("share file {} seek failed: {e}", path.display());
+            return internal_error(lang);
         }
     }
+
+    // `take` holds the body to exactly the length advertised, even if the file
+    // grows while it streams.
+    let body = Body::from_stream(ReaderStream::with_capacity(
+        file.take(count),
+        SHARE_STREAM_BUF,
+    ));
+    let mut resp = Response::new(body);
+    *resp.status_mut() = status;
+    apply_file_headers(resp.headers_mut(), count, &name, validators.as_ref());
+    if status == StatusCode::PARTIAL_CONTENT {
+        let last = first + count - 1;
+        if let Ok(v) = HeaderValue::from_str(&format!("bytes {first}-{last}/{len}")) {
+            resp.headers_mut().insert(header::CONTENT_RANGE, v);
+        }
+    }
+    // The file opened and is about to stream — a real download. Surface it to
+    // the app. (`ev` is None for a HEAD or a device coming back, and this point
+    // is never reached by a fetch that delivers nothing, so no false positives.)
+    if let (Some(ev), Some(hook)) = (ev, &on_download) {
+        hook(ev);
+    }
+    resp
 }
 
-/// Set the download response headers a share serves for a file of `len` bytes
-/// named `name`: octet-stream type, content length, and an `attachment`
-/// disposition. Shared by the GET stream and the HEAD probe so both advertise
-/// identical metadata (a HEAD must report what a GET would send).
-fn apply_file_headers(h: &mut HeaderMap, len: u64, name: &str) {
+/// Set the download response headers a share serves for a body of `len` bytes
+/// of the file named `name`: octet-stream type, content length, an `attachment`
+/// disposition, `Accept-Ranges` (what tells a browser a broken download can be
+/// resumed rather than restarted), and — when the file's mtime is readable — the
+/// validators it resumes with. Shared by the GET stream and the HEAD probe so
+/// both advertise identical metadata (a HEAD must report what a GET would send).
+fn apply_file_headers(h: &mut HeaderMap, len: u64, name: &str, v: Option<&Validators>) {
     h.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/octet-stream"),
@@ -772,6 +897,142 @@ fn apply_file_headers(h: &mut HeaderMap, len: u64, name: &str) {
     if let Ok(v) = HeaderValue::from_str(&content_disposition(name)) {
         h.insert(header::CONTENT_DISPOSITION, v);
     }
+    h.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Some(v) = v {
+        if let Ok(etag) = HeaderValue::from_str(&v.etag) {
+            h.insert(header::ETAG, etag);
+        }
+        if let Ok(date) = HeaderValue::from_str(&v.last_modified) {
+            h.insert(header::LAST_MODIFIED, date);
+        }
+    }
+}
+
+/// What a GET's `Range` asks of a `len`-byte file (RFC 9110 §14).
+#[derive(Debug, PartialEq, Eq)]
+enum Requested {
+    /// The whole file: no `Range`, or one this server ignores — another unit, a
+    /// malformed spec, or several ranges (those would need a multipart body, and
+    /// a server may always answer with the whole representation instead).
+    Whole,
+    /// Bytes `first..=last`, already clamped to the file.
+    Part { first: u64, last: u64 },
+    /// A well-formed range no byte of the file satisfies: 416.
+    Unsatisfiable,
+}
+
+/// Read a `Range` header against a `len`-byte file. One range is all a browser
+/// asks for — a download resuming at its offset, a player seeking — and all
+/// this server serves.
+fn requested_range(range: Option<&str>, len: u64) -> Requested {
+    /// A decimal byte position: digits only (`u64`'s parser would also take a
+    /// leading `+`), and nothing a `u64` can't hold.
+    fn pos(s: &str) -> Option<u64> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        s.parse().ok()
+    }
+
+    let Some(range) = range else {
+        return Requested::Whole;
+    };
+    // An empty file has no byte to range over; its whole (empty) body is the
+    // only honest answer.
+    if len == 0 {
+        return Requested::Whole;
+    }
+    let Some((unit, spec)) = range.split_once('=') else {
+        return Requested::Whole;
+    };
+    if !unit.trim().eq_ignore_ascii_case("bytes") || spec.contains(',') {
+        return Requested::Whole;
+    }
+    let Some((first, last)) = spec.trim().split_once('-') else {
+        return Requested::Whole;
+    };
+    if first.is_empty() {
+        // `-N`: the last N bytes — all of them if the file is shorter.
+        return match pos(last) {
+            Some(0) => Requested::Unsatisfiable,
+            Some(n) => Requested::Part {
+                first: len.saturating_sub(n),
+                last: len - 1,
+            },
+            None => Requested::Whole,
+        };
+    }
+    let Some(first) = pos(first) else {
+        return Requested::Whole;
+    };
+    let last = match last {
+        "" => len - 1,
+        l => match pos(l) {
+            // A last before the first makes the spec invalid, not unsatisfiable.
+            Some(l) if l >= first => l.min(len - 1),
+            _ => return Requested::Whole,
+        },
+    };
+    if first >= len {
+        return Requested::Unsatisfiable;
+    }
+    Requested::Part { first, last }
+}
+
+/// Whether a `Range` may be honoured under the request's `If-Range` (RFC 9110
+/// §13.1.5). With none, it may. With one, only if it still names the file as it
+/// is now — otherwise the client is resuming something that has since changed,
+/// and gets the whole file to start over with. A weak tag never matches (the
+/// condition takes a strong comparison) and this server issues only strong ones.
+fn range_applies(if_range: Option<&str>, v: Option<&Validators>) -> bool {
+    match (if_range.map(str::trim), v) {
+        (None, _) => true,
+        (Some(cond), Some(v)) => cond == v.etag || cond == v.last_modified,
+        (Some(_), None) => false,
+    }
+}
+
+/// The validators a download carries so a client can resume it safely: Chrome
+/// and Safari resume a broken download only when the response named the file
+/// with a strong ETag or a Last-Modified they can send back in `If-Range`. Both
+/// derive from the file's length and mtime, so a file changed since the download
+/// began no longer matches, and the resume starts over instead of splicing two
+/// versions together.
+struct Validators {
+    etag: String,
+    last_modified: String,
+}
+
+impl Validators {
+    /// `None` where the platform gives no mtime: the download is still served,
+    /// it just can't be resumed safely.
+    fn of(meta: &std::fs::Metadata) -> Option<Self> {
+        let mtime = meta.modified().ok()?;
+        let nanos = mtime.duration_since(std::time::UNIX_EPOCH).ok()?.as_nanos();
+        Some(Self {
+            etag: format!("\"{:x}-{nanos:x}\"", meta.len()),
+            last_modified: http_date(mtime),
+        })
+    }
+}
+
+/// `t` as an HTTP date (RFC 9110 §5.6.7's IMF-fixdate), e.g.
+/// `Sun, 06 Nov 1994 08:49:37 GMT`.
+fn http_date(t: SystemTime) -> String {
+    chrono::DateTime::<chrono::Utc>::from(t)
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string()
+}
+
+/// 416 for a range that names no byte of a `len`-byte file, saying how long the
+/// file is so the client can ask again within it.
+fn unsatisfiable(len: u64) -> Response {
+    let mut resp = Response::new(Body::empty());
+    *resp.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+    if let Ok(v) = HeaderValue::from_str(&format!("bytes */{len}")) {
+        resp.headers_mut().insert(header::CONTENT_RANGE, v);
+    }
+    resp
 }
 
 /// The tiny HTML error page for a refused request, with the right status.
@@ -1056,11 +1317,13 @@ mod tests {
     }
 
     /// Serve a registry with an explicit download hook, so a test can assert the
-    /// [`ShareDownloadEvent`] a real fetch fires (`serve` passes `None`).
+    /// [`ShareDownloadEvent`] a real fetch fires (`serve` passes `None`). A
+    /// request carrying an `x-test-peer` header arrives from that address rather
+    /// than loopback — how one test plays several devices on the LAN.
     async fn serve_with_hook(registry: ShareRegistry, on_download: DownloadHook) -> SocketAddr {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router(registry, on_download);
+        let app = router(registry, on_download).layer(axum::middleware::from_fn(as_test_peer));
         tokio::spawn(async move {
             let svc = app.into_make_service_with_connect_info::<SocketAddr>();
             let _ = axum::serve(listener, svc).await;
@@ -1068,12 +1331,44 @@ mod tests {
         addr
     }
 
-    /// A one-shot HTTP/1.1 GET (Connection: close) returning
-    /// `(status, header_block, body)`. Reading to EOF is safe because the close
-    /// header makes the server drop the connection after the response.
-    async fn http_get(addr: SocketAddr, path: &str) -> (u16, String, Vec<u8>) {
+    /// Test-only: re-address a request to the device its `x-test-peer` header
+    /// names, ahead of everything the real router does with the address.
+    async fn as_test_peer(
+        mut req: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> Response {
+        let peer = req
+            .headers()
+            .get("x-test-peer")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.parse::<IpAddr>().ok());
+        if let Some(ip) = peer {
+            req.extensions_mut()
+                .insert(ConnectInfo(SocketAddr::new(ip, 50_000)));
+        }
+        next.run(req).await
+    }
+
+    /// Three devices on the LAN, as request headers for [`http`].
+    const PHONE: (&str, &str) = ("x-test-peer", "192.168.1.21");
+    const TABLET: (&str, &str) = ("x-test-peer", "192.168.1.22");
+    const LAPTOP: (&str, &str) = ("x-test-peer", "192.168.1.23");
+
+    /// A one-shot HTTP/1.1 request (Connection: close) with `extra` header lines,
+    /// returning `(status, header_block, body)`. Reading to EOF is safe because
+    /// the close header makes the server drop the connection after the response.
+    async fn http(
+        addr: SocketAddr,
+        method: &str,
+        path: &str,
+        extra: &[(&str, &str)],
+    ) -> (u16, String, Vec<u8>) {
         let mut stream = TcpStream::connect(addr).await.unwrap();
-        let req = format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
+        let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
+        for (name, value) in extra {
+            req.push_str(&format!("{name}: {value}\r\n"));
+        }
+        req.push_str("\r\n");
         stream.write_all(req.as_bytes()).await.unwrap();
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).await.unwrap();
@@ -1092,22 +1387,23 @@ mod tests {
         (status, head, body)
     }
 
-    /// A one-shot HTTP/1.1 HEAD (Connection: close) returning `(status,
-    /// header_block)`. A HEAD carries no body, so only the head is read.
+    /// A plain GET from loopback: `(status, header_block, body)`.
+    async fn http_get(addr: SocketAddr, path: &str) -> (u16, String, Vec<u8>) {
+        http(addr, "GET", path, &[]).await
+    }
+
+    /// A HEAD from loopback: `(status, header_block)` — a HEAD carries no body.
     async fn http_head(addr: SocketAddr, path: &str) -> (u16, String) {
-        let mut stream = TcpStream::connect(addr).await.unwrap();
-        let req = format!("HEAD {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n");
-        stream.write_all(req.as_bytes()).await.unwrap();
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).await.unwrap();
-        let head = String::from_utf8_lossy(&buf).to_string();
-        let status: u16 = head
-            .lines()
-            .next()
-            .and_then(|l| l.split_whitespace().nth(1))
-            .and_then(|s| s.parse().ok())
-            .expect("a numeric status on the status line");
+        let (status, head, _) = http(addr, "HEAD", path, &[]).await;
         (status, head)
+    }
+
+    /// The value of response header `name` (any case) in a header block.
+    fn header<'a>(head: &'a str, name: &str) -> Option<&'a str> {
+        head.lines().skip(1).find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.trim().eq_ignore_ascii_case(name).then(|| v.trim())
+        })
     }
 
     // ── registry validation (create_share) ───────────────────────────────
@@ -1205,6 +1501,7 @@ mod tests {
             ttl: Duration::from_secs(60),
             max_downloads: Some(2),
             fetches: vec![0, 1],
+            holders: vec![HashSet::new(); 2],
             active: true,
             expires_at_secs: 0,
         };
@@ -1255,6 +1552,7 @@ mod tests {
             ttl: s.ttl,
             max_downloads: s.max_downloads,
             fetches: s.fetches.clone(),
+            holders: s.holders.clone(),
             active: s.active,
             expires_at_secs: s.expires_at_secs,
         }
@@ -1480,8 +1778,8 @@ mod tests {
         assert_eq!(bad, 400, "a non-numeric index fails path parsing → 400");
     }
 
-    /// max_downloads is enforced server-side: the first N succeed, the (N+1)th
-    /// is 410 Gone.
+    /// max_downloads is enforced server-side: the first N devices get the file,
+    /// the next one a 410 Gone.
     #[tokio::test]
     async fn max_downloads_enforced() {
         let reg = new_registry();
@@ -1494,13 +1792,14 @@ mod tests {
         )
         .unwrap();
         let addr = serve(reg).await;
+        let url = format!("/s/{token}/0");
 
-        let (a, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-        let (b, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-        assert_eq!((a, b), (200, 200), "the first two downloads succeed");
+        let (a, _, _) = http(addr, "GET", &url, &[PHONE]).await;
+        let (b, _, _) = http(addr, "GET", &url, &[TABLET]).await;
+        assert_eq!((a, b), (200, 200), "the first two devices download");
 
-        let (c, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-        assert_eq!(c, 410, "the download over the cap → 410 Gone");
+        let (c, _, _) = http(addr, "GET", &url, &[LAPTOP]).await;
+        assert_eq!(c, 410, "a third device is over the cap → 410 Gone");
     }
 
     /// A HEAD probe returns the download headers but spends NO slot: on a
@@ -1544,12 +1843,12 @@ mod tests {
         assert_eq!(got, body, "and delivers the file bytes");
     }
 
-    /// The download cap is PER FILE: "N 次" means each shared file may be fetched
-    /// N times, counted file by file. A single-file Some(1) share is one fetch,
-    /// then 410; a K-file Some(1) share serves every file exactly once.
+    /// The download cap is PER FILE: "N 次" means each shared file may be
+    /// downloaded N times, counted file by file. A single-file Some(1) share goes
+    /// to one device, then 410s; a K-file Some(1) share serves every file once.
     #[tokio::test]
     async fn cap_is_per_file_not_per_share() {
-        // Single file, cap 1: unchanged — one download, the second 410s.
+        // Single file, cap 1: one device downloads, the second 410s.
         {
             let reg = new_registry();
             let f = temp_file("solo.bin", b"solo");
@@ -1561,8 +1860,8 @@ mod tests {
             )
             .unwrap();
             let addr = serve(reg).await;
-            let (a, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-            let (b, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
+            let (a, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[PHONE]).await;
+            let (b, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[TABLET]).await;
             assert_eq!(
                 (a, b),
                 (200, 410),
@@ -1570,8 +1869,8 @@ mod tests {
             );
         }
 
-        // Three files, cap 1: each of the three downloads once, then any repeat
-        // (even of a different index) 410s once the N×K budget is spent.
+        // Three files, cap 1: each of the three downloads once, then a second
+        // device finds every one of them spent.
         {
             let reg = new_registry();
             let f0 = temp_file("m0.bin", b"zero");
@@ -1590,11 +1889,14 @@ mod tests {
             .unwrap();
             let addr = serve(reg).await;
             for i in 0..3 {
-                let (s, _, _) = http_get(addr, &format!("/s/{token}/{i}")).await;
+                let (s, _, _) = http(addr, "GET", &format!("/s/{token}/{i}"), &[PHONE]).await;
                 assert_eq!(s, 200, "file {i} downloads once under a per-file cap");
             }
-            let (repeat, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-            assert_eq!(repeat, 410, "every file spent once → repeats are Gone");
+            let (repeat, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[TABLET]).await;
+            assert_eq!(
+                repeat, 410,
+                "every file spent once → a second device is Gone"
+            );
         }
 
         // The cap is per FILE (M3): one file of a "once each" share can't be
@@ -1612,15 +1914,458 @@ mod tests {
             )
             .unwrap();
             let addr = serve(reg).await;
-            let (first, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-            let (again, _, _) = http_get(addr, &format!("/s/{token}/0")).await;
-            let (other, _, _) = http_get(addr, &format!("/s/{token}/1")).await;
+            let (first, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[PHONE]).await;
+            let (again, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[TABLET]).await;
+            let (other, _, _) = http(addr, "GET", &format!("/s/{token}/1"), &[TABLET]).await;
             assert_eq!(
                 (first, again, other),
                 (200, 410, 200),
                 "file 0 once, then Gone — file 1 still has its download"
             );
         }
+    }
+
+    // ── resuming: ranges, and devices coming back (F3) ────────────────────
+
+    /// A device that already downloaded a file comes back for free — to resume a
+    /// download that broke off, or to start it over — even on a "once" share whose
+    /// one download it spent; a second device still can't have it. Only the first
+    /// fetch is surfaced. (Before, the resume itself was the 410: a "once" link
+    /// that broke off had given nobody the file.)
+    #[tokio::test]
+    async fn the_same_device_coming_back_spends_nothing() {
+        let reg = new_registry();
+        let body: Vec<u8> = (0..=255u8).cycle().take(4096).collect();
+        let f = temp_file("movie.bin", &body);
+        let token = create_share(
+            &reg,
+            vec![("movie.bin".into(), f)],
+            Duration::from_secs(60),
+            Some(1),
+        )
+        .unwrap();
+        let surfaced = Arc::new(Mutex::new(0u32));
+        let sink = surfaced.clone();
+        let hook: DownloadHook = Some(Arc::new(move |_| *sink.lock().unwrap() += 1));
+        let addr = serve_with_hook(reg.clone(), hook).await;
+        let url = format!("/s/{token}/0");
+
+        let (first, head, _) = http(addr, "GET", &url, &[PHONE]).await;
+        assert_eq!(first, 200);
+        let etag = header(&head, "etag").expect("a download names its version");
+
+        // It broke off at 1000 bytes, and the browser resumes it…
+        let (resumed, _, rest) = http(
+            addr,
+            "GET",
+            &url,
+            &[PHONE, ("range", "bytes=1000-"), ("if-range", etag)],
+        )
+        .await;
+        assert_eq!(resumed, 206, "the resume is served");
+        assert_eq!(rest, body[1000..], "from where it broke off");
+        // …or starts it over.
+        let (again, _, whole) = http(addr, "GET", &url, &[PHONE]).await;
+        assert_eq!((again, whole), (200, body));
+
+        let (other, _, _) = http(addr, "GET", &url, &[TABLET]).await;
+        assert_eq!(other, 410, "a second device finds the one download spent");
+        assert_eq!(
+            *surfaced.lock().unwrap(),
+            1,
+            "one download surfaced, not three"
+        );
+        assert_eq!(list_shares(&reg, Instant::now())[0].downloads, 1);
+    }
+
+    /// A `Range` gets a 206 with exactly those bytes and a Content-Range saying
+    /// which they are; a suffix range gets the file's tail, and an end past the
+    /// file is clamped to it. Every file response says ranges work — a GET and a
+    /// HEAD alike, with the same validators.
+    #[tokio::test]
+    async fn a_range_is_served_as_206_with_exactly_those_bytes() {
+        let reg = new_registry();
+        let body: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let f = temp_file("ranged.bin", &body);
+        let token = create_share(
+            &reg,
+            vec![("ranged.bin".into(), f)],
+            Duration::from_secs(60),
+            None,
+        )
+        .unwrap();
+        let addr = serve(reg).await;
+        let url = format!("/s/{token}/0");
+
+        let (status, head, got) = http(addr, "GET", &url, &[("range", "bytes=10-19")]).await;
+        assert_eq!(status, 206);
+        assert_eq!(got, body[10..20]);
+        assert_eq!(header(&head, "content-range"), Some("bytes 10-19/1000"));
+        assert_eq!(header(&head, "content-length"), Some("10"));
+        assert!(
+            header(&head, "content-disposition").is_some_and(|d| d.starts_with("attachment")),
+            "a part is still a download: {head}"
+        );
+
+        let (_, _, tail) = http(addr, "GET", &url, &[("range", "bytes=-100")]).await;
+        assert_eq!(tail, body[900..], "the last 100 bytes");
+        let (status, head, clamped) = http(addr, "GET", &url, &[("range", "bytes=990-5000")]).await;
+        assert_eq!((status, clamped.as_slice()), (206, &body[990..]));
+        assert_eq!(header(&head, "content-range"), Some("bytes 990-999/1000"));
+
+        let (_, whole, _) = http_get(addr, &url).await;
+        assert_eq!(header(&whole, "accept-ranges"), Some("bytes"));
+        let (_, probe) = http_head(addr, &url).await;
+        assert_eq!(header(&probe, "accept-ranges"), Some("bytes"));
+        assert!(header(&whole, "etag").is_some() && header(&whole, "last-modified").is_some());
+        assert_eq!(
+            (header(&probe, "etag"), header(&probe, "last-modified")),
+            (header(&whole, "etag"), header(&whole, "last-modified")),
+            "a HEAD names the version a GET would"
+        );
+    }
+
+    /// Ranges down ONE kept-alive connection, the way a player seeking through a
+    /// file sends them: every one is answered on it, which takes each body being
+    /// exactly as long as its Content-Length says.
+    #[tokio::test]
+    async fn ranges_keep_the_connection_usable() {
+        let reg = new_registry();
+        let body: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let f = temp_file("seek.bin", &body);
+        let token = create_share(
+            &reg,
+            vec![("seek.bin".into(), f)],
+            Duration::from_secs(60),
+            None,
+        )
+        .unwrap();
+        let addr = serve(reg).await;
+
+        /// One response off a kept-alive connection, framed by its
+        /// Content-Length: `(status, body)`.
+        async fn read_response(stream: &mut TcpStream) -> (u16, Vec<u8>) {
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(stream.read_u8().await.expect("the connection is still up"));
+            }
+            let head = String::from_utf8_lossy(&head).to_string();
+            let status = head.split_whitespace().nth(1).unwrap().parse().unwrap();
+            let len = header(&head, "content-length").unwrap().parse().unwrap();
+            let mut body = vec![0; len];
+            stream.read_exact(&mut body).await.unwrap();
+            (status, body)
+        }
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        for (range, want) in [
+            ("bytes=10-19", &body[10..20]),
+            ("bytes=500-", &body[500..]),
+            ("bytes=-5", &body[995..]),
+        ] {
+            let req =
+                format!("GET /s/{token}/0 HTTP/1.1\r\nHost: {addr}\r\nRange: {range}\r\n\r\n");
+            stream.write_all(req.as_bytes()).await.unwrap();
+            let (status, got) =
+                tokio::time::timeout(Duration::from_secs(5), read_response(&mut stream))
+                    .await
+                    .expect("answered on the same connection");
+            assert_eq!((status, got.as_slice()), (206, want), "{range}");
+        }
+    }
+
+    /// A range past the end of the file is a 416 that says how long the file is —
+    /// and, having delivered nothing, costs nothing: on a "once" share the one
+    /// download is still there for the next device, and only that is surfaced.
+    /// Nor does the 416 leave its device holding the file, or one empty request
+    /// would buy every later download for free.
+    #[tokio::test]
+    async fn an_unsatisfiable_range_is_416_and_spends_nothing() {
+        let reg = new_registry();
+        let f = temp_file("short.bin", &[7u8; 100]);
+        let token = create_share(
+            &reg,
+            vec![("short.bin".into(), f)],
+            Duration::from_secs(60),
+            Some(1),
+        )
+        .unwrap();
+        let surfaced = Arc::new(Mutex::new(0u32));
+        let sink = surfaced.clone();
+        let hook: DownloadHook = Some(Arc::new(move |_| *sink.lock().unwrap() += 1));
+        let addr = serve_with_hook(reg, hook).await;
+        let url = format!("/s/{token}/0");
+
+        let (status, head, _) = http(addr, "GET", &url, &[PHONE, ("range", "bytes=500-")]).await;
+        assert_eq!(status, 416);
+        assert_eq!(header(&head, "content-range"), Some("bytes */100"));
+
+        let (status, _, got) = http(addr, "GET", &url, &[TABLET]).await;
+        assert_eq!(
+            (status, got.len()),
+            (200, 100),
+            "the download was still there"
+        );
+        assert_eq!(
+            *surfaced.lock().unwrap(),
+            1,
+            "only the real download surfaced"
+        );
+        let (status, _, _) = http(addr, "GET", &url, &[PHONE]).await;
+        assert_eq!(status, 410, "the 416 didn't make the phone a holder");
+    }
+
+    /// A file that vanished since the share was made is a 404 that gives its
+    /// download back and leaves the device holding nothing — so when the file is
+    /// back, the download is still there for whoever fetches it first.
+    #[tokio::test]
+    async fn a_vanished_file_refunds_its_download() {
+        let reg = new_registry();
+        let f = temp_file("flaky.bin", b"here again");
+        let token = create_share(
+            &reg,
+            vec![("flaky.bin".into(), f.clone())],
+            Duration::from_secs(60),
+            Some(1),
+        )
+        .unwrap();
+        let addr = serve(reg).await;
+        let url = format!("/s/{token}/0");
+
+        std::fs::remove_file(&f).unwrap();
+        let (status, _, _) = http(addr, "GET", &url, &[PHONE]).await;
+        assert_eq!(status, 404);
+
+        std::fs::write(&f, b"here again").unwrap();
+        let (status, _, got) = http(addr, "GET", &url, &[TABLET]).await;
+        assert_eq!((status, got.as_slice()), (200, &b"here again"[..]));
+        let (status, _, _) = http(addr, "GET", &url, &[PHONE]).await;
+        assert_eq!(status, 410, "the 404 didn't make the phone a holder");
+    }
+
+    /// A resume of a file that has changed since — its `If-Range` names another
+    /// version — gets the whole file to start over with, never a splice of the
+    /// two. The current ETag or Last-Modified gets the range; a weak tag never
+    /// does.
+    #[tokio::test]
+    async fn a_resume_of_a_changed_file_gets_the_whole_file() {
+        let reg = new_registry();
+        let body = b"0123456789".repeat(10);
+        let f = temp_file("versioned.bin", &body);
+        let token = create_share(
+            &reg,
+            vec![("versioned.bin".into(), f)],
+            Duration::from_secs(60),
+            None,
+        )
+        .unwrap();
+        let addr = serve(reg).await;
+        let url = format!("/s/{token}/0");
+        let (_, probe) = http_head(addr, &url).await;
+        let etag = header(&probe, "etag").unwrap().to_string();
+        let date = header(&probe, "last-modified").unwrap().to_string();
+        let weak = format!("W/{etag}");
+
+        /// A resume from byte 50 under `cond`: (status, bytes received).
+        async fn resume(addr: SocketAddr, url: &str, cond: &str) -> (u16, usize) {
+            let (status, _, got) = http(
+                addr,
+                "GET",
+                url,
+                &[("range", "bytes=50-"), ("if-range", cond)],
+            )
+            .await;
+            (status, got.len())
+        }
+        assert_eq!(
+            resume(addr, &url, "\"another-version\"").await,
+            (200, 100),
+            "starts over"
+        );
+        assert_eq!(
+            resume(addr, &url, &weak).await,
+            (200, 100),
+            "a weak tag can't vouch for bytes"
+        );
+        assert_eq!(
+            resume(addr, &url, &etag).await,
+            (206, 50),
+            "the current tag resumes"
+        );
+        assert_eq!(
+            resume(addr, &url, &date).await,
+            (206, 50),
+            "so does the current date"
+        );
+    }
+
+    /// A device that downloaded from a share keeps its page after the downloads
+    /// run out — the way back to a download that broke off — while any other
+    /// device is told the share is gone.
+    #[tokio::test]
+    async fn a_device_that_downloaded_keeps_the_page_after_the_downloads_run_out() {
+        let reg = new_registry();
+        let f = temp_file("kept.bin", b"kept");
+        let token = create_share(
+            &reg,
+            vec![("kept.bin".into(), f)],
+            Duration::from_secs(60),
+            Some(1),
+        )
+        .unwrap();
+        let addr = serve(reg).await;
+
+        let (got, _, _) = http(addr, "GET", &format!("/s/{token}/0"), &[PHONE]).await;
+        assert_eq!(got, 200);
+        let page = format!("/s/{token}");
+        let (mine, _, html) = http(addr, "GET", &page, &[PHONE]).await;
+        assert_eq!(mine, 200, "the device that downloaded still gets the page");
+        assert!(String::from_utf8_lossy(&html).contains("kept.bin"));
+        let (theirs, _, _) = http(addr, "GET", &page, &[TABLET]).await;
+        assert_eq!(theirs, 410, "anyone else: gone");
+    }
+
+    /// Who may fetch what, file by file: a device's first fetch spends one of the
+    /// file's downloads and makes it a holder; coming back is free; another device
+    /// finds a spent file Gone — HEAD or GET — while a file with downloads left is
+    /// still its to spend. A HEAD spends nothing. Being a holder doesn't outlive
+    /// the share: stopped, it refuses everyone.
+    #[test]
+    fn admit_counts_each_device_once_per_file() {
+        let reg = new_registry();
+        let a = temp_file("a.bin", b"a");
+        let b = temp_file("b.bin", b"b");
+        let token = create_share(
+            &reg,
+            vec![("a.bin".into(), a), ("b.bin".into(), b)],
+            Duration::from_secs(60),
+            Some(1),
+        )
+        .unwrap();
+        let mut map = reg.lock().unwrap();
+        let share = map.get_mut(&token).unwrap();
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        let (phone, tablet) = (ip("192.168.1.21"), ip("192.168.1.22"));
+        let now = Instant::now();
+
+        assert!(
+            share.admit(0, tablet, false, now).is_ok_and(|spent| !spent),
+            "a HEAD is let through and spends nothing"
+        );
+        assert_eq!(share.fetches, vec![0, 0]);
+        assert!(
+            matches!(share.admit(0, phone, true, now), Ok(true)),
+            "first fetch spends"
+        );
+        assert!(
+            matches!(share.admit(0, phone, true, now), Ok(false)),
+            "coming back is free"
+        );
+        assert!(matches!(
+            share.admit(0, tablet, true, now),
+            Err(Denied::Gone)
+        ));
+        assert!(matches!(
+            share.admit(0, tablet, false, now),
+            Err(Denied::Gone)
+        ));
+        assert!(
+            matches!(share.admit(1, tablet, true, now), Ok(true)),
+            "file 1 is its own"
+        );
+        assert_eq!(share.fetches, vec![1, 1]);
+        assert!(share.has_holder(phone) && share.has_holder(tablet));
+        assert!(matches!(
+            share.admit(2, phone, true, now),
+            Err(Denied::NotFound)
+        ));
+
+        share.active = false;
+        assert!(
+            matches!(share.admit(0, phone, true, now), Err(Denied::Gone)),
+            "stopped means stopped, holder or not"
+        );
+    }
+
+    /// Reading `Range` against a 1000-byte file: one range of any form is served,
+    /// clamped to the file; one that names no byte of it is unsatisfiable; and
+    /// anything else — another unit, a malformed or reversed spec, several ranges
+    /// — is ignored in favour of the whole file. An empty file has nothing to
+    /// range over.
+    #[test]
+    fn range_headers_are_read_strictly() {
+        let part = |first, last| Requested::Part { first, last };
+        for (header, want) in [
+            (None, Requested::Whole),
+            (Some("bytes=0-"), part(0, 999)),
+            (Some("bytes=10-19"), part(10, 19)),
+            (Some("bytes=500-"), part(500, 999)),
+            (Some("bytes=990-5000"), part(990, 999)),
+            (Some("bytes=999-999"), part(999, 999)),
+            (Some("bytes=-100"), part(900, 999)),
+            (Some("bytes=-5000"), part(0, 999)),
+            (Some("BYTES = 0-0"), part(0, 0)),
+            (Some("bytes=1000-"), Requested::Unsatisfiable),
+            (Some("bytes=5000-6000"), Requested::Unsatisfiable),
+            (Some("bytes=-0"), Requested::Unsatisfiable),
+            (Some("bytes=20-10"), Requested::Whole),
+            (Some("bytes=0-1,5-6"), Requested::Whole),
+            (Some("items=0-5"), Requested::Whole),
+            (Some("bytes=+5-"), Requested::Whole),
+            (Some("bytes=abc"), Requested::Whole),
+            (Some("bytes=-"), Requested::Whole),
+            (Some("bytes=99999999999999999999-"), Requested::Whole),
+            (Some("bytes 0-5"), Requested::Whole),
+        ] {
+            assert_eq!(requested_range(header, 1000), want, "{header:?}");
+        }
+        assert_eq!(requested_range(Some("bytes=0-"), 0), Requested::Whole);
+        assert_eq!(requested_range(Some("bytes=-1"), 0), Requested::Whole);
+    }
+
+    /// `If-Range` lets a range through only for the file as it is now; with no
+    /// validators to compare (no mtime), it never does.
+    #[test]
+    fn if_range_must_name_the_current_version() {
+        let v = Validators {
+            etag: "\"64-1\"".into(),
+            last_modified: "Sun, 06 Nov 1994 08:49:37 GMT".into(),
+        };
+        assert!(range_applies(None, Some(&v)));
+        assert!(range_applies(None, None));
+        assert!(range_applies(Some("\"64-1\""), Some(&v)));
+        assert!(range_applies(
+            Some(" Sun, 06 Nov 1994 08:49:37 GMT "),
+            Some(&v)
+        ));
+        assert!(!range_applies(Some("\"64-2\""), Some(&v)));
+        assert!(!range_applies(Some("W/\"64-1\""), Some(&v)));
+        assert!(!range_applies(
+            Some("Mon, 07 Nov 1994 08:49:37 GMT"),
+            Some(&v)
+        ));
+        assert!(!range_applies(Some("\"64-1\""), None));
+    }
+
+    /// Last-Modified is RFC 9110's IMF-fixdate — the spec's own example — and an
+    /// ETag changes with the file's length or its mtime.
+    #[test]
+    fn validators_name_the_version() {
+        let t = std::time::UNIX_EPOCH + Duration::from_secs(784_111_777);
+        assert_eq!(http_date(t), "Sun, 06 Nov 1994 08:49:37 GMT");
+
+        let f = temp_file("v.bin", b"one");
+        let before = Validators::of(&std::fs::metadata(&f).unwrap()).unwrap();
+        assert!(
+            before.etag.starts_with('"') && before.etag.ends_with('"'),
+            "strong"
+        );
+        std::fs::write(&f, b"four").unwrap();
+        let after = Validators::of(&std::fs::metadata(&f).unwrap()).unwrap();
+        assert_ne!(
+            before.etag, after.etag,
+            "a rewritten file is another version"
+        );
     }
 
     /// The sweep reclaims stopped/expired shares while leaving a live one.
