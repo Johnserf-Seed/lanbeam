@@ -263,7 +263,7 @@ pnpm screenshots    # 用浏览器 demo 重新生成 docs/screenshots/
 ├── src/                  # React + TypeScript 前端
 │   ├── bridge/api.ts     #   Tauri 命令/事件的类型化封装(+ 浏览器桩)
 │   ├── lib/
-│   │   ├── store.ts      #     zustand 状态仓库(需要时持久化)
+│   │   ├── store/        #     zustand 状态仓库,每个一个模块(需要时持久化)
 │   │   ├── deepLink.ts   #     lanbeam:// 白名单与解析(那条安全铁律)
 │   │   ├── demo*.ts      #     ?demo=1 示例数据,跟随界面语言
 │   │   └── browserShortcuts.ts  # 把浏览器从 WebView 里剥出去
@@ -274,13 +274,13 @@ pnpm screenshots    # 用浏览器 demo 重新生成 docs/screenshots/
 │   └── src/
 │       ├── discovery/    #   UDP 局域网发现 + 接口枚举
 │       ├── transport/    #   Noise 握手 + 帧
-│       ├── transfer.rs   #   收发状态机、续传、完整性、冲突
+│       ├── transfer/     #   收发状态机、续传、完整性、冲突
 │       ├── share.rs      #   axum 一次性浏览器分享服务 + 它的落地页
 │       ├── tray.rs       #   托盘「遥控器」(Rust 只管显示/退出,其余交给界面)
 │       ├── paths.rs      #   数据/日志目录 —— 用产品名 LanBeam,而不是 bundle id
 │       ├── sanitize.rs   #   接收路径安全(唯一的写入 choke point)
 │       ├── trust.rs      #   信任存储  ·  exif.rs —— 元数据抹除
-│       └── commands.rs   #   Tauri 命令面
+│       └── commands/     #   Tauri 命令面,按领域分模块
 ├── ROADMAP.md            # 后端里程碑(M4–M8 已交付;M9 只交付了 EXIF,更新检查待做)
 └── vitest.config.ts
 ```
