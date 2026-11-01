@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import i18n from "../i18n";
 import type { UITransfer } from "../lib/store";
 import { useOverlays, useTransfers } from "../lib/store";
-import { fireEvent, renderUI, screen } from "../test/render";
+import { act, fireEvent, renderUI, screen } from "../test/render";
 import TransfersPage from "./TransfersPage";
 
 // The page calls copyText (text rows) and resendTransfer (failed sends) on
@@ -106,6 +106,33 @@ describe("TransfersPage", () => {
     expect(screen.getByText("photo.png")).toBeTruthy();
     expect(screen.getByText("report.pdf")).toBeTruthy();
     expect(screen.getByText("hello world")).toBeTruthy();
+  });
+
+  it("a send the receiver hasn't accepted says so, with the code to compare", () => {
+    // H10: it read like a transfer stuck at 0%, and the sender's SAS was
+    // nowhere once the send dialog closed.
+    useTransfers.setState({
+      transfers: { act: { ...active, percent: 0, sas: "483921" } },
+    });
+    renderUI(<TransfersPage />);
+    expect(
+      screen.getByText(
+        i18n.t("transfers.awaitingAcceptSas", { sas: "483 · 921" }),
+        { exact: false },
+      ),
+    ).toBeTruthy();
+
+    act(() => {
+      useTransfers.setState({
+        transfers: { act: { ...active, sas: "483921", accepted: true } },
+      });
+    });
+    expect(
+      screen.queryByText(
+        i18n.t("transfers.awaitingAcceptSas", { sas: "483 · 921" }),
+        { exact: false },
+      ),
+    ).toBeNull();
   });
 
   it("segmented filter hides History on 'active' and Running on 'done'", () => {

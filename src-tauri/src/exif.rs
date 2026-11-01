@@ -1,8 +1,18 @@
 //! Container-level image metadata stripping on send (M9.1).
 //!
-//! WHAT this does: for JPEG/PNG/WebP it removes the EXIF, ICC-profile and XMP
-//! blocks by editing the container's segment/chunk list — NOT by decoding the
-//! image and re-encoding it. The compressed pixel data is copied through
+//! WHAT this does: for JPEG/PNG/WebP it removes the EXIF and XMP blocks by
+//! editing the container's segment/chunk list — NOT by decoding the image and
+//! re-encoding it.
+//!
+//! WHAT it keeps (H1), because dropping it changed how the photo LOOKS:
+//! - the EXIF **Orientation** — phones store pixels sensor-side up and rotate
+//!   on display by this tag, so without it a portrait shot arrives sideways in
+//!   every viewer. Only that one tag survives, rebuilt as a fresh 26-byte EXIF
+//!   block; GPS, camera, serial, timestamps and the rest still go.
+//! - the **ICC profile** — Display P3 / Adobe RGB photos shift color without
+//!   it, and a color profile says nothing about who, where or when.
+//!
+//! The rest of this paragraph's promise still holds: pixels untouched. The compressed pixel data is copied through
 //! byte-for-byte, so a stripped photo is visually identical to the original at
 //! the bit level (no quality loss, no recompression). This is the whole reason
 //! for `img-parts` over an image codec: privacy fields go, pixels stay.
@@ -21,10 +31,11 @@
 //! `transfer::build_send_list_scoped`, which streams the cleaned bytes from a
 //! temp file.
 
-use img_parts::jpeg::Jpeg;
-use img_parts::png::Png;
+use img_parts::jpeg::{Jpeg, JpegSegment};
+use img_parts::png::{Png, PngChunk};
+use img_parts::riff::{RiffChunk, RiffContent};
 use img_parts::webp::WebP;
-use img_parts::{Bytes, ImageEXIF, ImageICC};
+use img_parts::Bytes;
 
 /// Upper bound on how many bytes we will read into memory to attempt a strip.
 /// Real photos — even 100-megapixel or panorama JPEGs — sit comfortably under
@@ -55,16 +66,27 @@ const JPEG_XMP_PREFIX: &[u8] = b"http://ns.adobe.com/xap/1.0/\0";
 const JPEG_XMP_EXT_PREFIX: &[u8] = b"http://ns.adobe.com/xmp/extension/\0";
 
 /// PNG chunk type carrying XMP (an `iTXt` chunk) and the XMP keyword that
-/// identifies it. PNG EXIF (`eXIf`) and ICC (`iCCP`) are removed via the traits;
-/// XMP has no trait, so we drop only `iTXt` chunks whose keyword is the XMP one.
+/// identifies it. XMP has no img-parts trait, so we drop only `iTXt` chunks
+/// whose keyword is the XMP one.
 const PNG_ITXT: [u8; 4] = *b"iTXt";
+
+/// PNG chunk type carrying EXIF (raw TIFF, no `Exif\0\0` prefix).
+const PNG_EXIF: [u8; 4] = *b"eXIf";
+
+/// The identifier every JPEG EXIF APP1 segment starts with (and some WebP
+/// encoders put in front of the TIFF data too).
+const EXIF_PREFIX: &[u8] = b"Exif\0\0";
+
+/// EXIF tag 0x0112, Orientation: 1 = upright, 2..=8 = mirrored and/or rotated.
+const TAG_ORIENTATION: u16 = 0x0112;
 const PNG_XMP_KEYWORD: &[u8] = b"XML:com.adobe.xmp\0";
 
 /// The WebP RIFF chunk id holding XMP metadata.
 const WEBP_XMP_CHUNK: [u8; 4] = *b"XMP ";
 
-/// Strip EXIF / ICC / XMP metadata from an in-memory image, WITHOUT touching the
-/// pixel data (container-level segment/chunk removal only).
+/// Strip EXIF (all but Orientation) and XMP metadata from an in-memory image,
+/// keeping its ICC color profile, WITHOUT touching the pixel data
+/// (container-level segment/chunk edits only).
 ///
 /// `ext` is the file extension (case-insensitive, no dot). Returns:
 /// - `Some(cleaned)` when `ext` names a format we handle (JPEG/JPG, PNG, WebP),
@@ -100,56 +122,367 @@ pub fn is_strippable_ext(ext: &str) -> bool {
 
 fn strip_jpeg(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut jpeg = Jpeg::from_bytes(Bytes::copy_from_slice(bytes)).ok()?;
-    // EXIF (APP1 `Exif\0\0`) and the ICC profile (APP2 `ICC_PROFILE\0`) have
-    // dedicated removers.
-    jpeg.set_exif(None);
-    jpeg.set_icc_profile(None);
+    let is_exif =
+        |s: &JpegSegment| s.marker() == JPEG_APP1 && s.contents().starts_with(EXIF_PREFIX);
     // XMP has no img-parts API: it rides an APP1 segment keyed by the Adobe XMP
-    // namespace, distinct from the EXIF APP1 just removed. Drop both the standard
-    // XMP packet AND any Extended-XMP overflow segments (a >64 KB packet split
-    // across several APP1s under a different prefix) so location/authorship XMP is
-    // scrubbed in full, not just its first 64 KB.
-    jpeg.segments_mut().retain(|s| {
-        !(s.marker() == JPEG_APP1
+    // namespace. Drop both the standard XMP packet AND any Extended-XMP overflow
+    // segments (a >64 KB packet split across several APP1s under a different
+    // prefix) so location/authorship XMP is scrubbed in full, not just its
+    // first 64 KB.
+    let is_xmp = |s: &JpegSegment| {
+        s.marker() == JPEG_APP1
             && (s.contents().starts_with(JPEG_XMP_PREFIX)
-                || s.contents().starts_with(JPEG_XMP_EXT_PREFIX)))
+                || s.contents().starts_with(JPEG_XMP_EXT_PREFIX))
+    };
+    let segments = jpeg.segments_mut();
+    // The first EXIF segment becomes an Orientation-only one, IN PLACE — not
+    // `set_exif(Some(..))`, which inserts at a fixed index 3 and panics on a
+    // JPEG with fewer segments than that. Every other EXIF segment goes. The
+    // ICC profile (APP2) is left alone.
+    let keep = segments.iter().position(is_exif).and_then(|i| {
+        let tiff = segments[i].contents().get(EXIF_PREFIX.len()..)?;
+        let o = exif_orientation(tiff)?;
+        let contents = [EXIF_PREFIX, &orientation_only_tiff(o)].concat();
+        segments[i] = JpegSegment::new_with_contents(JPEG_APP1, Bytes::from(contents));
+        Some(i)
+    });
+    let mut index = 0;
+    segments.retain(|s| {
+        let i = index;
+        index += 1;
+        Some(i) == keep || !(is_exif(s) || is_xmp(s))
     });
     Some(jpeg.encoder().bytes().to_vec())
 }
 
 fn strip_png(bytes: &[u8]) -> Option<Vec<u8>> {
     let mut png = Png::from_bytes(Bytes::copy_from_slice(bytes)).ok()?;
-    // EXIF (`eXIf`) and ICC (`iCCP`) via the traits.
-    png.set_exif(None);
-    png.set_icc_profile(None);
-    // XMP rides an `iTXt` chunk whose keyword is the Adobe XMP one; remove only
-    // those (leaving any other legitimate text chunks intact).
-    png.chunks_mut()
-        .retain(|c| !(c.kind() == PNG_ITXT && c.contents().starts_with(PNG_XMP_KEYWORD)));
+    let chunks = png.chunks_mut();
+    // The first `eXIf` becomes an Orientation-only one in place (its position
+    // is already a valid one); any other goes, as does XMP — an `iTXt` chunk
+    // whose keyword is the Adobe XMP one (other text chunks stay). `iCCP`, the
+    // color profile, stays.
+    let mut kept_exif = false;
+    let mut out = Vec::with_capacity(chunks.len());
+    for c in chunks.drain(..) {
+        if c.kind() == PNG_EXIF {
+            if !kept_exif {
+                kept_exif = true;
+                if let Some(o) = exif_orientation(c.contents()) {
+                    out.push(PngChunk::new(
+                        PNG_EXIF,
+                        Bytes::from(orientation_only_tiff(o)),
+                    ));
+                }
+            }
+            continue;
+        }
+        if c.kind() == PNG_ITXT && c.contents().starts_with(PNG_XMP_KEYWORD) {
+            continue;
+        }
+        out.push(c);
+    }
+    *chunks = out;
     Some(png.encoder().bytes().to_vec())
 }
 
 fn strip_webp(bytes: &[u8]) -> Option<Vec<u8>> {
-    use img_parts::webp::{CHUNK_EXIF, CHUNK_ICCP};
+    use img_parts::webp::CHUNK_EXIF;
     let mut webp = WebP::from_bytes(Bytes::copy_from_slice(bytes)).ok()?;
-    // Remove the metadata RIFF chunks DIRECTLY — do NOT route through
-    // `set_exif(None)`/`set_icc_profile(None)`. Those call img-parts'
-    // `convert_into_infered_kind()`, whose `infer_kind()` decides VP8X-vs-simple-VP8
-    // by looking at ONLY the ICCP/EXIF chunks: once both are gone it concludes
-    // "simple VP8" and DELETES the VP8X header — silently downgrading (corrupting)
-    // any extended WebP that carries transparency (ALPH) or animation (ANIM/ANMF),
-    // since those features REQUIRE VP8X. Plain `remove_chunks_by_id` only drops the
-    // named chunk and leaves the VP8X container + ALPH/ANIM intact, so a
+    // Edit the RIFF chunks DIRECTLY — never through `set_exif`/`set_icc_profile`.
+    // Those call img-parts' `convert_into_infered_kind()`, whose `infer_kind()`
+    // decides VP8X-vs-simple-VP8 by looking at ONLY the ICCP/EXIF chunks: once
+    // both are gone it concludes "simple VP8" and DELETES the VP8X header —
+    // silently downgrading (corrupting) any extended WebP that carries
+    // transparency (ALPH) or animation (ANIM/ANMF), since those features REQUIRE
+    // VP8X. Plain chunk edits leave the VP8X container + ALPH/ANIM intact, so a
     // transparent sticker or animated WebP survives the strip losslessly.
-    webp.remove_chunks_by_id(CHUNK_EXIF);
-    webp.remove_chunks_by_id(CHUNK_ICCP);
+    //
+    // The spec says the EXIF chunk holds raw TIFF, but some encoders put an
+    // `Exif\0\0` in front (img-parts' own `exif()` only reads that form); read
+    // both, and write the rebuilt block back in whichever form was there. The
+    // ICCP chunk — the color profile — is left in place.
+    let rebuilt = webp
+        .chunk_by_id(CHUNK_EXIF)
+        .and_then(|c| c.content().data())
+        .and_then(|data| {
+            let prefixed = data.starts_with(EXIF_PREFIX);
+            let tiff = if prefixed {
+                &data[EXIF_PREFIX.len()..]
+            } else {
+                &data[..]
+            };
+            let o = exif_orientation(tiff)?;
+            let lead: &[u8] = if prefixed { EXIF_PREFIX } else { &[] };
+            Some(Bytes::from([lead, &orientation_only_tiff(o)].concat()))
+        });
+    let mut seen_exif = false;
+    webp.chunks_mut().retain_mut(|c| {
+        if c.id() != CHUNK_EXIF {
+            return true;
+        }
+        if seen_exif {
+            return false;
+        }
+        seen_exif = true;
+        match &rebuilt {
+            Some(contents) => {
+                *c = RiffChunk::new(CHUNK_EXIF, RiffContent::Data(contents.clone()));
+                true
+            }
+            None => false,
+        }
+    });
     webp.remove_chunks_by_id(WEBP_XMP_CHUNK);
     Some(webp.encoder().bytes().to_vec())
+}
+
+/// The EXIF Orientation (tag 0x0112) in IFD0 of a TIFF/EXIF payload — but only
+/// a value that changes how the image is shown (2..=8). `None` for 1 (already
+/// upright), a missing tag, or anything malformed. Bounds-checked throughout:
+/// this reads whatever bytes the user's file holds.
+fn exif_orientation(tiff: &[u8]) -> Option<u16> {
+    let little = match tiff.get(0..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16_at = |at: usize| -> Option<u16> {
+        let b: [u8; 2] = tiff.get(at..at.checked_add(2)?)?.try_into().ok()?;
+        Some(if little {
+            u16::from_le_bytes(b)
+        } else {
+            u16::from_be_bytes(b)
+        })
+    };
+    let u32_at = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff.get(at..at.checked_add(4)?)?.try_into().ok()?;
+        Some(if little {
+            u32::from_le_bytes(b)
+        } else {
+            u32::from_be_bytes(b)
+        })
+    };
+    if u16_at(2)? != 42 {
+        return None;
+    }
+    let ifd0 = u32_at(4)? as usize;
+    let entries = u16_at(ifd0)? as usize;
+    for n in 0..entries {
+        let entry = ifd0.checked_add(2)?.checked_add(n.checked_mul(12)?)?;
+        if u16_at(entry)? != TAG_ORIENTATION {
+            continue;
+        }
+        // SHORT (type 3), count 1: the value sits in the first two bytes of the
+        // entry's four-byte value field.
+        if u16_at(entry + 2)? != 3 || u32_at(entry + 4)? != 1 {
+            return None;
+        }
+        let value = u16_at(entry + 8)?;
+        return (2..=8).contains(&value).then_some(value);
+    }
+    None
+}
+
+/// A TIFF/EXIF payload holding ONE tag, Orientation: what a photo needs to be
+/// shown upright, and nothing about where, when or with what it was taken.
+/// Big-endian, IFD0 right after the 8-byte header, no next IFD — 26 bytes.
+fn orientation_only_tiff(orientation: u16) -> Vec<u8> {
+    let mut t = Vec::with_capacity(26);
+    t.extend_from_slice(b"MM");
+    t.extend_from_slice(&42u16.to_be_bytes());
+    t.extend_from_slice(&8u32.to_be_bytes()); // IFD0 offset
+    t.extend_from_slice(&1u16.to_be_bytes()); // one entry
+    t.extend_from_slice(&TAG_ORIENTATION.to_be_bytes());
+    t.extend_from_slice(&3u16.to_be_bytes()); // SHORT
+    t.extend_from_slice(&1u32.to_be_bytes()); // count
+    t.extend_from_slice(&orientation.to_be_bytes());
+    t.extend_from_slice(&[0, 0]); // the value field's unused half
+    t.extend_from_slice(&0u32.to_be_bytes()); // no next IFD
+    t
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use img_parts::{ImageEXIF, ImageICC};
+
+    // ── H1: what a photo needs to LOOK right survives the strip ──────────────
+
+    /// A TIFF/EXIF payload with these IFD0 entries — (tag, type, count, value) —
+    /// in either byte order: what a camera writes, minus what we don't need.
+    fn tiff(little: bool, entries: &[(u16, u16, u32, u32)]) -> Vec<u8> {
+        let w16 = |v: u16| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let w32 = |v: u32| {
+            if little {
+                v.to_le_bytes()
+            } else {
+                v.to_be_bytes()
+            }
+        };
+        let mut t = Vec::new();
+        t.extend_from_slice(if little { b"II" } else { b"MM" });
+        t.extend_from_slice(&w16(42));
+        t.extend_from_slice(&w32(8));
+        t.extend_from_slice(&w16(entries.len() as u16));
+        for &(tag, ty, count, value) in entries {
+            t.extend_from_slice(&w16(tag));
+            t.extend_from_slice(&w16(ty));
+            t.extend_from_slice(&w32(count));
+            if ty == 3 && count == 1 {
+                t.extend_from_slice(&w16(value as u16)); // SHORT, left-justified
+                t.extend_from_slice(&[0, 0]);
+            } else {
+                t.extend_from_slice(&w32(value));
+            }
+        }
+        t.extend_from_slice(&w32(0));
+        t
+    }
+
+    /// A phone photo's IFD0: camera make, the Orientation, a timestamp, and a
+    /// pointer to the GPS block — everything but the Orientation must go.
+    fn phone_exif(little: bool, orientation: u32) -> Vec<u8> {
+        tiff(
+            little,
+            &[
+                (0x010F, 2, 6, 0x100), // Make → offset
+                (0x0112, 3, 1, orientation),
+                (0x0132, 2, 20, 0x110), // DateTime → offset
+                (0x8825, 4, 1, 0x200),  // GPS IFD pointer
+            ],
+        )
+    }
+
+    const ICC: &[u8] = b"ICC_PROFILE\0\x01\x01display-p3-profile-bytes";
+
+    /// SOI · APP1(EXIF) · APP2(ICC) · SOS(+scan+EOI) — three segments, the
+    /// shape that would have hit img-parts' fixed `insert(3)`.
+    fn photo_jpeg(exif_tiff: &[u8]) -> Vec<u8> {
+        let mut out = vec![0xFF, 0xD8];
+        for (marker, contents) in [
+            (JPEG_APP1, [EXIF_PREFIX, exif_tiff].concat()),
+            (0xE2, ICC.to_vec()),
+        ] {
+            out.extend_from_slice(&[0xFF, marker]);
+            out.extend_from_slice(&((contents.len() + 2) as u16).to_be_bytes());
+            out.extend_from_slice(&contents);
+        }
+        let sos = [0x01u8, 0x01, 0x00, 0x00, 0x3F, 0x00];
+        out.extend_from_slice(&[0xFF, 0xDA]);
+        out.extend_from_slice(&((sos.len() + 2) as u16).to_be_bytes());
+        out.extend_from_slice(&sos);
+        out.extend_from_slice(&[0xAA, 0xBB, 0xCC, 0xFF, 0xD9]);
+        out
+    }
+
+    /// A portrait phone photo (Orientation 6 = rotate 90° CW) keeps exactly an
+    /// Orientation-only EXIF block — no make, time or GPS pointer — and keeps
+    /// its color profile. Before, the whole EXIF went and it arrived sideways.
+    #[test]
+    fn jpeg_keeps_only_the_orientation_and_the_color_profile() {
+        for little in [false, true] {
+            let input = photo_jpeg(&phone_exif(little, 6));
+            let cleaned = strip_image_metadata(&input, "jpg").expect("strippable");
+            let after = Jpeg::from_bytes(Bytes::from(cleaned)).unwrap();
+            let exif = after.exif().expect("the orientation must survive");
+            assert_eq!(&exif[..], &orientation_only_tiff(6)[..]);
+            assert_eq!(exif_orientation(&exif), Some(6));
+            assert_eq!(
+                after.icc_profile().as_deref(),
+                Some(&b"display-p3-profile-bytes"[..]),
+                "the color profile must survive"
+            );
+        }
+    }
+
+    /// An upright photo (Orientation 1) needs nothing: no EXIF at all.
+    #[test]
+    fn an_upright_photo_keeps_no_exif() {
+        let input = photo_jpeg(&phone_exif(false, 1));
+        let cleaned = strip_image_metadata(&input, "jpg").unwrap();
+        let after = Jpeg::from_bytes(Bytes::from(cleaned)).unwrap();
+        assert!(after.exif().is_none());
+        assert!(after.icc_profile().is_some());
+    }
+
+    /// Malformed EXIF is dropped whole — no panic, no partial rescue.
+    #[test]
+    fn malformed_exif_reads_as_no_orientation() {
+        assert_eq!(exif_orientation(b""), None);
+        assert_eq!(exif_orientation(b"MM\x00\x2B\x00\x00\x00\x08"), None); // magic 43
+        assert_eq!(exif_orientation(b"MM\x00\x2A\xFF\xFF\xFF\xFF"), None); // IFD past the end
+                                                                           // A huge declared entry count over a short buffer stops at the end.
+        let mut t = tiff(false, &[(0x0112, 3, 1, 6)]);
+        t[8] = 0xFF;
+        t[9] = 0xFF;
+        assert_eq!(exif_orientation(&t), Some(6), "still finds the first entry");
+        t.truncate(12);
+        assert_eq!(exif_orientation(&t), None);
+        // Orientation stored with the wrong type, or out of range.
+        assert_eq!(exif_orientation(&tiff(false, &[(0x0112, 4, 1, 6)])), None);
+        assert_eq!(exif_orientation(&tiff(false, &[(0x0112, 3, 1, 9)])), None);
+        let cleaned = strip_image_metadata(&photo_jpeg(&t), "jpg").unwrap();
+        assert!(Jpeg::from_bytes(Bytes::from(cleaned))
+            .unwrap()
+            .exif()
+            .is_none());
+    }
+
+    /// PNG: the `eXIf` becomes Orientation-only in place; `iCCP` stays.
+    #[test]
+    fn png_keeps_only_the_orientation_and_the_color_profile() {
+        let mut input = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+        push_png_chunk(
+            &mut input,
+            b"IHDR",
+            &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0],
+        );
+        push_png_chunk(&mut input, b"iCCP", b"P3\0\0compressed-profile");
+        push_png_chunk(&mut input, b"eXIf", &phone_exif(true, 8));
+        push_png_chunk(&mut input, b"IDAT", &[0, 1, 2, 3]);
+        push_png_chunk(&mut input, b"IEND", &[]);
+        let cleaned = strip_image_metadata(&input, "png").unwrap();
+        let after = Png::from_bytes(Bytes::from(cleaned)).unwrap();
+        assert_eq!(&after.exif().unwrap()[..], &orientation_only_tiff(8)[..]);
+        assert!(after.chunk_by_type(*b"iCCP").is_some(), "iCCP must survive");
+    }
+
+    /// WebP: raw-TIFF and `Exif\0\0`-prefixed EXIF chunks both keep their
+    /// orientation (in the form they came in), the ICCP chunk stays, and the
+    /// VP8X container is untouched.
+    #[test]
+    fn webp_keeps_only_the_orientation_and_the_color_profile() {
+        use img_parts::webp::{CHUNK_EXIF, CHUNK_ICCP, CHUNK_VP8, CHUNK_VP8X};
+        for prefixed in [false, true] {
+            let lead: &[u8] = if prefixed { EXIF_PREFIX } else { &[] };
+            let exif = [lead, &phone_exif(true, 3)].concat();
+            let input = webp_from_chunks(&[
+                (&CHUNK_VP8X, &vp8x_payload(false, false)),
+                (&CHUNK_ICCP, b"p3-profile"),
+                (&CHUNK_VP8, &[0xAA; 8]),
+                (&CHUNK_EXIF, &exif),
+            ]);
+            let cleaned = strip_image_metadata(&input, "webp").unwrap();
+            let after = WebP::from_bytes(Bytes::from(cleaned)).unwrap();
+            assert!(after.has_chunk(CHUNK_VP8X));
+            assert!(after.has_chunk(CHUNK_ICCP), "ICCP must survive");
+            let data = after
+                .chunk_by_id(CHUNK_EXIF)
+                .unwrap()
+                .content()
+                .data()
+                .unwrap()
+                .clone();
+            assert_eq!(&data[..], &[lead, &orientation_only_tiff(3)].concat()[..]);
+        }
+    }
 
     /// Assemble a tiny but structurally valid JPEG carrying an EXIF APP1
     /// segment plus a COM segment standing in for "image content", so a strip

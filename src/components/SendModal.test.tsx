@@ -1,5 +1,5 @@
 // Component tests for the send-flow modal (SendModal). The env is non-Tauri, so
-// the real sendops.sendToDevice would return false (no backend) — we mock it so
+// the real sendops.beginSend would return null (no backend) — we mock it so
 // the confirm→waiting transition is drivable. Text is asserted via i18n.t(key)
 // so the tests don't hard-code a resolved language.
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -9,6 +9,7 @@ import {
   useData,
   useOverlays,
   usePrefs,
+  useToast,
   useTransfers,
   useTrust,
 } from "../lib/store";
@@ -16,13 +17,14 @@ import type { SendFile } from "../lib/store";
 import { fireEvent, renderUI, screen, waitFor } from "../test/render";
 import SendModal from "./SendModal";
 
-// sendToDevice is the real send entrypoint the confirm step fires; mock it so a
+// beginSend is the real send entrypoint the confirm step fires; mock it so a
 // click can drive the flow to the waiting step (browser mode would bail early).
+// It returns the session id the UI chose for that send.
 vi.mock("../lib/sendops", () => ({
-  sendToDevice: vi.fn(() => true),
+  beginSend: vi.fn(() => "sess-1"),
   pickFiles: vi.fn(async () => [] as SendFile[]),
 }));
-import { sendToDevice } from "../lib/sendops";
+import { beginSend } from "../lib/sendops";
 
 // ── clean-state snapshots ────────────────────────────────────────────────────
 const overlays0 = { ...useOverlays.getState() };
@@ -53,7 +55,7 @@ beforeEach(() => {
   useTrust.setState(trust0, true);
   usePrefs.setState(prefs0, true);
   useTransfers.setState(transfers0, true);
-  vi.mocked(sendToDevice).mockClear().mockReturnValue(true);
+  vi.mocked(beginSend).mockClear().mockReturnValue("sess-1");
 });
 
 describe("SendModal · files step", () => {
@@ -123,7 +125,7 @@ describe("SendModal · step transitions", () => {
     expect(screen.getByText(i18n.t("send.titleConfirm"))).toBeTruthy();
   });
 
-  it("fires sendToDevice and moves to the waiting step on Start", async () => {
+  it("fires beginSend and moves to the waiting step on Start", async () => {
     useData.setState({ devices: [mini] });
     useOverlays.getState().openSend("demo-mini", [fileA], [fileA]);
     renderUI(<SendModal />);
@@ -144,14 +146,66 @@ describe("SendModal · step transitions", () => {
     await waitFor(() =>
       expect(useOverlays.getState().send?.step).toBe("waiting"),
     );
-    expect(vi.mocked(sendToDevice)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(beginSend)).toHaveBeenCalledTimes(1);
     // called with the target device and the persisted stripExif choice
-    const [dev, files, strip] = vi.mocked(sendToDevice).mock.calls[0];
+    const [dev, files, strip] = vi.mocked(beginSend).mock.calls[0];
     expect(dev.deviceId).toBe("demo-mini");
     expect(files.map((f) => f.name)).toEqual(["alpha.txt"]);
     expect(strip).toBe(usePrefs.getState().stripExif);
-    // one untrusted pending row was queued
-    expect(useOverlays.getState().send?.pending).toHaveLength(1);
+    // one untrusted pending row, tied to the session that send started
+    expect(useOverlays.getState().send?.pending).toEqual([
+      expect.objectContaining({ deviceId: "demo-mini", sessionId: "sess-1" }),
+    ]);
+  });
+});
+
+describe("SendModal · the waiting step", () => {
+  /** Park the modal on the waiting step for one untrusted device. */
+  const waitOn = (sessionId = "sess-1") => {
+    useData.setState({ devices: [mini] });
+    useOverlays.getState().openSend("demo-mini", [fileA], [fileA]);
+    useOverlays.getState().patchSend({
+      step: "waiting",
+      pending: [{ deviceId: "demo-mini", name: "Mini", sessionId, ok: false }],
+    });
+    renderUI(<SendModal />);
+  };
+
+  it("stays open with the SAS while the receiver decides — and closes when they accept", async () => {
+    // H10: the connection opening (transfer_started) used to count as "they
+    // accepted", closing this step before anyone could compare the SAS.
+    waitOn();
+    useTransfers.getState().upsert({
+      sessionId: "sess-1",
+      direction: "send",
+      status: "active",
+      started: true,
+      sas: "483921",
+    });
+    expect(await screen.findByText("483 · 921")).toBeInTheDocument();
+    expect(useOverlays.getState().send?.step).toBe("waiting");
+
+    useTransfers.getState().upsert({ sessionId: "sess-1", accepted: true });
+    await waitFor(() => expect(useOverlays.getState().send).toBeNull());
+    // And the toast says what happened — accepted — not that a code was
+    // compared, which the sender has no way to know.
+    expect(useToast.getState().msg).toBe(
+      i18n.t("send.sentOneToast", { name: "Mini" }),
+    );
+  });
+
+  it("follows ITS session, not the newest send to the same device", async () => {
+    // H11: rows used to be matched by device and start time.
+    waitOn("sess-1");
+    useTransfers.getState().upsert({
+      sessionId: "other",
+      direction: "send",
+      status: "active",
+      peerId: "demo-mini",
+      accepted: true,
+    });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(useOverlays.getState().send?.step).toBe("waiting");
   });
 });
 

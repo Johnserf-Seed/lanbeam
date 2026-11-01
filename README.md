@@ -166,8 +166,10 @@ in Settings).
   error instead of a false "delivered"**. Per‑source flood control on top.
 
 ### Privacy & system integration
-- **Metadata stripping** — remove EXIF / ICC / XMP from JPEG/PNG/WebP on send, via
-  container surgery (no re‑encode; pixels stay byte‑identical).
+- **Metadata stripping** — remove EXIF and XMP from JPEG/PNG/WebP on send, via container
+  surgery (no re‑encode; pixels stay byte‑identical). Two things that only affect how the
+  photo looks are kept: its orientation (rebuilt as an EXIF block holding nothing else, so a
+  portrait shot doesn't arrive sideways) and its color profile.
 - **Trust store** — remembered peers (`deviceId → name, auto‑accept, paired‑at`). Trusting
   a device also turns on auto‑accept (that's what "these are my devices" means); you can
   switch auto‑accept back off per device to keep confirming its transfers. **Deleting** a

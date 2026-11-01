@@ -4,7 +4,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip, Segmented } from "../components/ui";
-import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
+import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
 import { copyText, resendTransfer } from "../lib/sendops";
 import {
   showToast,
@@ -55,6 +55,10 @@ function RunningRow({ tr }: { tr: UITransfer }) {
   // Parked on the concurrency gate (M6.7): no bytes are moving yet, so the
   // speed/ETA and the pause control are meaningless — swap in a waiting hint.
   const queued = tr.status === "queued";
+  // A send whose receiver hasn't answered yet: their prompt is up, and the SAS
+  // is what both screens should show (H10) — not a 0% "transfer".
+  const awaiting =
+    tr.direction === "send" && tr.status === "active" && !tr.accepted;
   const pct = Math.min(tr.percent, 100);
   const doneBytes = (tr.totalSize * pct) / 100;
   const eta = etaClock(tr.totalSize, tr.percent, tr.speedBps);
@@ -258,9 +262,13 @@ function RunningRow({ tr }: { tr: UITransfer }) {
             {" · "}
             {queued
               ? t("transfers.queued")
-              : tr.paused
-                ? t("transfers.speedPaused")
-                : t("transfers.shaChecking")}
+              : awaiting
+                ? tr.sas
+                  ? t("transfers.awaitingAcceptSas", { sas: fmtSas(tr.sas) })
+                  : t("transfers.awaitingAccept")
+                : tr.paused
+                  ? t("transfers.speedPaused")
+                  : t("transfers.shaChecking")}
           </div>
         </div>
         {hist.length > 0 && (

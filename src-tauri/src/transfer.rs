@@ -56,7 +56,9 @@ async fn recv_frame(session: &mut NoiseSession) -> Result<Frame> {
     let pt = session
         .read_msg()
         .await?
-        .ok_or_else(|| LanBeamError::Protocol("peer closed connection".into()))?;
+        // The peer hung up mid-conversation (cancelled, quit, or crashed) — the
+        // connection is gone, nothing the peer said was malformed.
+        .ok_or_else(|| LanBeamError::ConnectionLost("the peer closed the connection".into()))?;
     protocol::decode(&pt)
 }
 
@@ -255,7 +257,7 @@ async fn initiator_hello_inner(session: &mut NoiseSession, my_name: String) -> R
     }
     .await;
     let hello = first.map_err(|e| match e {
-        LanBeamError::Io(_) | LanBeamError::Protocol(_) => {
+        LanBeamError::Io(_) | LanBeamError::Protocol(_) | LanBeamError::ConnectionLost(_) => {
             LanBeamError::PeerTooOld(format!("peer dropped the version handshake ({e})"))
         }
         other => other,
@@ -481,6 +483,67 @@ pub fn build_send_list_scoped(
 ) -> Result<(Vec<SendItem>, SendScratch)> {
     let mut ctx = StripCtx::new(strip_exif, scratch_base);
     let mut out = Vec::new();
+    walk_selection(paths, &mut |name, abs, meta| {
+        out.push(build_item(name, abs, meta, verify_hash, &mut ctx)?);
+        Ok(())
+    })?;
+    Ok((out, ctx.scratch))
+}
+
+/// The receiver's manifest limits and name rules, applied to a selection BEFORE
+/// anything is hashed, stripped or dialed (H7). Without it, a selection the
+/// receiver must refuse was only discovered on the wire: over the file count or
+/// the name budget the receiver drops the link mid-manifest ("connection
+/// lost"), and an unsavable name came back as a refusal — after the user had
+/// picked a device, sat through the hashing of every file, and maybe waited on
+/// a prompt. Same constants and the same sanitizer as the receive path, and
+/// cheap: metadata only, stopping at the first problem.
+pub fn check_send_selection(paths: &[PathBuf]) -> Result<()> {
+    check_selection_within(paths, MAX_MANIFEST_FILES, MAX_MANIFEST_NAME_TOTAL)
+}
+
+/// [`check_send_selection`] with the two budgets passed in, so a test can hit
+/// them with three files instead of ten thousand.
+fn check_selection_within(paths: &[PathBuf], max_files: u32, max_name_total: usize) -> Result<()> {
+    let mut count: u32 = 0;
+    let mut name_bytes = 0usize;
+    walk_selection(paths, &mut |name, _abs, _meta| {
+        count += 1;
+        if count > max_files {
+            return Err(LanBeamError::TooManyFiles(format!(
+                "more than {max_files} files"
+            )));
+        }
+        name_bytes += name.len();
+        if name_bytes > max_name_total {
+            return Err(LanBeamError::TooManyFiles(format!(
+                "file names exceed {max_name_total} bytes"
+            )));
+        }
+        if name.len() > MAX_MANIFEST_NAME_BYTES
+            || matches!(sanitize::validate(&name), Decision::Reject(_))
+        {
+            return Err(LanBeamError::UnsafePath(name));
+        }
+        Ok(())
+    })?;
+    if count == 0 {
+        return Err(LanBeamError::NoFiles);
+    }
+    Ok(())
+}
+
+/// The visitor [`walk_selection`] calls once per file: the manifest name (the
+/// relative path the receiver recreates), the absolute path, and its metadata.
+type SelectionVisitor<'a> = dyn FnMut(String, PathBuf, &std::fs::Metadata) -> Result<()> + 'a;
+
+/// Every file a selection sends, in send order — the ONE traversal behind both
+/// [`check_send_selection`] and [`build_send_list_scoped`], so the cheap
+/// pre-check and the real build can never disagree about what is sent. A
+/// top-level file goes under its own name, a folder as `folder/…`. Entries
+/// INSIDE a folder are judged by their own metadata (a symlink there is neither
+/// a file nor a folder, so it is skipped). A visitor error stops the walk.
+fn walk_selection(paths: &[PathBuf], visit: &mut SelectionVisitor<'_>) -> Result<()> {
     for p in paths {
         let meta = std::fs::metadata(p)?;
         if meta.is_file() {
@@ -488,34 +551,28 @@ pub fn build_send_list_scoped(
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".into());
-            out.push(build_item(name, p.clone(), &meta, verify_hash, &mut ctx)?);
+            visit(name, p.clone(), &meta)?;
         } else if meta.is_dir() {
             let base = p
                 .file_name()
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "folder".into());
-            walk_dir_scoped(p, &base, &mut out, verify_hash, &mut ctx)?;
+            walk_dir(p, &base, visit)?;
         }
     }
-    Ok((out, ctx.scratch))
+    Ok(())
 }
 
-fn walk_dir_scoped(
-    dir: &Path,
-    rel_prefix: &str,
-    out: &mut Vec<SendItem>,
-    verify_hash: bool,
-    ctx: &mut StripCtx,
-) -> Result<()> {
+fn walk_dir(dir: &Path, rel_prefix: &str, visit: &mut SelectionVisitor<'_>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let meta = entry.metadata()?;
         let name = entry.file_name().to_string_lossy().into_owned();
         let rel = format!("{rel_prefix}/{name}");
         if meta.is_file() {
-            out.push(build_item(rel, entry.path(), &meta, verify_hash, ctx)?);
+            visit(rel, entry.path(), &meta)?;
         } else if meta.is_dir() {
-            walk_dir_scoped(&entry.path(), &rel, out, verify_hash, ctx)?;
+            walk_dir(&entry.path(), &rel, visit)?;
         }
     }
     Ok(())
@@ -961,6 +1018,12 @@ pub enum FileEvent<'a> {
     /// timeout. NOT per-file: the sink emits `transfer_resumed` so the UI clears
     /// its optimistic `paused` flag (there is no other backend pause event).
     PauseAutoResumed,
+    /// SEND side only: the receiver answered `FileSendReply{accept:true}`. NOT
+    /// per-file either: the sink emits `transfer_accepted`. Until this, the
+    /// receiver's prompt is up and the sender's SAS is the thing to compare —
+    /// `transfer_started` (the connection is open) used to be read as "they
+    /// accepted", which closed the sender's SAS before anyone could look at it.
+    Accepted,
 }
 
 /// Build the per-file event sink (M6.8) shared by `send_files` and
@@ -1021,6 +1084,15 @@ pub fn file_event_sink<R: Runtime>(
             let _ = app.emit(
                 "transfer_resumed",
                 json!({ "sessionId": session_id, "reason": "pause_timeout" }),
+            );
+        }
+        FileEvent::Accepted => {
+            // The receiver said yes: the UI's "waiting for them to accept" (and
+            // the SAS it keeps on screen for comparing) ends here, not at
+            // transfer_started.
+            let _ = app.emit(
+                "transfer_accepted",
+                json!({ "sessionId": session_id, "direction": "send" }),
             );
         }
     }
@@ -1123,8 +1195,12 @@ pub async fn run_send<F: FnMut(u64, u64)>(
             offsets,
             ..
         } => offsets.unwrap_or_default(),
-        AppMessage::FileSendReply { accept: false, .. } => {
-            return Err(LanBeamError::Rejected);
+        AppMessage::FileSendReply {
+            accept: false,
+            reason,
+            ..
+        } => {
+            return Err(peer_reply_error(reason.as_deref()));
         }
         other => {
             return Err(LanBeamError::Protocol(format!(
@@ -1133,6 +1209,9 @@ pub async fn run_send<F: FnMut(u64, u64)>(
             )))
         }
     };
+    // The receiver said yes. Only NOW is the request accepted — the connection
+    // and the SAS existed long before, while the receiver's prompt was up.
+    on_file(FileEvent::Accepted);
     // Densify the SPARSE reply into a per-file offset vector. Guard every pair:
     // an out-of-range index (a malformed/oversized reply) is ignored, and each
     // offset is clamped to its file size so a hostile value can only skip within
@@ -1276,13 +1355,7 @@ pub async fn run_send<F: FnMut(u64, u64)>(
         AppMessage::TransferAck { ok: true, .. } => Ok(()),
         AppMessage::TransferAck {
             ok: false, error, ..
-        } => Err(LanBeamError::Protocol(format!(
-            "receiver error: {}",
-            // Clamp the peer-authored reason before it reaches the toast/log
-            // (finding): a hostile receiver could otherwise ack with a ~64 KB
-            // error string.
-            trust::clamp_peer_text(&error.unwrap_or_default())
-        ))),
+        } => Err(peer_ack_error(error.as_deref())),
         other => Err(LanBeamError::Protocol(format!(
             "expected ack, got {}",
             trust::clamp_peer_text(&format!("{other:?}"))
@@ -1403,6 +1476,55 @@ async fn read_manifest_entries(
         total_size,
         files,
     })
+}
+
+/// Why a receiver said no, as it travels in `FileSendReply.reason`. Wire values —
+/// older builds send exactly these strings — written by the receiver below and
+/// read back by the sender in [`peer_reply_error`], so the two cannot drift.
+pub(crate) const REPLY_DECLINED: &str = "declined";
+pub(crate) const REPLY_BUSY: &str = "busy";
+pub(crate) const REPLY_UNSAFE_NAME: &str = "unsafe filename";
+pub(crate) const REPLY_DUPLICATE_ID: &str = "duplicate transfer id";
+
+/// What a receiver's "no" means on the sending side (H6). Only a person
+/// declining is `Rejected` — the UI then drops the row and says "they
+/// declined". It used to be every refusal: a receiver at its concurrency limit
+/// or one refusing a file name read as a person saying no. A reason this build
+/// doesn't know (or none, from a legacy receiver) is still a refusal.
+pub(crate) fn peer_reply_error(reason: Option<&str>) -> LanBeamError {
+    match reason {
+        Some(REPLY_BUSY) => LanBeamError::PeerBusy,
+        Some(REPLY_UNSAFE_NAME) => {
+            LanBeamError::UnsafePath("the receiver refused a file name".into())
+        }
+        Some(REPLY_DUPLICATE_ID) => {
+            LanBeamError::Protocol("the receiver already has a transfer with this id".into())
+        }
+        _ => LanBeamError::Rejected,
+    }
+}
+
+/// What a receiver's failed `TransferAck` means on the sending side (H5). The
+/// token is the receiver's own `ui_code()` — deliberately nothing more detailed,
+/// so no local paths cross over. It used to become `Protocol("receiver error:
+/// …")`, i.e. "the connection failed", whatever the receiver actually hit: a
+/// corrupted file, a full disk and a cancel all read the same.
+pub(crate) fn peer_ack_error(token: Option<&str>) -> LanBeamError {
+    match token {
+        Some("integrity") => LanBeamError::PeerIntegrity,
+        Some("io") => LanBeamError::PeerIo,
+        Some("cancelled") => LanBeamError::PeerCancelled,
+        Some("timeout") => LanBeamError::Timeout,
+        Some("unsafe_path") => {
+            LanBeamError::UnsafePath("the receiver could not place a file safely".into())
+        }
+        // Clamp the peer-authored token before it reaches a log (finding): a
+        // hostile receiver could otherwise ack with a ~64 KB error string.
+        other => LanBeamError::Protocol(format!(
+            "receiver error: {}",
+            trust::clamp_peer_text(other.unwrap_or_default())
+        )),
+    }
 }
 
 /// Every declared name must pass the pure sanitizer BEFORE we accept the transfer.
@@ -2275,7 +2397,7 @@ pub async fn handle_incoming<R: Runtime>(
             &mut session,
             &session_id,
             false,
-            Some("unsafe filename".into()),
+            Some(REPLY_UNSAFE_NAME.into()),
         )
         .await;
         let _ = ctx.app.emit(
@@ -2297,7 +2419,7 @@ pub async fn handle_incoming<R: Runtime>(
             &mut session,
             &session_id,
             false,
-            Some("duplicate transfer id".into()),
+            Some(REPLY_DUPLICATE_ID.into()),
         )
         .await;
         // Deliberately NO transfer_error emit here: the UI keys sessions by this
@@ -2445,7 +2567,7 @@ pub async fn handle_incoming<R: Runtime>(
                 &mut session,
                 &session_id,
                 false,
-                Some("duplicate transfer id".into()),
+                Some(REPLY_DUPLICATE_ID.into()),
             )
             .await;
             // Deliberately NO transfer_error emit here: the UI keys sessions by this
@@ -2493,7 +2615,13 @@ pub async fn handle_incoming<R: Runtime>(
     };
 
     if !accept {
-        let _ = send_reply(&mut session, &session_id, false, Some("declined".into())).await;
+        let _ = send_reply(
+            &mut session,
+            &session_id,
+            false,
+            Some(REPLY_DECLINED.into()),
+        )
+        .await;
         // `code` lets the UI show "you declined" instead of a failure state
         // without string-matching `error` (M4.5). The string stays unchanged.
         let _ = ctx.app.emit(
@@ -2606,7 +2734,7 @@ pub async fn handle_incoming<R: Runtime>(
                 r = tokio::time::timeout(gate_deadline, ctx.concurrency.acquire(limit)) => match r {
                     Ok(g) => g,
                     Err(_) => {
-                        let _ = send_reply(&mut session, &session_id, false, Some("busy".into())).await;
+                        let _ = send_reply(&mut session, &session_id, false, Some(REPLY_BUSY.into())).await;
                         let _ = ctx.app.emit(
                             "transfer_error",
                             json!({ "sessionId": session_id, "error": LanBeamError::Timeout.to_string(), "code": LanBeamError::Timeout.ui_code() }),
@@ -3229,33 +3357,22 @@ fn persist_partials<R: Runtime>(
     crate::partials::persist_async(snapshot);
 }
 
-/// Today's date as `YYYY-MM-DD` (UTC) for the auto-organize date folder (M6.6).
-/// Hand-rolled via [`civil_from_days`] to avoid a date-crate dependency for one
-/// call site.
+/// Today's LOCAL date as `YYYY-MM-DD` for the auto-organize date folder (M6.6).
+/// Local, not UTC (H8): it used to be UTC — hand-rolled to avoid a date crate —
+/// so in UTC+8 everything received before 08:00 went into YESTERDAY's folder.
+/// The local offset needs the OS time-zone database, which is what chrono's
+/// `clock` feature reads.
 fn today_ymd() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let (y, m, d) = civil_from_days((secs / 86_400) as i64);
-    format!("{y:04}-{m:02}-{d:02}")
+    ymd_in(chrono::Local::now())
 }
 
-/// Days since 1970-01-01 → (year, month, day), proleptic Gregorian (Howard
-/// Hinnant's `civil_from_days`). Duplicated from `commands.rs` deliberately:
-/// both are one-call-site date helpers with no shared home, and a `pub` export
-/// would leak a diagnostics-only detail across module boundaries.
-fn civil_from_days(days: i64) -> (i64, u32, u32) {
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
-    let y = yoe + era * 400 + i64::from(m <= 2);
-    (y, m, d)
+/// `YYYY-MM-DD` of an instant in its own time zone — split out so a test can
+/// pin both the instant and the offset.
+fn ymd_in<Tz: chrono::TimeZone>(t: chrono::DateTime<Tz>) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    t.format("%Y-%m-%d").to_string()
 }
 
 /// Throttled progress emit — only fires on a whole-percent change.
@@ -3766,6 +3883,21 @@ mod tests {
             code_matches("", ""),
             "the degenerate empty-vs-empty is equal"
         );
+    }
+
+    /// The date folder follows the LOCAL calendar (H8): 07:30 on Oct 30 in UTC+8
+    /// is still Oct 29 in UTC, and the folder must say the 30th.
+    #[test]
+    fn date_folder_uses_the_local_date() {
+        use chrono::{FixedOffset, TimeZone};
+        let utc8 = FixedOffset::east_opt(8 * 3600).unwrap();
+        let t = utc8.with_ymd_and_hms(2026, 10, 30, 7, 30, 0).unwrap();
+        assert_eq!(ymd_in(t), "2026-10-30");
+        assert_eq!(ymd_in(t.with_timezone(&chrono::Utc)), "2026-10-29");
+        // And the live path produces the same shape.
+        let today = today_ymd();
+        assert_eq!(today.len(), 10, "{today}");
+        assert_eq!(&today[4..5], "-");
     }
 
     /// A code typed the way the host DISPLAYS it ("482 913"), with a dash, or
@@ -4937,7 +5069,222 @@ mod tests {
             leftovers.is_empty(),
             "corrupted partial leaked: {leftovers:?}"
         );
+        // …and the SENDER learns what happened (H5): the ack carries the
+        // receiver's code, which maps back to "their copy failed its checksum —
+        // send it again", not "the connection failed".
+        match recv_control(&mut s).await.unwrap() {
+            AppMessage::TransferAck {
+                ok: false, error, ..
+            } => {
+                let e = peer_ack_error(error.as_deref());
+                assert!(matches!(e, LanBeamError::PeerIntegrity), "got {e:?}");
+                assert_eq!(e.ui_code(), "peer_integrity");
+            }
+            other => panic!("expected a failed ack, got {other:?}"),
+        }
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// How a scripted receiver answers a real `run_send`.
+    enum Script {
+        /// `FileSendReply { accept: false, reason }`.
+        Refuse(Option<&'static str>),
+        /// Accept, take every byte, then `TransferAck { ok: false, error }`.
+        AcceptThenFail(&'static str),
+    }
+
+    /// Drive the REAL `run_send` against a hand-scripted receiver; return what
+    /// the sender ends with and the session-level events it reported, in order.
+    /// Scripted, because a real receiver only says "busy" after its concurrency
+    /// gate has waited out most of the sender's 150 s reply window.
+    async fn send_against(script: Script, tag: &str) -> (Result<()>, Vec<&'static str>) {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-script-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("note.txt");
+        std::fs::write(&file, b"hello there").unwrap();
+
+        let a_priv = priv_key();
+        let b_priv = priv_key();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut s = NoiseSession::handshake_responder(stream, &b_priv)
+                .await
+                .unwrap();
+            let manifest = match open_inbound(&mut s, "Receiver".into()).await.unwrap() {
+                InboundOpen::Files { manifest, .. } => manifest,
+                _ => panic!("expected a file session"),
+            };
+            match script {
+                Script::Refuse(reason) => {
+                    send_reply(
+                        &mut s,
+                        &manifest.transfer_id,
+                        false,
+                        reason.map(String::from),
+                    )
+                    .await
+                    .unwrap();
+                }
+                Script::AcceptThenFail(token) => {
+                    send_reply(&mut s, &manifest.transfer_id, true, None)
+                        .await
+                        .unwrap();
+                    let total: u64 = manifest.files.iter().map(|f| f.size).sum();
+                    let mut got = 0u64;
+                    while got < total {
+                        if let Frame::FileChunk(_, data) = recv_frame(&mut s).await.unwrap() {
+                            got += data.len() as u64;
+                        }
+                    }
+                    send_control(
+                        &mut s,
+                        &AppMessage::TransferAck {
+                            transfer_id: manifest.transfer_id.clone(),
+                            ok: false,
+                            error: Some(token.into()),
+                        },
+                    )
+                    .await
+                    .unwrap();
+                }
+            }
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut s = NoiseSession::handshake_initiator(stream, &a_priv, None)
+            .await
+            .unwrap();
+        let _ = initiator_hello(&mut s, "Sender".into()).await.unwrap();
+        let items = build_send_list(&[file], false).unwrap();
+        let mut events: Vec<&'static str> = Vec::new();
+        let res = run_send(
+            &mut s,
+            "t-script",
+            &items,
+            &TransferControl::neutral(),
+            None,
+            &mut |e| {
+                events.push(match e {
+                    FileEvent::Accepted => "accepted",
+                    FileEvent::Streaming { .. } => "streaming",
+                    FileEvent::Done { .. } => "done",
+                    FileEvent::PauseAutoResumed => "resumed",
+                })
+            },
+            |_, _| {},
+        )
+        .await;
+        receiver.await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+        (res, events)
+    }
+
+    /// A receiver's "no" maps to what it meant (H6). Only "declined" — or a
+    /// legacy receiver's reasonless no — is a person saying no; a full
+    /// receiver used to read as one too.
+    #[tokio::test]
+    async fn sender_learns_why_a_receiver_refused() {
+        let (res, events) = send_against(Script::Refuse(Some(REPLY_BUSY)), "busy").await;
+        assert!(matches!(res, Err(LanBeamError::PeerBusy)), "{res:?}");
+        assert!(events.is_empty(), "nothing was accepted: {events:?}");
+        let (res, _) = send_against(Script::Refuse(Some(REPLY_UNSAFE_NAME)), "unsafe").await;
+        assert!(matches!(res, Err(LanBeamError::UnsafePath(_))), "{res:?}");
+        let (res, _) = send_against(Script::Refuse(Some(REPLY_DECLINED)), "declined").await;
+        assert!(matches!(res, Err(LanBeamError::Rejected)), "{res:?}");
+        let (res, _) = send_against(Script::Refuse(None), "legacy").await;
+        assert!(matches!(res, Err(LanBeamError::Rejected)), "{res:?}");
+    }
+
+    /// The sender reports "accepted" when the receiver accepted — after the
+    /// reply, before the first byte, exactly once (H10) — and a failed ack says
+    /// what failed on the receiver's side (H5).
+    #[tokio::test]
+    async fn sender_reports_acceptance_then_the_receivers_failure() {
+        let (res, events) = send_against(Script::AcceptThenFail("io"), "ack-io").await;
+        assert!(matches!(res, Err(LanBeamError::PeerIo)), "{res:?}");
+        assert_eq!(events.first(), Some(&"accepted"), "{events:?}");
+        assert_eq!(
+            events.iter().filter(|e| **e == "accepted").count(),
+            1,
+            "{events:?}"
+        );
+        assert!(events.contains(&"streaming"), "{events:?}");
+        let (res, _) = send_against(Script::AcceptThenFail("cancelled"), "ack-cancel").await;
+        assert!(matches!(res, Err(LanBeamError::PeerCancelled)), "{res:?}");
+    }
+
+    /// Every code a receiver can put in its ack maps back to the sender-side
+    /// kind that says what happened over there.
+    #[test]
+    fn peer_ack_codes_map_back_to_what_happened() {
+        assert!(matches!(
+            peer_ack_error(Some("integrity")),
+            LanBeamError::PeerIntegrity
+        ));
+        assert!(matches!(peer_ack_error(Some("io")), LanBeamError::PeerIo));
+        assert!(matches!(
+            peer_ack_error(Some("cancelled")),
+            LanBeamError::PeerCancelled
+        ));
+        assert!(matches!(
+            peer_ack_error(Some("timeout")),
+            LanBeamError::Timeout
+        ));
+        assert!(matches!(
+            peer_ack_error(Some("unsafe_path")),
+            LanBeamError::UnsafePath(_)
+        ));
+        assert!(matches!(
+            peer_ack_error(Some("protocol")),
+            LanBeamError::Protocol(_)
+        ));
+        assert!(matches!(peer_ack_error(None), LanBeamError::Protocol(_)));
+        // A hostile receiver's novel can't reach a log unclamped.
+        match peer_ack_error(Some(&"x".repeat(100_000))) {
+            LanBeamError::Protocol(m) => assert!(m.len() < 1_000, "{} bytes", m.len()),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The receiver's rules, applied to a selection before anything is hashed
+    /// or dialed (H7): an empty folder, a name the receiver can't save, too many
+    /// files and too many name bytes each fail with their own kind.
+    #[test]
+    fn send_selection_is_checked_against_the_receivers_rules() {
+        let tmp = std::env::temp_dir().join(format!("lanbeam-selcheck-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("empty")).unwrap();
+        std::fs::create_dir_all(tmp.join("three")).unwrap();
+        for n in ["a.txt", "b.txt", "c.txt"] {
+            std::fs::write(tmp.join("three").join(n), b"x").unwrap();
+        }
+
+        check_send_selection(&[tmp.join("three")]).unwrap();
+        assert!(matches!(
+            check_send_selection(&[tmp.join("empty")]),
+            Err(LanBeamError::NoFiles)
+        ));
+        // A 241-byte segment: one over what the receiver accepts.
+        let long = tmp.join("a".repeat(241));
+        std::fs::write(&long, b"x").unwrap();
+        assert!(matches!(
+            check_send_selection(&[long]),
+            Err(LanBeamError::UnsafePath(_))
+        ));
+        // The budgets, at a size a test can afford.
+        assert!(matches!(
+            check_selection_within(&[tmp.join("three")], 2, usize::MAX),
+            Err(LanBeamError::TooManyFiles(_))
+        ));
+        check_selection_within(&[tmp.join("three")], 3, usize::MAX).unwrap();
+        assert!(matches!(
+            check_selection_within(&[tmp.join("three")], 3, 20),
+            Err(LanBeamError::TooManyFiles(_))
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -5877,7 +6224,7 @@ mod tests {
             let mut on_file = |e: FileEvent<'_>| match e {
                 FileEvent::Streaming { index, .. } => s_idx.lock().unwrap().push(index),
                 FileEvent::Done { index, verified } => d.lock().unwrap().push((index, verified)),
-                FileEvent::PauseAutoResumed => {}
+                FileEvent::PauseAutoResumed | FileEvent::Accepted => {}
             };
             run_receive_core(
                 &mut s,

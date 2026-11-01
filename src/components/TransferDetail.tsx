@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
-import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
+import { etaClock, extOf, fmtBytes, fmtSas, fmtWhen } from "../lib/format";
 import { resendTransfer, revealFile, transferErrText } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
 import {
@@ -99,6 +99,8 @@ export default function TransferDetail() {
   // Parked on the concurrency gate (M6.7): no bytes moving yet, so the status
   // line reads "waiting for a slot" instead of a misleading 0.0 MB/s.
   const isQueued = tr.status === "queued";
+  // Sent, not yet accepted: the receiver's prompt is up (H10).
+  const isAwaiting = dir === "send" && isActive && !tr.accepted;
   const isTerminal = isDone || isError;
   // Every code translates at render time. This used to hand-translate three of
   // them and fall back to `tr.error` for the rest — and `tr.error` is the
@@ -431,7 +433,13 @@ export default function TransferDetail() {
                     ? (errorText ?? t("transfers.statusFailed"))
                     : isQueued
                       ? t("transfers.queued")
-                      : `${(tr.speedBps / 1048576).toFixed(1)} MB/s`}
+                      : isAwaiting
+                        ? tr.sas
+                          ? t("transfers.awaitingAcceptSas", {
+                              sas: fmtSas(tr.sas),
+                            })
+                          : t("transfers.awaitingAccept")
+                        : `${(tr.speedBps / 1048576).toFixed(1)} MB/s`}
                 </span>
                 <span
                   style={{

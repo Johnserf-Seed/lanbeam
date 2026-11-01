@@ -199,6 +199,12 @@ export type TransferErrorCode =
   | "integrity"
   | "text_dropped"
   | "unreachable"
+  | "connection_lost"
+  | "peer_busy"
+  | "peer_cancelled"
+  | "peer_integrity"
+  | "peer_io"
+  | "unsafe_path"
   | "io"
   | "protocol";
 
@@ -711,13 +717,21 @@ export const connectDevice = (deviceId: string) =>
 // M3: file transfer. `stripExif` (M9.1) removes photo metadata (location,
 // camera, time) from JPEG/PNG/WebP images before sending — the per-send choice
 // from the confirm dialog.
+// `transferId` is the session id the UI chose (a UUID) so its record of what
+// it sent is tied to exactly this session; omitted, the backend mints one.
 export const sendFiles = (
   deviceId: string,
   paths: string[],
   stripExif: boolean,
+  transferId?: string,
 ) =>
   isTauri
-    ? invoke<string>("send_files", { deviceId, paths, stripExif })
+    ? invoke<string>("send_files", {
+        deviceId,
+        paths,
+        stripExif,
+        transferId: transferId ?? null,
+      })
     : Promise.reject(new Error("browser demo: no transport"));
 
 // `conflict` (M6.5) is the ConflictModal's choice — "rename" (keep both) or
