@@ -206,6 +206,17 @@ describe("SendModal · closing keeps or drops the selection", () => {
     expect(useOverlays.getState().send?.sel).toEqual(["beta.pdf"]);
   });
 
+  it("Escape is a click outside: it keeps the selection too", () => {
+    useData.setState({ devices: [mini, nano] });
+    useOverlays.getState().openSend(null, [fileA, fileB]);
+    useOverlays.getState().patchSend({ sel: ["beta.pdf"], step: "device" });
+    renderUI(<SendModal />);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(useOverlays.getState().send).toBeNull();
+    expect(useOverlays.getState().sendDraft?.sel).toEqual(["beta.pdf"]);
+  });
+
   it("the × drops it: reopening starts over", () => {
     useData.setState({ devices: [mini, nano] });
     useOverlays.getState().openSend(null, [fileA, fileB]);

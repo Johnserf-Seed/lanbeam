@@ -4,6 +4,7 @@ import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
 import { etaClock, extOf, fmtBytes, fmtWhen } from "../lib/format";
 import { resendTransfer, revealFile, transferErrText } from "../lib/sendops";
+import { useEscape } from "../lib/useEscape";
 import {
   sendFileFromPath,
   showToast,
@@ -80,6 +81,9 @@ export default function TransferDetail() {
   const port = usePrefs((s) => s.port);
   const verifyHash = usePrefs((s) => s.verifyHash);
   const recents = useRecents((s) => s.items);
+  useEscape(!!tr && tr.kind !== "text" && tr.via !== "browser", () =>
+    setDetail(null),
+  );
   if (!tr) return null;
   // Quick-text records (M7.3) and browser-share downloads (M8.4) live in the
   // history list only — they carry no session/paths, so this file-oriented

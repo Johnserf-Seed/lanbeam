@@ -3,6 +3,7 @@ import { useTranslation } from "react-i18next";
 import { showToast, useData, useOverlays } from "../lib/store";
 import { isMac } from "../lib/platform";
 import { errText, sendTextTracked } from "../lib/sendops";
+import { useEscape } from "../lib/useEscape";
 import { ModalHead, Toggle } from "./ui";
 
 /** ⌁ 快传文本 — sends a short text/link over the encrypted channel for real
@@ -38,6 +39,8 @@ export default function QuickTextModal() {
       setSending(false);
     }
   }, [qtOpen]);
+
+  useEscape(qtOpen, () => setQt(false));
 
   if (!qtOpen) return null;
   const close = () => setQt(false);

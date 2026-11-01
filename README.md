@@ -92,8 +92,9 @@ gh attestation verify LanBeam_0.1.0_x64-setup.exe --repo Johnserf-Seed/lanbeam
    simply arrive from then on — it's now in your trust circle.
 4. **Other side has no LanBeam?** Use *Browser receive*: LanBeam shows a link and a QR code,
    the phone opens it, and the file downloads straight from your computer.
-5. **A device doesn't appear?** (another subnet, or discovery blocked) — use *Pair* with a
-   6‑digit code or QR, or *Direct IP* with its address.
+5. **A device doesn't appear?** (another subnet, or discovery blocked) — use *Pair*: one
+   computer shows its address and a 6‑digit code, the other enters both (or opens the pair
+   link that carries them). Or just add it by address, without pairing.
 
 Received files land in `Downloads/LanBeam`, optionally sorted per device or per date (both
 in Settings).
@@ -106,7 +107,7 @@ in Settings).
     <td width="50%"><img src="docs/screenshots/en/share.webp" alt="Receive in a browser: a one-time LAN link with a QR code"><br><b>Browser receive</b> — a one‑time LAN link + QR for devices without the app</td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/en/pair.webp" alt="Pair a new device with a QR code or a 6-digit code"><br><b>Pair</b> — QR or 6‑digit code for devices discovery can't see</td>
+    <td><img src="docs/screenshots/en/pair.webp" alt="Pair a device: this computer's address and a 6-digit code"><br><b>Pair</b> — this computer's address + a 6‑digit code, for devices discovery can't see</td>
     <td><img src="docs/screenshots/en/transfers.webp" alt="Transfers: an active transfer with live speed, and the history"><br><b>Transfers</b> — live speed, pause / resume, verified history</td>
   </tr>
   <tr>
@@ -150,11 +151,15 @@ in Settings).
   and that indicator is how you get back to it and stop it.
 
 ### Pairing & reach
-- **Pairing** — a 6‑digit code (10‑minute TTL), a scannable QR, or a [`lanbeam://` deep
-  link](#deep-links-lanbeam). Redeeming a code proves the code, not the device holding it:
-  **both screens then show the same SAS, and trust is recorded only once a human confirms
-  it — independently, on each side.** The handshake never grants trust on its own.
-- **IP direct connect** for peers that automatic discovery can't see (different subnet).
+- **Pairing** — one side shows its address and a 6‑digit code (10‑minute TTL), also packed
+  into a pair link ([`lanbeam://` deep link](#deep-links-lanbeam)); the other side enters
+  both. Joining from a link pins the handshake to the device the link names. Redeeming a
+  code proves the code, not the device holding it: **both screens then show the same SAS,
+  and trust is recorded only once a human confirms it — independently, on each side.** The
+  handshake never grants trust on its own. Pairing records each side's address on the
+  other, so a paired device stays reachable in both directions where discovery can't see it.
+- **IP direct connect** for peers that automatic discovery can't see (different subnet) —
+  *Just add the device* in the pairing form, or the field on an empty Devices page.
 - **Quick text** — send a snippet/link over the encrypted channel, optionally dropped on
   the receiver's clipboard. Text has no accept prompt, so it obeys the rule files do: a
   sender you don't trust is dropped — **and the ack says so, so the sender gets a real
@@ -299,9 +304,9 @@ and why adding one is the change that must never be made.
 
 | Link | What it does | What it does **not** do |
 | --- | --- | --- |
-| `lanbeam://pair?d=…&n=…&a=…&p=…&c=…` | Opens the pairing form, pre‑filled | Pair. You still confirm the SAS. |
+| `lanbeam://pair?d=…&n=…&a=…&p=…&c=…` | Opens the pairing form's *Join theirs* view, pre‑filled | Pair. You still press Join and confirm the SAS. |
 | `lanbeam://text?t=<urlencoded>` | Opens quick‑text with the body pre‑filled | Send. You still pick the device. |
-| `lanbeam://connect?a=<ip[:port]>` | Lands on Devices with the address pre‑filled | Dial. You still press **Direct IP**. |
+| `lanbeam://connect?a=<ip[:port]>` | Opens *Join theirs* with the address pre‑filled | Dial. You still press Join (with the code) or *Just add the device*. |
 | `lanbeam://devices` · `transfers` · `inbox` · `settings` | Navigates to that page | Carry any payload |
 | `lanbeam://open` | Just brings the window to the front | Anything else |
 

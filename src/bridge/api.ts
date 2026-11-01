@@ -62,11 +62,18 @@ export type Settings = {
   stripExif: boolean;
 };
 
-/** A fresh pairing invitation (start_pairing, M7.1): the 6-digit code plus the
- *  QR/deep-link payload another device can scan to join. */
+/** A fresh pairing invitation (start_pairing, M7.1): the 6-digit code, this
+ *  device's dial address, and the pair link that packs both (`qr` — the same
+ *  string a QR code would carry). */
 export type PairingInvite = {
   code: string;
+  /** `lanbeam://pair?d=…&n=…&a=…&p=…&c=…` — address + code + name in one. */
   qr: string;
+  /** `ip:port` the joiner types next to the code — the same endpoint the link's
+   *  `a=`/`p=` carry. null when this machine has no LAN address at all. */
+  addr: string | null;
+  /** Unix milliseconds at which the code stops working (drives the countdown). */
+  expiresAt: number;
 };
 
 /** The peer a pairing / IP-direct handshake reached (join_by_code /
@@ -190,6 +197,8 @@ export type TransferErrorCode =
   | "cancelled"
   | "peer_too_old"
   | "integrity"
+  | "text_dropped"
+  | "unreachable"
   | "io"
   | "protocol";
 
@@ -540,15 +549,18 @@ export const setStripExif = (enabled: boolean) => {
 
 // ── pairing + quick text (M7) ────────────────────────────────────────────
 
-// M7.1: mint a fresh pairing invitation (6-digit code + QR/deep-link payload),
-// valid for 10 minutes. Calling it again replaces the previous code. Browser
-// mode returns a static demo invite so the modal renders.
+// M7.1: mint a fresh pairing invitation (6-digit code + this device's address +
+// the pair link packing both), valid for 10 minutes. Calling it again replaces
+// the previous code. Browser mode returns a static demo invite so the modal
+// renders.
 export const startPairing = () =>
   isTauri
     ? invoke<PairingInvite>("start_pairing")
     : Promise.resolve<PairingInvite>({
         code: "482913",
         qr: `lanbeam://pair?d=demo&n=${encodeURIComponent(demoDeviceName())}&a=192.168.1.20&p=51704&c=482913`,
+        addr: "192.168.1.20:51704",
+        expiresAt: Date.now() + 600_000,
       });
 
 // M7.1: cancel the active pairing code so it can no longer be redeemed. Safe
@@ -564,12 +576,19 @@ export const takePendingDeepLink = () =>
     ? invoke<string | null>("take_pending_deep_link")
     : Promise.resolve<string | null>(null);
 
-// M7.1: join a device showing a pairing code. `addr` is its ip[:port] or a
-// scanned lanbeam://pair link (which can itself carry the code). Resolves with
-// the paired peer; a wrong/expired code rejects. Browser mode fakes a success.
-export const joinByCode = (addr: string, code: string) =>
+// M7.1: join a device showing a pairing code. `addr` is its ip[:port] (or a
+// pasted lanbeam://pair link, which can itself carry the code). `expectedId` is
+// the link's `d=`: when given, the handshake is PINNED to that device and a
+// different responder fails with IdentityMismatch. Resolves with the reached
+// peer + SAS — it grants no trust; a wrong/expired code rejects (PairRejected).
+// Browser mode fakes a success.
+export const joinByCode = (addr: string, code: string, expectedId?: string) =>
   isTauri
-    ? invoke<ConnectResult>("join_by_code", { addr, code })
+    ? invoke<ConnectResult>("join_by_code", {
+        addr,
+        code,
+        expectedId: expectedId || null,
+      })
     : Promise.resolve<ConnectResult>({
         deviceId: "demo-paired",
         name: "Pixel 8 Pro",

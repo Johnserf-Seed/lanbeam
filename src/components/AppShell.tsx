@@ -56,7 +56,7 @@ import {
 import { maybeSeedDemo } from "../lib/demo";
 import { suppressBrowserShortcuts } from "../lib/browserShortcuts";
 import { installZoomHotkeys } from "../lib/uiZoom";
-import { parseDeepLink } from "../lib/deepLink";
+import { routeDeepLink } from "../lib/deepLinkRoute";
 import {
   errText,
   openDir,
@@ -73,40 +73,6 @@ function peerNameOf(deviceId: string, senderName?: string): string {
   if (senderName) return senderName;
   const dev = useData.getState().devices.find((d) => d.deviceId === deviceId);
   return dev?.name ?? shortFp(deviceId);
-}
-
-/** Do the only three things a `lanbeam://` link is ALLOWED to do: surface (the
- *  backend already did that), PRE-FILL, or NAVIGATE — never act. A deep link is
- *  untrusted: any web page can ask the OS to open one. See `lib/deepLink.ts` for
- *  the contract; an unknown command is dropped rather than guessed at. */
-function routeDeepLink(raw: string, navigate: (path: string) => void): void {
-  const link = parseDeepLink(raw);
-  if (!link) return;
-  const ov = useOverlays.getState();
-  switch (link.cmd) {
-    case "pair":
-      // Pre-fills the join field; the user still confirms the SAS.
-      ov.setPair(true, link.url);
-      break;
-    case "text":
-      // Pre-fills the body; the user still picks a device and presses send.
-      ov.setQt(true, link.text);
-      break;
-    case "connect":
-      // Stages the address on the Devices page. It does NOT dial.
-      ov.setConnectPrefill(link.addr);
-      navigate("/devices");
-      break;
-    case "devices":
-    case "transfers":
-    case "inbox":
-    case "settings":
-      navigate(`/${link.cmd}`);
-      break;
-    case "open":
-      // The window is already up — that was the whole request.
-      break;
-  }
 }
 
 /** Push the tray's whole localized snapshot. Reads live state through getState(),

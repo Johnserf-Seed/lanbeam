@@ -49,6 +49,26 @@ pub enum LanBeamError {
     /// showing a generic failure.
     #[error("peer version too old: {0}")]
     PeerTooOld(String),
+    /// The pairing host checked the presented code and said no: wrong digits,
+    /// an expired invitation, or no invitation active there at all. Kept apart
+    /// from `Protocol` so the UI can say "wrong or expired code" instead of
+    /// "the connection failed" (the message is the host's reason token).
+    #[error("pairing rejected: {0}")]
+    PairRejected(String),
+    /// A dial target the user typed (or a link carried) is not an `ip[:port]`.
+    /// User input, not a wire fault — its own kind so the UI can point at the
+    /// address field rather than blaming the connection.
+    #[error("invalid address: {0}")]
+    InvalidAddress(String),
+    /// A join was attempted with no pairing code at all (neither typed nor
+    /// carried by the link).
+    #[error("no pairing code provided")]
+    PairCodeMissing,
+    /// The TCP dial itself failed — connection refused, no route, host down.
+    /// Distinct from `Io` (which the UI renders as "a file or disk error") so
+    /// an unreachable peer reads as exactly that.
+    #[error("unreachable: {0}")]
+    Unreachable(String),
     #[error("cancelled")]
     Cancelled,
     /// A received file's SHA-256 did not match the sender-declared digest
@@ -72,7 +92,7 @@ pub enum LanBeamError {
 impl LanBeamError {
     /// Coarse machine-readable code for the `transfer_error` event's optional
     /// `code` field: `"declined" | "timeout" | "cancelled" | "peer_too_old" |
-    /// "integrity" | "io" | "protocol"`.
+    /// "integrity" | "text_dropped" | "unreachable" | "io" | "protocol"`.
     /// WHY: the UI must tell "the peer said no" apart from a genuine failure
     /// without string-matching the human-oriented `error` text (M4.5), and the
     /// error strings themselves are NOT a stable contract.
@@ -89,6 +109,9 @@ impl LanBeamError {
             // surface it. Its own bucket so the UI can say something actionable
             // ("ask them to trust you") instead of "the connection failed".
             LanBeamError::TextRefused | LanBeamError::TextThrottled => "text_dropped",
+            // The peer could not be dialed at all — "can't reach them", not a
+            // disk error and not a broken conversation.
+            LanBeamError::Unreachable(_) => "unreachable",
             LanBeamError::Io(_)
             | LanBeamError::Bind(_)
             | LanBeamError::Keyring(_)
@@ -184,6 +207,22 @@ mod tests {
             "integrity: hash"
         );
         assert_eq!(LanBeamError::Timeout.to_string(), "timeout");
+        assert_eq!(
+            LanBeamError::PairRejected("code".into()).to_string(),
+            "pairing rejected: code"
+        );
+        assert_eq!(
+            LanBeamError::InvalidAddress("x".into()).to_string(),
+            "invalid address: x"
+        );
+        assert_eq!(
+            LanBeamError::PairCodeMissing.to_string(),
+            "no pairing code provided"
+        );
+        assert_eq!(
+            LanBeamError::Unreachable("refused".into()).to_string(),
+            "unreachable: refused"
+        );
     }
 
     #[test]
@@ -205,6 +244,19 @@ mod tests {
         assert_eq!(LanBeamError::UnsafePath("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::Crypto("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::Protocol("x".into()).ui_code(), "protocol");
+        assert_eq!(
+            LanBeamError::Unreachable("x".into()).ui_code(),
+            "unreachable"
+        );
+        // Pairing-only kinds never ride a transfer_error event; they fall into
+        // the generic bucket like every other "conversation broke" kind.
+        assert_eq!(LanBeamError::PairRejected("x".into()).ui_code(), "protocol");
+        assert_eq!(
+            LanBeamError::InvalidAddress("x".into()).ui_code(),
+            "protocol"
+        );
+        assert_eq!(LanBeamError::PairCodeMissing.ui_code(), "protocol");
+        assert_eq!(LanBeamError::TextRefused.ui_code(), "text_dropped");
     }
 
     #[test]

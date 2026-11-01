@@ -38,7 +38,8 @@ function newKeyDevice(): DiscoveredDevice {
     deviceId: NEW_ID,
     name: NAME,
     address: "192.168.1.9",
-  } as DiscoveredDevice;
+    port: 51999,
+  };
 }
 
 // A remembered record whose name has reappeared under a new key, live on the LAN
@@ -106,7 +107,7 @@ describe("FpAlertModal", () => {
     expect(useToast.getState().msg).toBe(i18n.t("fp.removedToast"));
   });
 
-  it("sends you to pairing, pre-filled with the new device's address", () => {
+  it("sends you to pairing, pre-filled with the new device's address and port", () => {
     // Pairing is the only honest way back: it shows the same code on BOTH
     // screens and records trust only once a person confirms they match.
     seed();
@@ -116,7 +117,12 @@ describe("FpAlertModal", () => {
     fireEvent.click(screen.getByText(i18n.t("fp.pairAgain")));
 
     expect(useOverlays.getState().pairOpen).toBe(true);
-    expect(useOverlays.getState().pairPrefill).toBe("192.168.1.9");
+    // The port rides along: the device may not listen on the default one, and
+    // an address without it would dial the wrong place.
+    expect(useOverlays.getState().pairPrefill).toEqual({
+      addr: "192.168.1.9:51999",
+      name: NAME,
+    });
     expect(useOverlays.getState().fpAlert).toBeNull();
     // The old record is untouched — you may still want it, and deleting it is a
     // separate, explicit choice.

@@ -677,6 +677,9 @@ pub fn run() {
                     identity: identity.clone(),
                     tcp_port: tcp_port.clone(),
                     download_dir: download_dir.clone(),
+                    // Shared with AppState so a successful pairing can record the
+                    // JOINER's address for the host's later sends (M7.1 closure).
+                    manual_peers: manual_peers.clone(),
                     settings: settings.clone(),
                     peers: peers.clone(),
                     pending: pending.clone(),

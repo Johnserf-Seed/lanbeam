@@ -6,7 +6,7 @@ use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use serde::Serialize;
 use tokio::sync::{oneshot, Notify};
@@ -358,6 +358,11 @@ pub struct PairingSession {
     /// Redemption deadline (`Instant`, a monotonic liveness clock — never
     /// displayed or persisted): the code is refused once `now >= expires`.
     pub expires: Instant,
+    /// The same deadline on the wall clock. WHY both: `Instant` does not
+    /// advance while the machine sleeps on macOS/Linux, so a code minted before
+    /// a nap could stay redeemable long past its ten real minutes; the host
+    /// refuses once EITHER clock says expired. Also what the UI counts down.
+    pub expires_at: SystemTime,
 }
 
 /// Per-source-IP failed-`PairRequest` throttle (M7.1). Keeps a short sliding
@@ -1170,6 +1175,7 @@ mod tests {
         *ps.session.lock().unwrap() = Some(PairingSession {
             code: "123456".into(),
             expires: Instant::now() + std::time::Duration::from_secs(60),
+            expires_at: SystemTime::now() + std::time::Duration::from_secs(60),
         });
         assert_eq!(
             ps.session.lock().unwrap().as_ref().unwrap().code,

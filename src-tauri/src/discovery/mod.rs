@@ -274,7 +274,7 @@ fn share_http_advert(ctx: &DiscoveryCtx) -> Option<u16> {
 /// and `list_discovered_devices` go through. `snapshot` locks (and releases)
 /// `peers`, then `manual` is locked separately, so no two locks are ever held at
 /// once (and none across an await — this is sync).
-fn devices_payload(
+pub(crate) fn devices_payload(
     peers: &Arc<Mutex<PeerTable>>,
     manual: &Arc<Mutex<HashMap<String, ManualPeer>>>,
     my_id: &str,

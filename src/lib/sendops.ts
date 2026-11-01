@@ -86,9 +86,14 @@ export async function sendTextTracked(
 
 /** Backend error `kind` (the stable serde tag on LanBeamError) → i18n key. The
  *  error's inner `message` is INTERNAL diagnostics (see error.rs) and must never
- *  reach the UI — only the localized text for its `kind` does. */
-const ERR_KEYS: Record<string, string> = {
+ *  reach the UI — only the localized text for its `kind` does. Exported for the
+ *  contract test that holds it to every variant in error.rs. */
+export const ERR_KEYS: Record<string, string> = {
   PeerTooOld: "errors.peerTooOld",
+  PairRejected: "errors.pairRejected",
+  InvalidAddress: "errors.invalidAddress",
+  PairCodeMissing: "errors.pairCodeMissing",
+  Unreachable: "errors.unreachable",
   PeerNotFound: "errors.peerNotFound",
   SelfPeer: "errors.selfPeer",
   TextRefused: "errors.textRefused",
@@ -116,8 +121,8 @@ export function isNotFound(e: unknown): boolean {
 }
 
 /** `transfer_error` events carry a coarse `code` (the backend's `ui_code()` — a
- *  closed set of seven) and an `error` string. Map the CODE; never show the
- *  string.
+ *  closed set, held to this table by the error contract test) and an `error`
+ *  string. Map the CODE; never show the string.
  *
  *  That string is the backend's English internal diagnostic — "protocol: peer
  *  closed connection", "io: The system cannot find the path specified. (os error
@@ -125,12 +130,13 @@ export function isNotFound(e: unknown): boolean {
  *  transfer detail pane did for every code it didn't special-case, put raw Rust
  *  in front of the user and leaked local paths into the UI. Every code has a key
  *  here; anything unrecognized gets the generic line, never the raw string. */
-const TRANSFER_ERR_KEYS: Record<string, string> = {
+export const TRANSFER_ERR_KEYS: Record<string, string> = {
   declined: "errors.rejected",
   timeout: "errors.timeout",
   cancelled: "errors.cancelled",
   peer_too_old: "errors.peerTooOld",
   integrity: "errors.integrity",
+  unreachable: "errors.unreachable",
   io: "errors.io",
   protocol: "errors.protocol",
   text_dropped: "errors.textRefused",

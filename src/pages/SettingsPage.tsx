@@ -602,7 +602,7 @@ export default function SettingsPage() {
                     cursor: "pointer",
                   }}
                 >
-                  {t("settings.qrCode")}
+                  {t("settings.pairDevice")}
                 </span>
               </div>
             </div>

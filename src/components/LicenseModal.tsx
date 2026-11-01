@@ -2,6 +2,7 @@ import { useMemo, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import { LICENSES } from "../lib/licenses";
 import { useOverlays } from "../lib/store";
+import { useEscape } from "../lib/useEscape";
 import { ModalHead } from "./ui";
 
 /** 开源许可 (M9 polish): a read-only inventory of the third-party components
@@ -27,6 +28,8 @@ export default function LicenseModal() {
       ),
     [],
   );
+
+  useEscape(open, () => setLicense(false));
 
   if (!open) return null;
   const close = () => setLicense(false);
