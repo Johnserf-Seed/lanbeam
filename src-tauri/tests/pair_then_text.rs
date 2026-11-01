@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use tauri::Listener;
 use tokio::net::{TcpListener, TcpStream};
 
-use lanbeam_lib::consts::TRANSFER_V2;
+use lanbeam_lib::consts::TRANSFER_V3;
 use lanbeam_lib::identity::{generate_identity, Identity};
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
@@ -129,7 +129,7 @@ async fn pair_then_quick_text_share_one_host_ctx() {
         let peer = initiator_hello(&mut sess, "Joiner Device".into())
             .await
             .unwrap();
-        assert_eq!(peer.version, TRANSFER_V2, "two current builds negotiate v2");
+        assert_eq!(peer.version, TRANSFER_V3, "two current builds negotiate v3");
         send_pair_request(&mut sess, "482913", None).await.unwrap();
         let (accept, host_name, _reason) = recv_pair_confirm(&mut sess).await.unwrap();
         assert!(accept, "the right code pairs");
@@ -183,8 +183,8 @@ async fn pair_then_quick_text_share_one_host_ctx() {
         .await
         .unwrap();
     assert_eq!(
-        peer.version, TRANSFER_V2,
-        "the text session still negotiates v2"
+        peer.version, TRANSFER_V3,
+        "the text session negotiates the newest version, text included"
     );
     send_text(&mut sess, "paired — now here's a link".into(), Some(false))
         .await

@@ -15,6 +15,7 @@ import type {
   IncomingRequest,
   NetworkInfo,
   TransferErrorCode,
+  TransferPendingEvent,
   TrustedPeer,
 } from "../bridge/api";
 import { baseName, extOf } from "./format";
@@ -739,6 +740,10 @@ export type UITransfer = {
   /** SEND only: the receiver accepted (`transfer_accepted`). Until then the row
    *  is waiting on a person, and the SAS is what both screens should show. */
   accepted?: boolean;
+  /** SEND only: where the request stands on the receiver until then
+   *  (`transfer_pending`, F4) — on their screen, or accepted there and queued
+   *  for a slot. Unset until they say; an older receiver never does. */
+  peerState?: TransferPendingEvent["state"];
   peerId?: string;
   peerName?: string;
   /** display name: first file (+ n more handled by the page) */

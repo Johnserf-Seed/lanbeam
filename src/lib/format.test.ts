@@ -4,6 +4,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import i18n from "../i18n";
 import {
+  awaitingText,
   baseName,
   etaClock,
   extOf,
@@ -166,6 +167,29 @@ describe("fmtCountdown", () => {
     expect(fmtCountdown(0)).toBe("0:00");
     expect(fmtCountdown(-5_000)).toBe("0:00");
     expect(fmtCountdown(Number.NaN)).toBe("0:00");
+  });
+});
+
+describe("awaitingText", () => {
+  it("says what a send waits on: a person, one whose screen has it, or a slot (F4)", () => {
+    const sas = "483921";
+    // …with the code held together by no-break spaces, so a wrapping line
+    // never splits it.
+    const shown = "483\u00a0·\u00a0921";
+    expect(awaitingText({})).toBe(i18n.t("transfers.awaitingAccept"));
+    expect(awaitingText({ sas })).toBe(
+      i18n.t("transfers.awaitingAcceptSas", { sas: shown }),
+    );
+    expect(awaitingText({ peerState: "prompted" })).toBe(
+      i18n.t("transfers.awaitingShown"),
+    );
+    expect(awaitingText({ sas, peerState: "prompted" })).toBe(
+      i18n.t("transfers.awaitingShownSas", { sas: shown }),
+    );
+    // They said yes: there is no code left to compare, only a slot to wait for.
+    expect(awaitingText({ sas, peerState: "queued" })).toBe(
+      i18n.t("transfers.awaitingSlot"),
+    );
   });
 });
 

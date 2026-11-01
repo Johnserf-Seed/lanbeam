@@ -27,6 +27,7 @@ import type {
   TransferEvent,
   TransferFileProgressEvent,
   TransferFileDoneEvent,
+  TransferPendingEvent,
   TrustedPeer,
 } from "../bridge/api";
 import {
@@ -547,6 +548,22 @@ export default function AppShell() {
           sessionId: p.sessionId,
           direction: "send",
           accepted: true,
+        });
+      }),
+    [],
+  );
+
+  // …and what it waits on meanwhile, when the receiver says (F4): on their
+  // screen, or accepted there and queued for a slot. A row we aren't tracking
+  // isn't made up from it (L22).
+  useEffect(
+    () =>
+      api.onEvent<TransferPendingEvent>("transfer_pending", (p) => {
+        if (!useTransfers.getState().transfers[p.sessionId]) return;
+        useTransfers.getState().upsert({
+          sessionId: p.sessionId,
+          direction: "send",
+          peerState: p.state,
         });
       }),
     [],

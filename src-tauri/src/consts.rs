@@ -21,6 +21,12 @@ pub const TRANSFER_V1: u8 = 1;
 /// only ever sent to a peer whose `Hello` advertised 2, so a v1 (M4–M6) peer —
 /// which negotiates 1 — never receives one.
 pub const TRANSFER_V2: u8 = 2;
+/// Transfer v3 — F4: while a sender waits for the reply, the receiver says
+/// where its request stands (`AppMessage::Pending`): on screen for a person, or
+/// accepted and queued for a free slot. Gated like v2: only a peer whose
+/// `Hello` advertised 3 is ever sent one, so a v1/v2 sender — which would fail
+/// to decode it in the middle of its wait — never sees it.
+pub const TRANSFER_V3: u8 = 3;
 
 // Discovery (UDP)
 pub const DISCOVERY_GROUP: Ipv4Addr = Ipv4Addr::new(239, 255, 61, 17); // admin/local scope

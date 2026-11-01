@@ -121,6 +121,35 @@ describe("AppShell · transfer events", () => {
     expect(useTransfers.getState().incomings).toHaveLength(1);
   });
 
+  it("a waiting send learns where it stands — and a stranger's session makes no row (F4)", async () => {
+    await mount();
+    useTransfers.getState().upsert({
+      sessionId: "s1",
+      direction: "send",
+      status: "active",
+      peerName: "Studio",
+    });
+    fire("transfer_pending", {
+      sessionId: "s1",
+      direction: "send",
+      state: "prompted",
+    });
+    expect(useTransfers.getState().transfers.s1?.peerState).toBe("prompted");
+    fire("transfer_pending", {
+      sessionId: "s1",
+      direction: "send",
+      state: "queued",
+    });
+    expect(useTransfers.getState().transfers.s1?.peerState).toBe("queued");
+
+    fire("transfer_pending", {
+      sessionId: "ghost",
+      direction: "send",
+      state: "prompted",
+    });
+    expect(useTransfers.getState().transfers.ghost).toBeUndefined();
+  });
+
   it("a transfer_done for a session nobody knows makes no row (L22)", async () => {
     await mount();
     fire("transfer_done", { sessionId: "ghost", direction: "receive" });
