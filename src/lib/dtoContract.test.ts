@@ -86,15 +86,15 @@ function tsTypeKeys(name: string): string[] {
 
 /** [Rust file, Rust struct, TS type] — every DTO the UI reads by name. */
 const PAIRS: [string, string, string][] = [
-  ["src-tauri/src/commands.rs", "MyIdentity", "MyIdentity"],
-  ["src-tauri/src/commands.rs", "SettingsDto", "Settings"],
-  ["src-tauri/src/commands.rs", "PairingInvite", "PairingInvite"],
-  ["src-tauri/src/commands.rs", "ConnectResult", "ConnectResult"],
-  ["src-tauri/src/commands.rs", "NetworkInfo", "NetworkInfo"],
-  ["src-tauri/src/commands.rs", "ShareStarted", "ShareStarted"],
-  ["src-tauri/src/commands.rs", "ShareUpdated", "ShareUpdated"],
-  ["src-tauri/src/commands.rs", "ShareEntry", "ShareEntry"],
-  ["src-tauri/src/commands.rs", "PartialDto", "PartialFile"],
+  ["src-tauri/src/commands/mod.rs", "MyIdentity", "MyIdentity"],
+  ["src-tauri/src/commands/mod.rs", "SettingsDto", "Settings"],
+  ["src-tauri/src/commands/mod.rs", "PairingInvite", "PairingInvite"],
+  ["src-tauri/src/commands/mod.rs", "ConnectResult", "ConnectResult"],
+  ["src-tauri/src/commands/mod.rs", "NetworkInfo", "NetworkInfo"],
+  ["src-tauri/src/commands/mod.rs", "ShareStarted", "ShareStarted"],
+  ["src-tauri/src/commands/mod.rs", "ShareUpdated", "ShareUpdated"],
+  ["src-tauri/src/commands/mod.rs", "ShareEntry", "ShareEntry"],
+  ["src-tauri/src/commands/mod.rs", "PartialDto", "PartialFile"],
   ["src-tauri/src/trust.rs", "TrustedPeerDto", "TrustedPeer"],
   ["src-tauri/src/share.rs", "ShareDownloadEvent", "ShareDownloadEvent"],
   ["src-tauri/src/discovery/mod.rs", "DiscoveredDevice", "DiscoveredDevice"],
@@ -104,7 +104,7 @@ const PAIRS: [string, string, string][] = [
 describe("the backend DTO contract", () => {
   it("reads both sides (so a parser bug can't pass the rest)", () => {
     expect(
-      rustJsonFields("src-tauri/src/commands.rs", "PairingInvite"),
+      rustJsonFields("src-tauri/src/commands/mod.rs", "PairingInvite"),
     ).toEqual(["addr", "code", "expiresAt", "qr"]);
     expect(tsTypeKeys("PairingInvite")).toEqual([
       "addr",
