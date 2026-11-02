@@ -115,6 +115,19 @@ pub async fn reset_identity(
     if let Some(snap) = snapshot {
         let _ = tauri::async_runtime::spawn_blocking(move || snap.persist()).await;
     }
+    // The hand-added addresses go with it. They used to vanish with the restart
+    // below; now that they are on disk, the reset has to clear them itself or
+    // it would stop being the clean start it always was.
+    let snapshot = match state.manual_peers.lock() {
+        Ok(mut m) => m.clear().then(|| m.snapshot()).flatten(),
+        Err(_) => {
+            log::warn!("manual peer lock poisoned; address file left as-is during reset");
+            None
+        }
+    };
+    if let Some(snap) = snapshot {
+        let _ = tauri::async_runtime::spawn_blocking(move || snap.persist()).await;
+    }
 
     log::info!("identity reset: stored identity deleted, trust cleared; restarting");
     // (4) Mark quit intent so close-to-tray can never intercept teardown.

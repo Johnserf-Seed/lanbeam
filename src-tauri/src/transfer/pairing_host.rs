@@ -119,18 +119,24 @@ pub(super) async fn handle_pair_request<R: Runtime>(
         // joiner's self-declared listener, defaulting for older builds. Not
         // trust — just an address, exactly like `connect_by_addr`.
         if let Some(std::net::IpAddr::V4(ip)) = peer_ip {
-            if let Ok(mut manual) = ctx.manual_peers.lock() {
-                crate::state::insert_manual_peer(
-                    &mut manual,
-                    device_id.to_string(),
-                    crate::state::ManualPeer {
-                        name: joiner_name.clone(),
-                        addr: ip,
-                        port: port.unwrap_or(crate::consts::DEFAULT_TCP_PORT),
-                        last_used: Instant::now(),
-                    },
-                );
-            }
+            let snapshot = match ctx.manual_peers.lock() {
+                Ok(mut manual) => {
+                    manual.insert(
+                        device_id.to_string(),
+                        crate::manual_peers::ManualPeer {
+                            name: joiner_name.clone(),
+                            addr: ip,
+                            port: port.unwrap_or(crate::consts::DEFAULT_TCP_PORT),
+                            last_used: Instant::now(),
+                        },
+                    );
+                    manual.snapshot()
+                }
+                Err(_) => None,
+            };
+            // Persisted like the joiner's side, so the host can still dial it
+            // after a restart.
+            crate::manual_peers::persist_async(snapshot);
             // The device list is replaced wholesale from this payload on the
             // UI side, so emit the MERGED list (discovery + manual), never
             // discovery alone.

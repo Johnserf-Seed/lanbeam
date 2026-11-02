@@ -22,8 +22,9 @@ use crate::consts::{
     ANNOUNCE_INTERVAL, DISCOVERY_GROUP, DISCOVERY_PORT, DISCOVERY_RECV_BUF, MAX_DISCOVERED_PEERS,
     PEER_EXPIRY, PROTO_VERSION,
 };
+use crate::manual_peers::ManualPeers;
 use crate::settings::Settings;
-use crate::state::{ManualPeer, NetDegraded};
+use crate::state::NetDegraded;
 use packet::DiscoveryPacket;
 
 /// A peer as tracked locally. `addr` comes from the UDP source address, never from the packet.
@@ -164,7 +165,7 @@ pub struct DiscoveryCtx {
     /// otherwise a discovery change would push a discovery-only payload and the
     /// frontend, which replaces its whole list, would drop every IP-dialed /
     /// code-paired peer. See [`emit_devices`].
-    pub manual_peers: Arc<Mutex<HashMap<String, ManualPeer>>>,
+    pub manual_peers: Arc<Mutex<ManualPeers>>,
     /// Live browser shares (M8.3), shared with `AppState`. The announcer reads it
     /// each tick to decide whether to advertise the HTTP share port — see
     /// [`share_http_advert`].
@@ -304,12 +305,12 @@ fn share_http_advert(ctx: &DiscoveryCtx) -> Option<u16> {
 /// once (and none across an await — this is sync).
 pub(crate) fn devices_payload(
     peers: &Arc<Mutex<PeerTable>>,
-    manual: &Arc<Mutex<HashMap<String, ManualPeer>>>,
+    manual: &Arc<Mutex<ManualPeers>>,
     my_id: &str,
 ) -> Vec<DiscoveredDevice> {
     let discovered = snapshot(peers);
     match manual.lock() {
-        Ok(m) => crate::commands::merge_devices(discovered, &m, my_id),
+        Ok(m) => crate::commands::merge_devices(discovered, m.peers(), my_id),
         // Poisoned lock: emit discovery alone rather than skip the update.
         Err(_) => discovered,
     }
@@ -616,7 +617,7 @@ mod tests {
     /// UI. Tests the payload builder directly (no Tauri app needed).
     #[test]
     fn devices_payload_includes_manual_peer() {
-        use crate::state::ManualPeer;
+        use crate::manual_peers::ManualPeer;
         let peers: Arc<Mutex<PeerTable>> = Arc::new(Mutex::new(PeerTable::new()));
         peers.lock().unwrap().insert(
             "disc1".into(),
@@ -628,7 +629,7 @@ mod tests {
                 expires: Instant::now() + Duration::from_secs(60),
             },
         );
-        let manual: Arc<Mutex<HashMap<String, ManualPeer>>> = Arc::new(Mutex::new(HashMap::new()));
+        let manual: Arc<Mutex<ManualPeers>> = Default::default();
         manual.lock().unwrap().insert(
             "man1".into(),
             ManualPeer {

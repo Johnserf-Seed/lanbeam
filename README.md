@@ -161,9 +161,11 @@ in Settings).
   code proves the code, not the device holding it: **both screens then show the same SAS,
   and trust is recorded only once a human confirms it — independently, on each side.** The
   handshake never grants trust on its own. Pairing records each side's address on the
-  other, so a paired device stays reachable in both directions where discovery can't see it.
+  other — kept across restarts — so a paired device stays reachable in both directions
+  where discovery can't see it.
 - **IP direct connect** for peers that automatic discovery can't see (different subnet) —
-  *Just add the device* in the pairing form, or the field on an empty Devices page.
+  *Just add the device* in the pairing form, or the field on an empty Devices page. The
+  address is kept the same way, until you delete the device in the trust circle.
 - **Quick text** — send a snippet/link over the encrypted channel, optionally dropped on
   the receiver's clipboard. Text has no accept prompt, so it obeys the rule files do: a
   sender you don't trust is dropped — **and the ack says so, so the sender gets a real
