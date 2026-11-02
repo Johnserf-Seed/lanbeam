@@ -50,3 +50,26 @@ export function keepRecentTexts<T extends { text?: string }>(rows: T[]): T[] {
     return used <= KEPT_TEXT_CHARS ? r : { ...r, text: undefined };
   });
 }
+
+/** How many file names one history row writes to disk (F5). A folder sent or
+ *  received lists every file in it, and a 10,000-file folder would take a
+ *  megabyte of the ~5 MB an origin gets. Past this, a row is saved with its
+ *  first names and its file count, and its drawer says how many more there
+ *  were. Only what is SAVED is trimmed; this run keeps every name it has. */
+export const KEPT_FILE_NAMES = 100;
+
+/** `rows` as they are written to disk: file lists cut to KEPT_FILE_NAMES, each
+ *  keeping the count of what it had. */
+export function keepFileLists<
+  T extends { files?: { name: string; size?: number }[]; fileCount?: number },
+>(rows: T[]): T[] {
+  return rows.map((r) =>
+    r.files && r.files.length > KEPT_FILE_NAMES
+      ? {
+          ...r,
+          files: r.files.slice(0, KEPT_FILE_NAMES),
+          fileCount: r.fileCount ?? r.files.length,
+        }
+      : r,
+  );
+}

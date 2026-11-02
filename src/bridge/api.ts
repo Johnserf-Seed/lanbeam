@@ -224,6 +224,9 @@ export type TransferEvent = {
   savedNames?: string[];
   /** the peer — on a queued send (M25), the first event the row gets */
   deviceId?: string;
+  /** a send's `transfer_started`: every file as it goes out, in manifest order
+   *  — a picked folder expanded into the files in it (F5) */
+  files?: { name: string; size: number }[];
 };
 /** Where a send stands on the receiver while it waits for an answer
  *  (`transfer_pending`, F4) — said only by a receiver new enough to: `prompted`
