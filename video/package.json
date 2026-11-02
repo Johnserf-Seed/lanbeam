@@ -1,0 +1,35 @@
+{
+  "name": "lanbeam-promo-video",
+  "private": true,
+  "description": "LanBeam promo video, made with Remotion",
+  "scripts": {
+    "score": "node scripts/score.mjs",
+    "studio": "node scripts/score.mjs && remotion studio",
+    "render": "node scripts/score.mjs && remotion render LanBeamPromo out/lanbeam-promo.mp4",
+    "still": "node scripts/score.mjs && remotion still LanBeamPromo out/still.png",
+    "capture": "node scripts/capture-ui.mjs",
+    "typecheck": "tsc"
+  },
+  "dependencies": {
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "@fontsource/ibm-plex-mono": "^5.3.0",
+    "@remotion/cli": "4.0.540",
+    "qrcode": "^1.5.4",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "remotion": "4.0.540"
+  },
+  "devDependencies": {
+    "@types/qrcode": "^1.5.6",
+    "@types/react": "^19.1.8",
+    "typescript": "~5.9.3"
+  },
+  "sideEffects": [
+    "*.css"
+  ],
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

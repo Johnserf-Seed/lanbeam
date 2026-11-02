@@ -1,0 +1,4 @@
+node_modules
+out
+# written by scripts/score.mjs
+public/audio
