@@ -781,12 +781,29 @@ export default function Sidebar() {
               {menuOpen ? "▴" : "▾"}
             </span>
           </div>
+          {/* The state gets a line of its own. It used to end the ID + IP row,
+              where an ordinary 192.168.x.y address left room for 「可被…」
+              and nothing of "Discoverable" or the ghost countdown. */}
+          <div
+            title={stateText}
+            style={{
+              fontSize: 9.5,
+              color: stateColor,
+              marginTop: 2,
+              paddingLeft: 15,
+              whiteSpace: "nowrap",
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+            }}
+          >
+            {stateText}
+          </div>
           <div
             style={{
               display: "flex",
               alignItems: "baseline",
               gap: 6,
-              marginTop: 2,
+              marginTop: 1,
               paddingLeft: 15,
               whiteSpace: "nowrap",
               overflow: "hidden",
@@ -808,20 +825,6 @@ export default function Sidebar() {
                 {localIp}
               </span>
             )}
-            {/* Last in a nowrap row: ellipsize instead of hard-clipping
-                ("Discove") when the ID + IP leave too little room. */}
-            <span
-              title={stateText}
-              style={{
-                fontSize: 9.5,
-                color: stateColor,
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {stateText}
-            </span>
           </div>
         </div>
       </aside>
