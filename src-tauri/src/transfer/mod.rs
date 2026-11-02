@@ -3,11 +3,12 @@
 //! root, and acks. DESIGN §1.4, §3.5. The commands that drive it are in `commands/`.
 //!
 //! One module per stage: the wire helpers, the send list, pacing, progress,
-//! the send side, the receive side, inbound orchestration, the pairing host and
-//! the quick-text receiver. Every public item is re-exported below, so the
+//! the send side, the receive side, inbound orchestration, auto-organize, the
+//! pairing host and the quick-text receiver. Every public item is re-exported below, so the
 //! `transfer::…` paths callers use are unchanged.
 
 mod inbound;
+mod organize;
 mod pacing;
 mod pairing_host;
 mod progress;

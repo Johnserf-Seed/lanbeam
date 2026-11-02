@@ -55,7 +55,7 @@ pub struct SettingsDto {
     /// Name-collision policy (M6.5): `"rename" | "overwrite" | "ask"`. Additive
     /// camelCase; the `"ask"` default drives the ConflictModal.
     pub conflict: String,
-    /// Auto-organize mode (M6.6): `"none" | "device" | "date"`. Additive
+    /// Auto-organize mode (M6.6/F7): `"none" | "device" | "date" | "type"`. Additive
     /// camelCase; defaults `"none"` (write straight under the download root).
     pub organize: String,
     /// Concurrency cap (M6.7): how many transfers stream at once. Additive
@@ -413,15 +413,30 @@ pub fn set_conflict_policy(app: AppHandle, state: State<'_, AppState>, policy: S
     update_settings(&app, &state, |s| s.conflict = policy);
 }
 
-/// Set the auto-organize mode (`"none" | "device" | "date"`, M6.6). Read at
-/// receive time; the subfolder is computed when a transfer starts. Unknown
-/// values are ignored — same contract as `set_log_level`.
+/// Set the auto-organize mode (`"none" | "device" | "date" | "type"`, M6.6/F7).
+/// Read at receive time; the subfolder is computed when a transfer starts.
+/// Unknown values are ignored — same contract as `set_log_level`.
 #[tauri::command]
 pub fn set_organize(app: AppHandle, state: State<'_, AppState>, mode: String) {
     if !settings::ORGANIZE_MODES.contains(&mode.as_str()) {
         return;
     }
     update_settings(&app, &state, |s| s.organize = mode);
+}
+
+/// Record the UI's language (`"zh" | "en"`) for names the backend writes to
+/// disk — the by-type folders (F7). The frontend reports it at startup and on
+/// every switch, so an unchanged value writes nothing. Unknown values are
+/// ignored — same contract as `set_log_level`.
+#[tauri::command]
+pub fn set_ui_lang(app: AppHandle, state: State<'_, AppState>, lang: String) {
+    if !settings::UI_LANGS.contains(&lang.as_str()) {
+        return;
+    }
+    if state.settings.read().is_ok_and(|s| s.ui_lang == lang) {
+        return;
+    }
+    update_settings(&app, &state, |s| s.ui_lang = lang);
 }
 
 /// Set the concurrency cap (M6.7): how many transfers stream at once, clamped to

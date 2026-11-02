@@ -325,6 +325,12 @@ export default function AppShell() {
     pushTray(lang);
   }, [trayName, trayIp, trayDiscoverable, trayLoaded, lang]);
 
+  // The by-type folders (F7) are named on disk by the backend, which has no
+  // other way to learn the language: 图片/ for a Chinese UI, Images/ otherwise.
+  useEffect(() => {
+    void api.setUiLang((lang ?? "").startsWith("zh") ? "zh" : "en");
+  }, [lang]);
+
   // Tray items → the same actions the UI already exposes. Rust surfaced the
   // window first for anything that shows something; the rest work headless.
   useEffect(() => {

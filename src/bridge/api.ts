@@ -43,7 +43,7 @@ export type Settings = {
   verifyHash: boolean;
   /** name-collision policy (M6.5): "rename" | "overwrite" | "ask"; default "ask" */
   conflict: string;
-  /** auto-organize mode (M6.6): "none" | "device" | "date"; default "none" */
+  /** auto-organize mode (M6.6/F7): "none" | "device" | "date" | "type"; default "none" */
   organize: string;
   /** concurrency cap (M6.7): how many transfers stream at once, 1–8; default 3 */
   maxConcurrent: number;
@@ -507,14 +507,22 @@ export const setConflictPolicy = (policy: string) => {
   return invoke<void>("set_conflict_policy", { policy });
 };
 
-// M6.6: auto-organize mode ("none" | "device" | "date") — read at receive
-// time. Unknown values are ignored backend-side.
+// M6.6/F7: auto-organize mode ("none" | "device" | "date" | "type") — read at
+// receive time. Unknown values are ignored backend-side.
 export const setOrganize = (mode: string) => {
   if (!isTauri) {
     demoSettings = { ...demoSettings, organize: mode };
     return Promise.resolve();
   }
   return invoke<void>("set_organize", { mode });
+};
+
+// F7: the UI language ("zh" | "en"). The by-type folders are created by the
+// backend (图片/ or Images/), which can't read the webview's storage, so it is
+// told at startup and on every switch; an unchanged value writes nothing.
+export const setUiLang = (lang: string) => {
+  if (!isTauri) return Promise.resolve();
+  return invoke<void>("set_ui_lang", { lang });
 };
 
 // M6.7: concurrency cap (how many transfers stream at once) — clamped to 1–8

@@ -139,6 +139,97 @@ async fn organize_device_places_file_under_sender_folder() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+/// Auto-organize "type" (F7): each loose file goes under the folder for its
+/// kind, named in the UI's language, while a sent folder lands whole at the
+/// root — its contents are not split up by kind.
+#[tokio::test]
+async fn organize_type_sorts_loose_files_and_keeps_folders_whole() {
+    let tmp = std::env::temp_dir().join(format!("lanbeam-orgtype-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dl_dir = tmp.join("downloads");
+    std::fs::create_dir_all(&dl_dir).unwrap();
+    let src = tmp.join("src");
+    std::fs::create_dir_all(src.join("Trip")).unwrap();
+    std::fs::write(src.join("photo.jpg"), b"a photo").unwrap();
+    std::fs::write(src.join("report.PDF"), b"a report").unwrap();
+    std::fs::write(src.join("Trip").join("map.png"), b"a map").unwrap();
+
+    let app = tauri::test::mock_app();
+    let handle = app.handle().clone();
+
+    let mut settings = Settings::default();
+    settings.recv_policy = "all".into(); // auto-accept, no prompt
+    settings.organize = "type".into();
+    settings.ui_lang = "zh".into();
+
+    let receiver_identity = Arc::new(generate_identity().unwrap());
+    let receiver_priv = *receiver_identity.private_bytes();
+    let ctx = make_ctx(
+        handle,
+        settings,
+        &dl_dir,
+        tmp.join("trusted.json"),
+        tmp.join("partials.json"),
+        receiver_identity,
+    );
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let ctx2 = ctx.clone();
+    let responder = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let sess = NoiseSession::handshake_responder(stream, &receiver_priv)
+            .await
+            .unwrap();
+        handle_incoming(sess, &ctx2).await
+    });
+
+    let sender_priv = *generate_identity().unwrap().private_bytes();
+    let stream = TcpStream::connect(addr).await.unwrap();
+    let mut sess = NoiseSession::handshake_initiator(stream, &sender_priv, None)
+        .await
+        .unwrap();
+    initiator_hello(&mut sess, "MyPhone".into()).await.unwrap();
+    let picked = [
+        src.join("photo.jpg"),
+        src.join("report.PDF"),
+        src.join("Trip"),
+    ];
+    let items = build_send_list(&picked, false).unwrap();
+    run_send(
+        &mut sess,
+        "t-orgtype",
+        &items,
+        &TransferControl::neutral(),
+        None,
+        &mut |_| {},
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    drop(sess);
+
+    responder
+        .await
+        .unwrap()
+        .expect("organized transfer completes");
+
+    let read = |p: std::path::PathBuf| std::fs::read(&p).unwrap_or_else(|e| panic!("{p:?}: {e}"));
+    assert_eq!(read(dl_dir.join("图片").join("photo.jpg")), b"a photo");
+    assert_eq!(read(dl_dir.join("文档").join("report.PDF")), b"a report");
+    assert_eq!(
+        read(dl_dir.join("Trip").join("map.png")),
+        b"a map",
+        "a sent folder keeps its place at the root"
+    );
+    assert!(
+        !dl_dir.join("图片").join("Trip").exists(),
+        "the folder's images are not pulled into 图片/"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 /// End-to-end resume (M6.4): a persisted partial (partials.json entry + the
 /// matching on-disk prefix) lets a NEW manifest of the same hashed file continue
 /// from its offset. The receiver replies with the offset, the sender streams

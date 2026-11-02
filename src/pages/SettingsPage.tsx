@@ -799,7 +799,13 @@ export default function SettingsPage() {
         <div className="set-row">
           <div>
             <div className="set-label">{t("settings.organize")}</div>
-            <div className="set-desc">{t("settings.organizeDesc")}</div>
+            <div className="set-desc">
+              {t(
+                prefs.organize === "type"
+                  ? "settings.organizeTypeDesc"
+                  : "settings.organizeDesc",
+              )}
+            </div>
           </div>
           <select
             className="input"
@@ -815,6 +821,7 @@ export default function SettingsPage() {
             <option value="none">{t("settings.organizeNone")}</option>
             <option value="device">{t("settings.organizeDevice")}</option>
             <option value="date">{t("settings.organizeDate")}</option>
+            <option value="type">{t("settings.organizeType")}</option>
           </select>
         </div>
         <div className="set-row">

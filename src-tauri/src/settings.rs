@@ -56,8 +56,12 @@ pub const CONFLICT_POLICIES: [&str; 3] = ["rename", "overwrite", "ask"];
 /// Allowed `organize` values (M6.6); same ignore-invalid contract as
 /// [`LOG_LEVELS`]. `"none"` writes straight under the download root, `"device"`
 /// files each transfer under a `<sender name>/` folder, `"date"` under a
-/// `<YYYY-MM-DD>/` folder.
-pub const ORGANIZE_MODES: [&str; 3] = ["none", "device", "date"];
+/// `<YYYY-MM-DD>/` folder, `"type"` each loose file under a folder for its kind
+/// (F7: 图片/, 文档/… — a sent folder stays whole).
+pub const ORGANIZE_MODES: [&str; 4] = ["none", "device", "date", "type"];
+
+/// Languages the UI can report through `set_ui_lang`.
+pub const UI_LANGS: [&str; 2] = ["zh", "en"];
 
 /// Inclusive range the `max_concurrent` setter clamps into (M6.7): at least one
 /// transfer streams at a time, at most eight — beyond which more parallelism
@@ -174,10 +178,18 @@ pub struct Settings {
     #[serde(default = "default_conflict")]
     pub conflict: String,
     /// Auto-organize received files into subfolders (M6.6): `"none"`, `"device"`
-    /// (a `<sender name>/` folder), or `"date"` (a `<YYYY-MM-DD>/` folder).
-    /// Read at receive time; the subfolder is computed when a transfer starts.
+    /// (a `<sender name>/` folder), `"date"` (a `<YYYY-MM-DD>/` folder), or
+    /// `"type"` (a folder per kind of file, F7). Read at receive time; the
+    /// subfolder is computed when a transfer starts.
     #[serde(default = "default_organize")]
     pub organize: String,
+    /// The UI's language (`"zh"` / `"en"`), as the frontend last reported it;
+    /// empty until it first does. The backend has no i18n and cannot read the
+    /// webview's storage, but the by-type folders it creates on disk (F7) should
+    /// be named in the language the user reads. Kept here so a receive before
+    /// the window has loaded still names them right.
+    #[serde(default = "default_ui_lang")]
+    pub ui_lang: String,
     /// How many transfers may stream bytes at once (M6.7), clamped to
     /// [`MAX_CONCURRENT_RANGE`] by the setter. Read LIVE each time a transfer
     /// reaches the concurrency gate, so lowering it throttles transfers that
@@ -231,6 +243,7 @@ impl Default for Settings {
             ui_zoom: default_ui_zoom(),
             conflict: default_conflict(),
             organize: default_organize(),
+            ui_lang: default_ui_lang(),
             max_concurrent: default_max_concurrent(),
             rate_limit: default_rate_limit(),
             clip_share: default_clip_share(),
@@ -326,6 +339,12 @@ fn default_organize() -> String {
     // Write straight under the download root, preserving the pre-M6.6 layout;
     // sub-foldering is opt-in.
     "none".to_string()
+}
+
+fn default_ui_lang() -> String {
+    // Unknown until the frontend reports it; the by-type folders fall back to
+    // English names meanwhile.
+    String::new()
 }
 
 fn default_ui_zoom() -> f64 {
@@ -761,6 +780,10 @@ mod tests {
             "auto-organize defaults to none for old blobs"
         );
         assert_eq!(
+            s.ui_lang, "",
+            "no UI language until the frontend reports one"
+        );
+        assert_eq!(
             s.max_concurrent, 3,
             "concurrency cap defaults to 3 for old blobs"
         );
@@ -908,7 +931,8 @@ mod tests {
         orig.hotkey = "Ctrl+Shift+K".into(); // non-default (default is "Alt+Space")
         orig.verify_hash = false; // non-default (default is ON) must survive the trip
         orig.conflict = "overwrite".into(); // non-default (default is "ask")
-        orig.organize = "device".into(); // non-default (default is "none")
+        orig.organize = "type".into(); // non-default (default is "none")
+        orig.ui_lang = "zh".into(); // non-default (default is unset)
         orig.max_concurrent = 6; // non-default (default is 3)
         orig.rate_limit = "50".into(); // non-default (default is "unlimited")
         orig.clip_share = true; // non-default (default is OFF)
@@ -956,8 +980,12 @@ mod tests {
             "a non-default conflict must survive the trip"
         );
         assert_eq!(
-            back.organize, "device",
+            back.organize, "type",
             "a non-default organize must survive the trip"
+        );
+        assert_eq!(
+            back.ui_lang, "zh",
+            "a reported UI language must survive the trip"
         );
         assert_eq!(
             back.max_concurrent, 6,

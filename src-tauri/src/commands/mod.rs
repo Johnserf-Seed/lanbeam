@@ -26,8 +26,8 @@ pub use settings::{
     get_settings, set_auto_open, set_autostart, set_clip_share, set_conflict_policy,
     set_device_name, set_discoverable, set_download_dir, set_hotkey, set_hotkey_enabled,
     set_iface_filter, set_listen_port, set_log_level, set_max_concurrent, set_notif_system,
-    set_organize, set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_ui_zoom,
-    set_verify_hash,
+    set_organize, set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_ui_lang,
+    set_ui_zoom, set_verify_hash,
 };
 pub(crate) use share::emit_shares;
 pub use share::{list_shares, start_share, stop_share, update_share};
