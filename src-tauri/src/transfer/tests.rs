@@ -2872,7 +2872,7 @@ fn a_partial_from_another_download_folder_is_not_resumed() {
                 root,
             }],
         );
-        analyze_files(&manifest, &dl_dir, None, "dev", &store)
+        analyze_files(&manifest, &dl_dir, &organize::Organize::Flat, "dev", &store)
     };
     let elsewhere = tmp.join("old-downloads").to_string_lossy().into_owned();
     assert!(

@@ -284,6 +284,8 @@
     "organizeNone": "不整理",
     "organizeDevice": "按设备分文件夹",
     "organizeDate": "按日期分文件夹",
+    "organizeType": "按类型分文件夹",
+    "organizeTypeDesc": "图片、视频、文档等各归一个文件夹，发来的文件夹保持原样",
     "autoOpen": "完成后打开文件夹",
     "autoOpenDesc": "接收完成后在文件管理器中显示",
     "verify": "完整性校验",

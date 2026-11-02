@@ -39,6 +39,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
         : actual.getSettings(),
     ),
     setDiscoverable: vi.fn(actual.setDiscoverable),
+    setUiLang: vi.fn(actual.setUiLang),
     pendingRequests: vi.fn(actual.pendingRequests),
   };
 });
@@ -74,6 +75,7 @@ beforeEach(() => {
   useToast.setState(toast0, true);
   useTransfers.setState(transfers0, true);
   vi.mocked(api.setDiscoverable).mockClear();
+  vi.mocked(api.setUiLang).mockClear();
 });
 
 /** Mount, then wait out the startup load so it can't land mid-test. */
@@ -245,5 +247,22 @@ describe("AppShell · ghost mode", () => {
     await waitFor(() => expect(api.setDiscoverable).toHaveBeenCalledWith(true));
     expect(useData.getState().settings?.discoverable).toBe(true);
     expect(usePrefs.getState().ghostUntil).toBeNull();
+  });
+});
+
+describe("AppShell · language", () => {
+  it("tells the backend the UI language at startup and on every switch (F7)", async () => {
+    const before = i18n.language;
+    try {
+      await i18n.changeLanguage("zh");
+      await mount();
+      expect(api.setUiLang).toHaveBeenLastCalledWith("zh");
+      await act(async () => {
+        await i18n.changeLanguage("en");
+      });
+      expect(api.setUiLang).toHaveBeenLastCalledWith("en");
+    } finally {
+      await i18n.changeLanguage(before);
+    }
   });
 });

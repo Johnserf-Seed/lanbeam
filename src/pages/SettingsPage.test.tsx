@@ -4,6 +4,8 @@
 // intact) and mock sendops.copyText so the fingerprint-copy is observable. Each
 // test resets useData/usePrefs to a captured snapshot, then seeds only what it
 // needs before rendering.
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../bridge/api";
 import type { MyIdentity, NetworkInfo, Settings } from "../bridge/api";
@@ -30,6 +32,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
     setVerifyHash: vi.fn(() => Promise.resolve()),
     setTrayClose: vi.fn(() => Promise.resolve()),
     setStripExif: vi.fn(() => Promise.resolve()),
+    setOrganize: vi.fn(() => Promise.resolve()),
     setListenPort: vi.fn(() => Promise.resolve()),
     setDownloadDir: vi.fn((p: string) => Promise.resolve(p)),
     // In Tauri this never resolves (the app restarts); a resolved stub is enough
@@ -177,6 +180,45 @@ describe("SettingsPage toggles → bridge setter + prefs mirror", () => {
 
     expect(vi.mocked(api.setStripExif)).toHaveBeenCalledWith(false);
     expect(usePrefs.getState().stripExif).toBe(false);
+  });
+});
+
+describe("SettingsPage · 自动整理", () => {
+  it("offers a folder per file type, and says sent folders stay whole (F7)", () => {
+    seed();
+    usePrefs.getState().set({ organize: "none" });
+    renderUI(<SettingsPage />);
+    const select = screen
+      .getByText(i18n.t("settings.organizeType"))
+      .closest("select") as HTMLSelectElement;
+
+    fireEvent.change(select, { target: { value: "type" } });
+
+    expect(vi.mocked(api.setOrganize)).toHaveBeenCalledWith("type");
+    expect(usePrefs.getState().organize).toBe("type");
+    expect(screen.getByText(i18n.t("settings.organizeTypeDesc"))).toBeTruthy();
+  });
+
+  // The backend ignores a mode it doesn't list, so an option missing there
+  // would be picked, shown and saved here while files kept landing as before.
+  it("offers exactly the modes the backend accepts", () => {
+    const rs = readFileSync(
+      resolve(process.cwd(), "src-tauri/src/settings.rs"),
+      "utf8",
+    );
+    const list = rs.match(/ORGANIZE_MODES: \[&str; \d+\] = \[([^\]]*)\]/)?.[1];
+    expect(
+      list,
+      "ORGANIZE_MODES not found — did settings.rs move?",
+    ).toBeTruthy();
+    const accepted = [...(list ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+    seed();
+    renderUI(<SettingsPage />);
+    const select = screen
+      .getByText(i18n.t("settings.organizeType"))
+      .closest("select") as HTMLSelectElement;
+    const offered = [...select.options].map((o) => o.value);
+    expect(offered.sort()).toEqual(accepted.sort());
   });
 });
 

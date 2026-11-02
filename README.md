@@ -96,8 +96,8 @@ gh attestation verify LanBeam_0.1.0_x64-setup.exe --repo Johnserf-Seed/lanbeam
    computer shows its address and a 6‑digit code, the other enters both (or opens the pair
    link that carries them). Or just add it by address, without pairing.
 
-Received files land in `Downloads/LanBeam`, optionally sorted per device or per date (both
-in Settings).
+Received files land in `Downloads/LanBeam`, optionally sorted per device, per date or by
+file type (all in Settings).
 
 ## Screenshots
 
@@ -137,7 +137,7 @@ in Settings).
   pause applies backpressure (bounded, auto‑resumes); cancel frees the slot immediately.
 - **Conflict policies** — `rename` (de‑dupe), `overwrite` (crash‑safe: streams to a temp
   and atomically replaces only on full success), or `ask`.
-- **Auto‑organize** received files by sending device or by date.
+- **Auto‑organize** received files by sending device, by date or by file type.
 - **Concurrency cap & rate limiting**, plus per‑file progress.
 - **Browser receive** — publish an explicit file set over a one‑shot HTTP share: an
   unguessable token URL with a TTL, a **per‑file** download cap (each file counts its own

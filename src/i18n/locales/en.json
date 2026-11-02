@@ -293,6 +293,8 @@
     "organizeNone": "Don't organize",
     "organizeDevice": "Folder per device",
     "organizeDate": "Folder per date",
+    "organizeType": "Folder per file type",
+    "organizeTypeDesc": "Photos, videos, documents and so on each get a folder; a sent folder stays as it is",
     "autoOpen": "Open folder when done",
     "autoOpenDesc": "Reveal in the file manager after receiving",
     "verify": "Integrity check",

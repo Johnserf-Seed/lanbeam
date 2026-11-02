@@ -15,6 +15,7 @@ use serde_json::json;
 use tauri::{Emitter, Runtime};
 use tokio::sync::oneshot;
 
+use super::organize::{FolderLang, Organize};
 use super::pairing_host::handle_pair_request;
 use super::progress::{emit_progress, file_event_sink};
 use super::receive::{
@@ -449,21 +450,22 @@ pub async fn handle_incoming<R: Runtime>(
         Err(e) => e.into_inner().clone(),
     };
 
-    // Auto-organize prefix (M6.6): an optional subfolder every file in this
-    // transfer is nested under — the sanitized sender name, or today's date.
-    // Computed once so a transfer spanning midnight all lands in one folder.
-    let (conflict_policy, organize) = ctx
+    // Auto-organize (M6.6): the subfolder each file in this transfer is nested
+    // under — the sanitized sender name, today's date, or the file's kind (F7).
+    // Decided once so a transfer spanning midnight all lands in one folder.
+    let (conflict_policy, organize, ui_lang) = ctx
         .settings
         .read()
-        .map(|s| (s.conflict.clone(), s.organize.clone()))
-        .unwrap_or_else(|_| ("ask".to_string(), "none".to_string()));
-    let prefix: Option<PathBuf> = match organize.as_str() {
-        "device" => Some(PathBuf::from(sanitize::sanitize_component(
+        .map(|s| (s.conflict.clone(), s.organize.clone(), s.ui_lang.clone()))
+        .unwrap_or_else(|_| ("ask".to_string(), "none".to_string(), String::new()));
+    let organize = match organize.as_str() {
+        "device" => Organize::Folder(PathBuf::from(sanitize::sanitize_component(
             &sender_name,
             "device",
         ))),
-        "date" => Some(PathBuf::from(today_ymd())),
-        _ => None, // "none" + forward-compat fallback
+        "date" => Organize::Folder(PathBuf::from(today_ymd())),
+        "type" => Organize::ByType(FolderLang::from_setting(&ui_lang)),
+        _ => Organize::Flat, // "none" + forward-compat fallback
     };
 
     // Per-file resume + collision analysis (M6.4/6.5): where each file would
@@ -481,7 +483,7 @@ pub async fn handle_incoming<R: Runtime>(
         let a = analyze_files(
             &manifest,
             &analysis_root,
-            prefix.as_deref(),
+            &organize,
             &analysis_dev,
             &partials,
         );
@@ -922,7 +924,7 @@ pub async fn handle_incoming<R: Runtime>(
 pub(super) struct FileAnalysis {
     /// Stable identity (sanitized rel + size + hash) — the partials-store key.
     identity: FileIdentity,
-    /// Where a FRESH copy lands (auto-organize prefix applied, pre-de-dupe).
+    /// Where a FRESH copy lands (auto-organize applied, pre-de-dupe).
     organized_rel: PathBuf,
     /// Set when a valid persisted partial lets this file continue instead of
     /// starting over.
@@ -948,7 +950,7 @@ pub(super) struct ResumeFrom {
 pub(super) fn analyze_files(
     manifest: &Manifest,
     download_root: &Path,
-    prefix: Option<&Path>,
+    organize: &Organize,
     device_id: &str,
     partials: &RwLock<crate::partials::PartialsStore>,
 ) -> Vec<FileAnalysis> {
@@ -967,10 +969,7 @@ pub(super) fn analyze_files(
                 size: f.size,
                 sha256: f.sha256.clone(),
             };
-            let organized_rel = match prefix {
-                Some(p) => p.join(&rel),
-                None => rel.clone(),
-            };
+            let organized_rel = organize.place(&rel);
             // Resume only a hashed file with a matching, intact on-disk partial,
             // written under the folder we are receiving into now: a partial left
             // in the old folder is not the file of that name in the new one (M2).
