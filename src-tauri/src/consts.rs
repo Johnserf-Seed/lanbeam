@@ -150,6 +150,10 @@ pub const MAX_MANIFEST_NAME_TOTAL: usize = 4 * 1024 * 1024;
 /// entry, firewall drop) hangs `send_files`/`connect_by_addr` for the OS TCP
 /// timeout, which can be minutes.
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a typed host name may take to resolve (F6). mDNS answers for a
+/// `.local` name in milliseconds when the device is up; a name nobody answers
+/// for can hold the system resolver far longer than anyone waits on a button.
+pub const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-frame deadline during the Noise handshake, both roles. A stranger can
 /// open a TCP connection to the listener at will; this caps how long each
 /// half-finished handshake may occupy its task.

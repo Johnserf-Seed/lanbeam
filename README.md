@@ -165,7 +165,9 @@ in Settings).
   where discovery can't see it.
 - **IP direct connect** for peers that automatic discovery can't see (different subnet) —
   *Just add the device* in the pairing form, or the field on an empty Devices page. The
-  address is kept the same way, until you delete the device in the trust circle.
+  address is kept the same way, until you delete the device in the trust circle. An IP
+  or a host name (`nas.local`) works; a device added by name is dialed by name, so it
+  stays reachable when its address changes.
 - **Quick text** — send a snippet/link over the encrypted channel, optionally dropped on
   the receiver's clipboard. Text has no accept prompt, so it obeys the rule files do: a
   sender you don't trust is dropped — **and the ack says so, so the sender gets a real

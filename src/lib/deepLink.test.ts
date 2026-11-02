@@ -4,6 +4,7 @@ import {
   normalizeAddr,
   normalizePairCode,
   parseDeepLink,
+  parseHostTarget,
   parseJoinTarget,
   parsePairLink,
 } from "./deepLink";
@@ -169,6 +170,9 @@ describe("normalizeAddr / parseJoinTarget", () => {
     expect(normalizeAddr("１９２。１６８．１．２０：５１７０４")).toBe(
       "192.168.1.20:51704",
     );
+    // …and its full-width letters, hyphen and underscore (F6).
+    expect(normalizeAddr("ＮＡＳ－ｂｏｘ．ｌｏｃａｌ")).toBe("NAS-box.local");
+    expect(normalizeAddr("ｍｙ＿ｐｃ")).toBe("my_pc");
   });
 
   it("parses ip and ip:port, defaulting the port", () => {
@@ -195,5 +199,52 @@ describe("normalizeAddr / parseJoinTarget", () => {
       "::1",
     ])
       expect(parseJoinTarget(bad), bad).toBeNull();
+  });
+});
+
+describe("parseHostTarget (F6)", () => {
+  it("takes an IPv4 address the way parseJoinTarget does", () => {
+    expect(parseHostTarget("10.0.0.2")).toEqual({
+      host: "10.0.0.2",
+      port: 51704,
+    });
+    expect(parseHostTarget("10.0.0.2:51999")).toEqual({
+      host: "10.0.0.2",
+      port: 51999,
+    });
+  });
+
+  it("takes a host name, lower-cased, with or without a port", () => {
+    expect(parseHostTarget("NAS.local")).toEqual({
+      host: "nas.local",
+      port: 51704,
+    });
+    expect(parseHostTarget("study-mbp.local.:51999")).toEqual({
+      host: "study-mbp.local",
+      port: 51999,
+    });
+    for (const name of ["desktop", "my_pc", "a1.lan", "x.y.z.example"])
+      expect(parseHostTarget(name), name).toEqual({ host: name, port: 51704 });
+  });
+
+  it("refuses what the backend's host_name refuses", () => {
+    for (const bad of [
+      "",
+      "1.2.3", // a short IPv4 a resolver would read as 1.2.0.3
+      "10.0.0.01",
+      "-pc.local",
+      "pc-.local",
+      "pc..local",
+      ".local",
+      "pc/share",
+      "fe80::1",
+      "书房.local",
+      "nas.local:0",
+      "nas.local:65536",
+      "nas.local:",
+      `${"a".repeat(64)}.local`,
+      Array(26).fill("abcdefghi").join("."), // 259 characters
+    ])
+      expect(parseHostTarget(bad), bad).toBeNull();
   });
 });

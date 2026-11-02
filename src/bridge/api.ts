@@ -594,8 +594,8 @@ export const takePendingDeepLink = () =>
     ? invoke<string | null>("take_pending_deep_link")
     : Promise.resolve<string | null>(null);
 
-// M7.1: join a device showing a pairing code. `addr` is its ip[:port] (or a
-// pasted lanbeam://pair link, which can itself carry the code). `expectedId` is
+// M7.1: join a device showing a pairing code. `addr` is its ip[:port] or host
+// name (F6), or a pasted lanbeam://pair link, which can itself carry the code. `expectedId` is
 // the link's `d=`: when given, the handshake is PINNED to that device and a
 // different responder fails with IdentityMismatch. Resolves with the reached
 // peer + SAS — it grants no trust; a wrong/expired code rejects (PairRejected).
@@ -613,8 +613,8 @@ export const joinByCode = (addr: string, code: string, expectedId?: string) =>
         sas: "483921",
       });
 
-// M7.2: connect to a device by ip[:port] (or a scanned link) so it appears on
-// the devices page even when discovery can't see it. Grants no trust and sends
+// M7.2: connect to a device by ip[:port] or host name (F6), or a scanned link,
+// so it appears on the devices page even when discovery can't see it. Grants no trust and sends
 // nothing. Re-query listDiscoveredDevices after this resolves to pick it up.
 export const connectByAddr = (addr: string) =>
   isTauri

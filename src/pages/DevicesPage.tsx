@@ -24,6 +24,7 @@ import {
   type UITransfer,
 } from "../lib/store";
 import { CHIP_TEXT_MAX, estChipW, etaClock, fmtBytes } from "../lib/format";
+import { validateAddr } from "../lib/pairing";
 import { errText } from "../lib/sendops";
 import { radarBasePos, resolveChips, type ChipNode } from "../lib/radar";
 import { ExtChip } from "../components/ui";
@@ -81,16 +82,22 @@ export default function DevicesPage() {
   const [ipTry, setIpTry] = useState("");
   const [ipBusy, setIpBusy] = useState(false);
 
-  /** IP 直连 (M7.2): dial an ip[:port] (or a scanned link), then re-query the
-   *  device list so the manually-added peer shows on the radar. */
+  /** IP 直连 (M7.2): dial an ip[:port] or a host name (F6) — or a scanned
+   *  link — then re-query the device list so the manually-added peer shows on
+   *  the radar. */
   const tryDirect = async () => {
-    const addr = ipTry.trim();
-    if (!addr || ipBusy) return;
-    // Reject obvious non-addresses (a bare word/number — no "." and no "://")
-    // client-side with a localized hint, instead of a raw backend error.
-    if (!addr.includes(".") && !addr.includes("://")) {
-      showToast(t("devices.badAddr"));
-      return;
+    const raw = ipTry.trim();
+    if (!raw || ipBusy) return;
+    // A typed address is checked here, by the pairing form's rules, so a
+    // non-address gets a localized hint instead of a raw backend error.
+    let addr = raw;
+    if (!raw.includes("://")) {
+      const v = validateAddr(raw);
+      if (!v.ok) {
+        showToast(t("devices.badAddr"));
+        return;
+      }
+      addr = v.addr;
     }
     setIpBusy(true);
     try {
@@ -795,7 +802,7 @@ export default function DevicesPage() {
               onKeyDown={(e) => {
                 if (e.key === "Enter") void tryDirect();
               }}
-              placeholder="192.168.1.__"
+              placeholder="192.168.1.__ / nas.local"
               style={{
                 flex: 1,
                 minWidth: 0,

@@ -36,6 +36,11 @@ pub struct ManualPeer {
     pub name: String,
     pub addr: Ipv4Addr,
     pub port: u16,
+    /// The name it was added by (`nas.local`), when it was added by name (F6).
+    /// A send resolves the name again, so the device stays reachable after its
+    /// address changes; `addr` is what it resolved to when added, and the
+    /// fallback when the name doesn't resolve.
+    pub host: Option<String>,
     /// When this entry was last inserted or refreshed (a dial / re-pair).
     /// Monotonic [`Instant`], never displayed — the eviction key
     /// [`ManualPeers::insert`] uses to keep the table bounded. Manual peers never
@@ -63,6 +68,8 @@ struct Record {
     addr: Ipv4Addr,
     #[serde(default = "default_port")]
     port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host: Option<String>,
 }
 
 fn default_port() -> u16 {
@@ -209,6 +216,7 @@ impl ManualPeers {
                 name: p.name.clone(),
                 addr: p.addr,
                 port: p.port,
+                host: p.host.clone(),
             })
             .collect();
         match serde_json::to_string_pretty(&records) {
@@ -285,6 +293,7 @@ fn read_file(path: &Path) -> HashMap<String, ManualPeer> {
                     name: rec.name,
                     addr: rec.addr,
                     port: rec.port,
+                    host: rec.host,
                     last_used: base + Duration::from_nanos(i as u64),
                 },
             ),
@@ -315,6 +324,7 @@ mod tests {
             name: name.into(),
             addr: Ipv4Addr::new(10, 0, 0, 7),
             port,
+            host: None,
             last_used,
         }
     }
@@ -396,6 +406,7 @@ mod tests {
                 name: "书房 · MacBook Pro".into(),
                 addr: Ipv4Addr::new(192, 168, 7, 20),
                 port: 51999,
+                host: Some("study-mbp.local".into()),
                 last_used: Instant::now(),
             },
         );
@@ -408,6 +419,7 @@ mod tests {
         assert_eq!(rec.name, "书房 · MacBook Pro");
         assert_eq!(rec.addr, Ipv4Addr::new(192, 168, 7, 20));
         assert_eq!(rec.port, 51999);
+        assert_eq!(rec.host.as_deref(), Some("study-mbp.local"));
         cleanup(&path);
     }
 
@@ -483,6 +495,7 @@ mod tests {
         let ok = table.get("ok").unwrap();
         assert_eq!(ok.port, DEFAULT_TCP_PORT, "a missing port defaults");
         assert_eq!(ok.name, "", "a missing name defaults");
+        assert_eq!(ok.host, None, "an entry from before names has none");
 
         std::fs::write(&path, "{not json").unwrap();
         assert!(ManualPeers::load(path.clone()).peers().is_empty());

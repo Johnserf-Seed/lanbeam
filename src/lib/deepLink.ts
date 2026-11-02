@@ -160,26 +160,24 @@ export function normalizePairCode(raw: string): string {
 }
 
 /** Tidy a typed address the way a person types one: drop every space (the
- *  host shows `192.168.1.20:51704`, but people copy by eye), and fold the
- *  full-width digits / colon / full stop a CJK input method produces. */
+ *  host shows `192.168.1.20:51704`, but people copy by eye), and fold what a
+ *  CJK input method produces — full-width digits, letters, colon, full stop
+ *  and hyphen (the whole full-width ASCII block), and the ideographic stop. */
 export function normalizeAddr(raw: string): string {
   let out = "";
   for (const ch of raw) {
     const c = ch.charCodeAt(0);
     if (/\s/.test(ch)) continue;
-    if (c >= 0xff10 && c <= 0xff19)
-      out += String.fromCharCode(c - 0xff10 + 0x30);
-    else if (ch === "：") out += ":";
-    else if (ch === "。" || ch === "．" || ch === "｡") out += ".";
+    if (c >= 0xff01 && c <= 0xff5e) out += String.fromCharCode(c - 0xfee0);
+    else if (ch === "。" || ch === "｡") out += ".";
     else out += ch;
   }
   return out;
 }
 
-/** Parse what the join form's address field holds: `ip` or `ip:port`, IPv4
- *  only (all the backend dials). Octets with leading zeros are refused, as
- *  Rust's `Ipv4Addr` parser refuses them, and so is port 0. null = not an
- *  address — the caller says so next to the field instead of sending it. */
+/** Parse an IPv4 `ip` or `ip:port` — a pair link's `a=`/`p=`, and the first
+ *  thing a typed address can be. Octets with leading zeros are refused, as
+ *  Rust's `Ipv4Addr` parser refuses them, and so is port 0. null = not one. */
 export function parseJoinTarget(
   raw: string,
 ): { ip: string; port: number } | null {
@@ -193,4 +191,32 @@ export function parseJoinTarget(
   const port = m[5] === undefined ? DEFAULT_TCP_PORT : Number(m[5]);
   if (port < 1 || port > 65535) return null;
   return { ip: octets.join("."), port };
+}
+
+/** A host name as the backend takes one (F6; `host_name` in
+ *  commands/pairing.rs): RFC 1123 labels — letters, digits and hyphens, plus
+ *  the underscore some Windows machine names carry — 1–63 characters with no
+ *  hyphen at either end, 253 in all, and at least one letter: digits and dots
+ *  alone are a mistyped IPv4 address. Lower-cased, without a trailing dot. */
+function hostName(raw: string): string | null {
+  const s = raw.endsWith(".") ? raw.slice(0, -1) : raw;
+  if (s.length > 253 || !/[A-Za-z]/.test(s)) return null;
+  const label = /^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$/;
+  return s.split(".").every((l) => label.test(l)) ? s.toLowerCase() : null;
+}
+
+/** Parse what an address field holds: an IPv4 address or a host name
+ *  (`nas.local`, F6), either with an optional `:port`. null = neither — the
+ *  caller says so next to the field instead of sending it. */
+export function parseHostTarget(
+  raw: string,
+): { host: string; port: number } | null {
+  const s = normalizeAddr(raw);
+  const ip = parseJoinTarget(s);
+  if (ip) return { host: ip.ip, port: ip.port };
+  const m = /^([^:]+)(?::(\d{1,5}))?$/.exec(s);
+  const host = m ? hostName(m[1]) : null;
+  if (!m || !host) return null;
+  const port = m[2] === undefined ? DEFAULT_TCP_PORT : Number(m[2]);
+  return port >= 1 && port <= 65535 ? { host, port } : null;
 }

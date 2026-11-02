@@ -148,6 +148,7 @@ mod tests {
                 name: "NAS".into(),
                 addr: Ipv4Addr::new(10, 2, 0, 9),
                 port: 52000,
+                host: None,
                 last_used: Instant::now(),
             },
         );

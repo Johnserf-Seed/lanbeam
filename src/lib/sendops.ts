@@ -126,6 +126,7 @@ export const ERR_KEYS: Record<string, string> = {
   PeerTooOld: "errors.peerTooOld",
   PairRejected: "errors.pairRejected",
   InvalidAddress: "errors.invalidAddress",
+  HostNotFound: "errors.hostNotFound",
   PairCodeMissing: "errors.pairCodeMissing",
   Unreachable: "errors.unreachable",
   ConnectionLost: "errors.connectionLost",
