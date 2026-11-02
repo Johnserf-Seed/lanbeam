@@ -149,6 +149,27 @@ describe("Sidebar", () => {
     expect(screen.getByText(t("vis.offState"))).toBeInTheDocument();
   });
 
+  it("gives the state a line of its own, so the ID and IP can't squeeze it", () => {
+    useData.setState({
+      identity: {
+        deviceId: "sIIc5m0HSomeLongPublicKeyValue00000000000000",
+        shortId: "sIIc5m0H",
+        name: "LanBeam device",
+      },
+      settings: {
+        deviceName: "LanBeam device",
+        discoverable: true,
+      } as Settings,
+      networkInfo: [{ ip: "192.168.100.200", broadcast: null }],
+    });
+    usePrefs.setState({ ...usePrefs.getState(), iface: "" });
+    renderUI(<Sidebar />);
+    const state = screen.getByText(t("vis.onState"));
+    const idRow = screen.getByText("192.168.100.200").parentElement;
+    expect(idRow).toContainElement(screen.getByText("sIIc5m0H"));
+    expect(idRow).not.toContainElement(state);
+  });
+
   it("falls back to identity.name when settings has no deviceName", () => {
     useData.setState({
       identity: {
