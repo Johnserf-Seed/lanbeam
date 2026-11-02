@@ -207,7 +207,10 @@ describe("SettingsPage · 自动整理", () => {
       "utf8",
     );
     const list = rs.match(/ORGANIZE_MODES: \[&str; \d+\] = \[([^\]]*)\]/)?.[1];
-    expect(list, "ORGANIZE_MODES not found — did settings.rs move?").toBeTruthy();
+    expect(
+      list,
+      "ORGANIZE_MODES not found — did settings.rs move?",
+    ).toBeTruthy();
     const accepted = [...(list ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]);
     seed();
     renderUI(<SettingsPage />);
