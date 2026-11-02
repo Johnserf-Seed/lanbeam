@@ -532,6 +532,7 @@ export default function AppShell() {
           direction: p.direction,
           totalSize: p.totalSize,
           fileCount: p.fileCount,
+          ...(p.files ? { files: p.files } : {}),
           status: "active",
           started: true,
         });

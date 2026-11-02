@@ -197,7 +197,7 @@ pub async fn send_files(
     );
     let _ = app.emit(
         "transfer_started",
-        serde_json::json!({ "sessionId": transfer_id, "direction": "send", "totalSize": total, "fileCount": items.len() }),
+        send_started(&transfer_id, total, &items),
     );
 
     let app2 = app.clone();
@@ -258,6 +258,24 @@ pub async fn send_files(
             Err(e)
         }
     }
+}
+
+/// The send side's `transfer_started` payload. It lists the files as they go
+/// out (F5): a folder the user picked is one entry in the UI's record of the
+/// send, but every file in it is one here — what the per-file events count by,
+/// and what the details drawer lists.
+fn send_started(transfer_id: &str, total: u64, items: &[transfer::SendItem]) -> serde_json::Value {
+    let files: Vec<_> = items
+        .iter()
+        .map(|i| serde_json::json!({ "name": i.meta.name, "size": i.meta.size }))
+        .collect();
+    serde_json::json!({
+        "sessionId": transfer_id,
+        "direction": "send",
+        "totalSize": total,
+        "fileCount": items.len(),
+        "files": files,
+    })
 }
 
 /// Where the per-send scratch copies (stripped photos, M9.1) live.
@@ -511,6 +529,33 @@ pub fn reveal_received(state: State<'_, AppState>, session_id: String) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// F5: the sender learns every file a picked folder expands to, in send
+    /// order — what the per-file events are numbered by.
+    #[test]
+    fn send_started_lists_each_file_in_a_folder() {
+        let root = std::env::temp_dir().join(format!("lanbeam-started-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Trip")).unwrap();
+        std::fs::write(root.join("a.txt"), b"12345").unwrap();
+        std::fs::write(root.join("Trip").join("map.png"), b"123").unwrap();
+        let items =
+            transfer::build_send_list(&[root.join("a.txt"), root.join("Trip")], false).unwrap();
+
+        let v = send_started("t1", 8, &items);
+
+        assert_eq!(v["fileCount"], 2);
+        assert_eq!(v["totalSize"], 8);
+        assert_eq!(v["direction"], "send");
+        assert_eq!(
+            v["files"],
+            serde_json::json!([
+                { "name": "a.txt", "size": 5 },
+                { "name": "Trip/map.png", "size": 3 },
+            ])
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// L18: scratch folders older than this run are removed; this run's stay.
     #[test]

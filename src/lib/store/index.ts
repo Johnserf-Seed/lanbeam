@@ -2,7 +2,12 @@
 // helpers they share. Everything is re-exported from here, so callers keep
 // importing "lib/store". The order is the order the stores are created in;
 // none reads another at creation time, only inside its actions.
-export { KEPT_TEXT_CHARS, keepRecentTexts } from "./persist";
+export {
+  KEPT_FILE_NAMES,
+  KEPT_TEXT_CHARS,
+  keepFileLists,
+  keepRecentTexts,
+} from "./persist";
 export * from "./prefs";
 export * from "./data";
 export * from "./trust";

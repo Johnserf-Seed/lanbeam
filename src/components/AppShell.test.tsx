@@ -226,6 +226,36 @@ describe("AppShell · transfer events", () => {
   });
 });
 
+describe("AppShell · a started send (F5)", () => {
+  it("lists the files as they go out, a picked folder expanded", async () => {
+    await mount();
+    useTransfers.getState().registerOutgoing("s9", {
+      peerId: "dev-studio",
+      peerName: "Studio",
+      name: "Trip",
+      ext: "FILE",
+      files: [{ name: "Trip" }],
+      paths: ["/x/Trip"],
+    });
+    const files = [
+      { name: "Trip/a.jpg", size: 1 },
+      { name: "Trip/b.jpg", size: 2 },
+    ];
+    fire("transfer_started", {
+      sessionId: "s9",
+      direction: "send",
+      totalSize: 3,
+      fileCount: 2,
+      files,
+    });
+    expect(useTransfers.getState().transfers.s9).toMatchObject({
+      name: "Trip",
+      fileCount: 2,
+      files,
+    });
+  });
+});
+
 describe("AppShell · ghost mode", () => {
   it("an expired 临时隐身 is restored only after the settings load (M27)", async () => {
     usePrefs.setState({ ghostUntil: Date.now() - 1000 });

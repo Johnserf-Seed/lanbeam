@@ -14,7 +14,9 @@ import {
   histWindowMs,
   inboxFromText,
   inboxFromTransfer,
+  KEPT_FILE_NAMES,
   KEPT_TEXT_CHARS,
+  keepFileLists,
   keepRecentTexts,
   resolvedTheme,
   sendFileFromPath,
@@ -577,6 +579,33 @@ describe("useTransfers.registerOutgoing + attachSas (pendingSend keying)", () =>
       direction: "send",
     });
     expect(useTransfers.getState().pendingSend).toEqual({});
+  });
+
+  it("a started send lists its files as they go out, even as its first event (F5)", () => {
+    // The record holds the selection — a picked folder is one entry — while
+    // the per-file events count the files inside it.
+    const picked = meta({
+      name: "Trip",
+      files: [{ name: "Trip" }],
+      paths: ["/x/Trip"],
+    });
+    useTransfers.getState().registerOutgoing("s1", picked);
+    const files = [
+      { name: "Trip/a.jpg", size: 1 },
+      { name: "Trip/b.jpg", size: 2 },
+    ];
+    useTransfers.getState().upsert({
+      sessionId: "s1",
+      direction: "send",
+      status: "active",
+      fileCount: 2,
+      files,
+    });
+    expect(useTransfers.getState().transfers.s1).toMatchObject({
+      name: "Trip",
+      paths: ["/x/Trip"],
+      files,
+    });
   });
 
   it("dropOutgoing forgets a record no event will claim", () => {
@@ -1260,6 +1289,39 @@ describe("saving to localStorage (M23)", () => {
     expect(kept[1]).toBe(rows[1]);
     expect(kept[2].text).toHaveLength(10); // exactly at the budget
     expect(kept[3].text).toBeUndefined();
+  });
+
+  it("saves at most KEPT_FILE_NAMES names per row, and the count of them all (F5)", () => {
+    const names = (n: number) =>
+      Array.from({ length: n }, (_, i) => ({ name: `d/f${i}`, size: 1 }));
+    type Row = { files: { name: string; size: number }[]; fileCount?: number };
+    const short: Row = { files: names(3), fileCount: 3 };
+    const long: Row = { files: names(KEPT_FILE_NAMES + 50) };
+    const [a, b] = keepFileLists([short, long]);
+    expect(a).toBe(short);
+    expect(b.files).toHaveLength(KEPT_FILE_NAMES);
+    expect(b.fileCount).toBe(KEPT_FILE_NAMES + 50);
+  });
+
+  it("history saves a big folder's first names — this run keeps them all (F5)", () => {
+    const files = Array.from({ length: KEPT_FILE_NAMES + 20 }, (_, i) => ({
+      name: `Big/f${i}.bin`,
+      size: 1,
+    }));
+    useTransfers.getState().upsert({
+      sessionId: "big",
+      direction: "receive",
+      status: "done",
+      fileCount: files.length,
+      files,
+    });
+    const saved = JSON.parse(localStorage.getItem("lanbeam.transfers") ?? "{}")
+      .state.transfers.big as UITransfer;
+    expect(saved.files).toHaveLength(KEPT_FILE_NAMES);
+    expect(saved.fileCount).toBe(files.length);
+    expect(useTransfers.getState().transfers.big.files).toHaveLength(
+      files.length,
+    );
   });
 
   it("the inbox saves only recent text bodies — this run keeps them all", () => {

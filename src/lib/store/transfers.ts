@@ -12,7 +12,7 @@ import type {
   TransferPendingEvent,
 } from "../../bridge/api";
 import { extOf } from "../format";
-import { keepRecentTexts, safeLocalStorage } from "./persist";
+import { keepFileLists, keepRecentTexts, safeLocalStorage } from "./persist";
 import { usePrefs } from "./prefs";
 
 // "queued" = accepted/started but parked on the concurrency gate (M6.7); a
@@ -229,7 +229,7 @@ function terminalDiffStorage(): PersistStorage<PersistedTransfers> {
       // partialize ordered the rows newest first; texts past the budget are
       // saved without their bodies (M23). After the identity check above, so
       // the copies it makes never defeat it.
-      const kept = keepRecentTexts(records);
+      const kept = keepFileLists(keepRecentTexts(records));
       const transfers = Object.fromEntries(
         entries.map(([key], i) => [key, kept[i]]),
       );
@@ -277,6 +277,9 @@ export const useTransfers = create<TransfersState>()(
           let pendingSend = s.pendingSend;
           if (om) {
             Object.assign(merged, outgoingFields(om), { direction: "send" });
+            // …except the files, when the event lists them as they go out:
+            // the record has the selection, where a folder is one entry (F5).
+            if (t.files) merged.files = t.files;
             pendingSend = { ...pendingSend };
             delete pendingSend[t.sessionId];
           }

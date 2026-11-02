@@ -165,6 +165,7 @@
     "fileDone": "✓ 完成",
     "fileFailed": "失败",
     "fileCanceled": "已取消",
+    "moreFiles_other": "还有 {{count}} 个文件未列出",
     "primaryResend": "再次发送",
     "primaryOpenDir": "打开所在文件夹",
     "sendOther": "发送到其他设备…",

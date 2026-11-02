@@ -169,6 +169,8 @@
     "fileDone": "✓ Done",
     "fileFailed": "Failed",
     "fileCanceled": "Canceled",
+    "moreFiles_one": "{{count}} more file not listed",
+    "moreFiles_other": "{{count}} more files not listed",
     "primaryResend": "Send again",
     "primaryOpenDir": "Open containing folder",
     "sendOther": "Send to another device…",

@@ -1,4 +1,4 @@
-import type { CSSProperties } from "react";
+import { type CSSProperties, useState } from "react";
 import { useTranslation } from "react-i18next";
 import * as api from "../bridge/api";
 import { DirBadge, ExtChip } from "./ui";
@@ -56,6 +56,27 @@ function Stat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/** A transfer with more files than this opens with its folders collapsed (F5):
+ *  open, a 10,000-file folder would render every one of its rows at once. */
+const GROUPS_OPEN_MAX = 50;
+
+/** One per-file row of the drawer. */
+type FileRow = {
+  /** manifest index — what the per-file events are keyed by */
+  i: number;
+  name: string;
+  /** the folder the file sits in ("" for a loose file), and its own name */
+  dir: string;
+  base: string;
+  ext: string;
+  hasBar: boolean;
+  barPct: number;
+  label: string;
+  color: string;
+  done: boolean;
+  failed: boolean;
+};
+
 const secBtn: CSSProperties = {
   flex: 1,
   minWidth: "calc(50% - 4px)",
@@ -89,6 +110,12 @@ export default function TransferDetail() {
   useEscape(!!tr && tr.kind !== "text" && tr.via !== "browser", () =>
     setDetail(null),
   );
+  // Folders opened or closed by hand (F5) — for the transfer they were
+  // toggled on, so another transfer's drawer starts from its own defaults.
+  const [toggled, setToggled] = useState<{
+    id: string | null;
+    dirs: Record<string, boolean>;
+  }>({ id: null, dirs: {} });
   if (!tr) return null;
   // Quick-text records (M7.3) and browser-share downloads (M8.4) live in the
   // history list only — they carry no session/paths, so this file-oriented
@@ -122,7 +149,10 @@ export default function TransferDetail() {
     tr.name ?? tr.files?.[0]?.name ?? tr.savedNames?.[0] ?? tr.sessionId;
   const pct = Math.min(tr.percent, 100);
   const doneBytes = (tr.totalSize * pct) / 100;
-  const filesN = tr.files?.length ?? tr.fileCount ?? 1;
+  // The count the backend gave wins: a send's `files` is the selection until
+  // it starts (a folder is one entry), and a row restored from history keeps
+  // only the first names (KEPT_FILE_NAMES).
+  const filesN = tr.fileCount ?? tr.files?.length ?? 1;
   // What was actually verified (M13): the files whose own completion event
   // said so. It used to be this machine's 完整性校验 setting — which decides
   // what THIS machine sends; whether a receive carries checksums is the
@@ -248,7 +278,7 @@ export default function TransferDetail() {
   const sizesKnown = fileList.every((f) => typeof f.size === "number");
   const equalShare = tr.totalSize / Math.max(fileList.length, 1);
   let acc = 0;
-  const fileRows = fileList.map((f, i) => {
+  const fileRows: FileRow[] = fileList.map((f, i) => {
     const stat = tr.fileStat?.[i];
     const fsize = sizesKnown ? (f.size as number) : equalShare;
     const start = acc;
@@ -257,10 +287,13 @@ export default function TransferDetail() {
     let barPct = 0;
     let label = t("detail.fileQueued");
     let color = "var(--muted)";
+    let done = false;
+    let failed = false;
     if (stat?.done) {
       // A real transfer_file_done arrived: ✓ (verified when the hash matched).
       label = stat.verified ? t("detail.fileVerified") : t("detail.fileDone");
       color = "var(--success)";
+      done = true;
     } else if (stat) {
       // A real transfer_file_progress arrived — show its exact percent.
       hasBar = true;
@@ -268,16 +301,207 @@ export default function TransferDetail() {
     } else if (isError) {
       label = isCanceled ? t("detail.fileCanceled") : t("detail.fileFailed");
       color = isCanceled ? "var(--muted)" : "var(--danger)";
+      failed = !isCanceled;
     } else if (isDone || doneBytes >= acc - 1) {
       // No event for this file, so nothing says it was verified.
       label = t("detail.fileDone");
       color = "var(--success)";
+      done = true;
     } else if (doneBytes > start) {
       hasBar = true;
       barPct = Math.round(((doneBytes - start) / Math.max(fsize, 1)) * 100);
     }
-    return { name: f.name, ext: extOf(f.name), hasBar, barPct, label, color };
+    const slash = f.name.lastIndexOf("/");
+    const base = f.name.slice(slash + 1);
+    return {
+      i,
+      name: f.name,
+      dir: slash > 0 ? f.name.slice(0, slash) : "",
+      base,
+      ext: extOf(base),
+      hasBar,
+      barPct,
+      label,
+      color,
+      done,
+      failed,
+    };
   });
+  // Names a restored row no longer has (KEPT_FILE_NAMES): counted, not listed.
+  const unlisted =
+    tr.files?.length && tr.fileCount ? tr.fileCount - tr.files.length : 0;
+
+  /* by folder (F5): the files of a folder send sit under the folder they are
+     in, in the order the folders first come up; loose files get no header. */
+  const groups: { dir: string; rows: FileRow[] }[] = [];
+  const byDir = new Map<string, { dir: string; rows: FileRow[] }>();
+  for (const r of fileRows) {
+    let g = byDir.get(r.dir);
+    if (!g) {
+      g = { dir: r.dir, rows: [] };
+      byDir.set(r.dir, g);
+      groups.push(g);
+    }
+    g.rows.push(r);
+  }
+  const grouped = groups.some((g) => g.dir !== "");
+  const dirsToggled = toggled.id === tr.sessionId ? toggled.dirs : {};
+  const isOpen = (d: string) =>
+    dirsToggled[d] ?? fileRows.length <= GROUPS_OPEN_MAX;
+  const toggleDir = (d: string) =>
+    setToggled({
+      id: tr.sessionId,
+      dirs: { ...dirsToggled, [d]: !isOpen(d) },
+    });
+
+  /* one file's row; under an open folder it is indented and goes by its own name */
+  const fileRow = (r: FileRow, indented: boolean) => (
+    <div
+      key={r.i}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        padding: indented ? "9px 12px 9px 34px" : "9px 12px",
+        borderBottom: "1px solid var(--border)",
+      }}
+    >
+      <ExtChip ext={r.ext} size={26} fontSize={7.5} radius={7} />
+      <span
+        style={{
+          flex: 1,
+          minWidth: 0,
+          fontSize: 11.5,
+          color: "var(--ink2)",
+          whiteSpace: "nowrap",
+          overflow: "hidden",
+          textOverflow: "ellipsis",
+        }}
+      >
+        {indented ? r.base : r.name}
+      </span>
+      {r.hasBar ? (
+        <>
+          <span
+            style={{
+              width: 52,
+              height: 4,
+              borderRadius: 99,
+              background: "var(--track)",
+              overflow: "hidden",
+              flex: "none",
+            }}
+          >
+            <span
+              style={{
+                display: "block",
+                width: `${r.barPct}%`,
+                height: "100%",
+                background: dirColor,
+              }}
+            />
+          </span>
+          <span
+            className="mono"
+            style={{
+              fontSize: 10,
+              color: "var(--muted2)",
+              flex: "none",
+            }}
+          >
+            {r.barPct}%
+          </span>
+        </>
+      ) : (
+        <span style={{ fontSize: 10.5, color: r.color, flex: "none" }}>
+          {r.label}
+        </span>
+      )}
+    </div>
+  );
+  const folderRow = (g: { dir: string; rows: FileRow[] }) => {
+    const open = isOpen(g.dir);
+    const doneN = g.rows.filter((r) => r.done).length;
+    const countColor = g.rows.some((r) => r.failed)
+      ? "var(--danger)"
+      : doneN === g.rows.length
+        ? "var(--success)"
+        : "var(--muted2)";
+    return (
+      <button
+        key={`dir:${g.dir}`}
+        type="button"
+        aria-expanded={open}
+        onClick={() => toggleDir(g.dir)}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 8,
+          width: "100%",
+          padding: "8px 12px",
+          border: 0,
+          borderBottom: "1px solid var(--border)",
+          background: "var(--bg)",
+          color: "var(--ink2)",
+          font: "inherit",
+          textAlign: "left",
+          cursor: "pointer",
+        }}
+      >
+        <svg
+          width="10"
+          height="10"
+          viewBox="0 0 10 10"
+          aria-hidden="true"
+          style={{
+            flex: "none",
+            color: "var(--muted)",
+            transform: open ? "rotate(90deg)" : "none",
+            transition: "transform .15s",
+          }}
+        >
+          <path
+            d="M3 1.5 6.5 5 3 8.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+          />
+        </svg>
+        <svg
+          width="16"
+          height="16"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          style={{ flex: "none", color: "var(--muted2)" }}
+        >
+          <path
+            d="M1.5 4.25c0-.69.56-1.25 1.25-1.25h3.3l1.5 1.6h5.7c.69 0 1.25.56 1.25 1.25v6.4c0 .69-.56 1.25-1.25 1.25H2.75c-.69 0-1.25-.56-1.25-1.25z"
+            fill="currentColor"
+            opacity=".85"
+          />
+        </svg>
+        <span
+          style={{
+            flex: 1,
+            minWidth: 0,
+            fontSize: 11.5,
+            fontWeight: 600,
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+          }}
+        >
+          {g.dir}
+        </span>
+        <span
+          className="mono"
+          style={{ fontSize: 10, color: countColor, flex: "none" }}
+        >
+          {doneN}/{g.rows.length}
+        </span>
+      </button>
+    );
+  };
 
   /* actions */
   const canResend = dir === "send" && !!tr.paths?.length;
@@ -657,72 +881,29 @@ export default function TransferDetail() {
                 overflow: "hidden",
               }}
             >
-              {fileRows.map((r, i) => (
+              {grouped
+                ? groups.flatMap((g) =>
+                    g.dir === ""
+                      ? g.rows.map((r) => fileRow(r, false))
+                      : [
+                          folderRow(g),
+                          ...(isOpen(g.dir)
+                            ? g.rows.map((r) => fileRow(r, true))
+                            : []),
+                        ],
+                  )
+                : fileRows.map((r) => fileRow(r, false))}
+              {unlisted > 0 && (
                 <div
-                  key={i}
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 9,
                     padding: "9px 12px",
-                    borderBottom: "1px solid var(--border)",
+                    fontSize: 11,
+                    color: "var(--muted)",
                   }}
                 >
-                  <ExtChip ext={r.ext} size={26} fontSize={7.5} radius={7} />
-                  <span
-                    style={{
-                      flex: 1,
-                      minWidth: 0,
-                      fontSize: 11.5,
-                      color: "var(--ink2)",
-                      whiteSpace: "nowrap",
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                    }}
-                  >
-                    {r.name}
-                  </span>
-                  {r.hasBar ? (
-                    <>
-                      <span
-                        style={{
-                          width: 52,
-                          height: 4,
-                          borderRadius: 99,
-                          background: "var(--track)",
-                          overflow: "hidden",
-                          flex: "none",
-                        }}
-                      >
-                        <span
-                          style={{
-                            display: "block",
-                            width: `${r.barPct}%`,
-                            height: "100%",
-                            background: dirColor,
-                          }}
-                        />
-                      </span>
-                      <span
-                        className="mono"
-                        style={{
-                          fontSize: 10,
-                          color: "var(--muted2)",
-                          flex: "none",
-                        }}
-                      >
-                        {r.barPct}%
-                      </span>
-                    </>
-                  ) : (
-                    <span
-                      style={{ fontSize: 10.5, color: r.color, flex: "none" }}
-                    >
-                      {r.label}
-                    </span>
-                  )}
+                  {t("detail.moreFiles", { count: unlisted })}
                 </div>
-              ))}
+              )}
             </div>
 
             {/* actions (terminal only) */}
