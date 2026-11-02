@@ -2,10 +2,12 @@
 //! (M7.2) merged in — and the dial target behind each entry.
 
 use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::net::Ipv4Addr;
 
 use tauri::State;
 
+use super::pairing::resolve_host_name;
 use crate::discovery::{self, DiscoveredDevice};
 use crate::error::LanBeamError;
 use crate::manual_peers::ManualPeer;
@@ -58,7 +60,9 @@ pub(crate) fn merge_devices(
             discovered.push(DiscoveredDevice {
                 device_id: id.clone(),
                 name: mp.name.clone(),
-                address: mp.addr.to_string(),
+                // Added by name (F6): the name is how the user knows it, and
+                // where it is dialed — the address it resolved to may be stale.
+                address: mp.host.clone().unwrap_or_else(|| mp.addr.to_string()),
                 port: mp.port,
                 // Only in the list because someone typed its address — so it is
                 // the one kind of peer that CAN be deleted for good.
@@ -75,7 +79,11 @@ pub(crate) fn merge_devices(
 /// the id itself — a later send to an IP-added peer therefore pins the identity
 /// learned at `connect_by_addr` time (TOFU). `PeerNotFound` when neither table
 /// knows the id.
-pub(super) fn resolve_peer(
+///
+/// A peer added by host name (F6) is dialed where the name points NOW: its
+/// address may have changed since it was added (DHCP). When the name doesn't
+/// resolve at the moment, the address it resolved to last is still worth a try.
+pub(super) async fn resolve_peer(
     state: &AppState,
     device_id: &str,
 ) -> Result<(Ipv4Addr, u16, [u8; 32]), LanBeamError> {
@@ -89,15 +97,29 @@ pub(super) fn resolve_peer(
     {
         return Ok((addr, port, expected));
     }
-    if let Some((addr, port)) = state
+    let manual = state
         .manual_peers
         .lock()
         .ok()
-        .and_then(|m| m.get(device_id).map(|d| (d.addr, d.port)))
-    {
-        return Ok((addr, port, expected));
+        .and_then(|m| m.get(device_id).map(|d| (d.addr, d.port, d.host.clone())));
+    if let Some((addr, port, host)) = manual {
+        let fresh = host.as_deref().map(|name| resolve_host_name(name, port));
+        return Ok((manual_dial_addr(addr, fresh).await, port, expected));
     }
     Err(LanBeamError::PeerNotFound)
+}
+
+/// Where to dial a manual peer: where its name resolves now (F6), or — with no
+/// name, or a name that doesn't resolve at the moment — the address it had.
+/// Takes the resolution as a future so a test can make it fail on purpose.
+async fn manual_dial_addr(
+    addr: Ipv4Addr,
+    fresh: Option<impl Future<Output = Result<Ipv4Addr, LanBeamError>>>,
+) -> Ipv4Addr {
+    match fresh {
+        Some(fresh) => fresh.await.unwrap_or(addr),
+        None => addr,
+    }
 }
 
 #[cfg(test)]
@@ -126,6 +148,7 @@ mod tests {
                 name: "Manual Name".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 1),
                 port: 9,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -136,6 +159,7 @@ mod tests {
                 name: "Alpha".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 2),
                 port: 51704,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -173,8 +197,8 @@ mod tests {
     /// discovery never announced it — the cross-subnet / discovery-off case that
     /// IP/QR pairing exists for. A real device id is used so `resolve_peer`'s
     /// decode step succeeds.
-    #[test]
-    fn manual_recorded_paired_peer_is_reachable_and_listed() {
+    #[tokio::test]
+    async fn manual_recorded_paired_peer_is_reachable_and_listed() {
         let peer_id = identity::generate_identity().unwrap().device_id();
         let addr = Ipv4Addr::new(10, 1, 2, 3);
         let port = 51999;
@@ -184,13 +208,15 @@ mod tests {
                 name: "Paired".into(),
                 addr,
                 port,
+                host: None,
                 last_used: Instant::now(),
             },
         );
 
         // Reachable: resolve the dial target from the manual table.
-        let (r_addr, r_port, _key) =
-            resolve_peer(&state, &peer_id).expect("the paired peer resolves for a later send");
+        let (r_addr, r_port, _key) = resolve_peer(&state, &peer_id)
+            .await
+            .expect("the paired peer resolves for a later send");
         assert_eq!(r_addr, addr, "resolve returns the dialed address");
         assert_eq!(r_port, port, "resolve returns the dialed port");
 
@@ -205,18 +231,18 @@ mod tests {
 
     /// `resolve_peer` fails cleanly on a malformed id (before any table lookup)
     /// and on a well-formed id that no table knows.
-    #[test]
-    fn resolve_peer_rejects_bad_and_unknown_ids() {
+    #[tokio::test]
+    async fn resolve_peer_rejects_bad_and_unknown_ids() {
         let state = test_app_state();
         // Not base64url-32 → decode fails → Protocol, before any lookup.
-        let err = resolve_peer(&state, "!!!").unwrap_err();
+        let err = resolve_peer(&state, "!!!").await.unwrap_err();
         assert!(
             matches!(err, LanBeamError::Protocol(_)),
             "a malformed device id is a protocol error"
         );
         // A well-formed id that neither the discovery nor manual table holds.
         let unknown = identity::generate_identity().unwrap().device_id();
-        let err = resolve_peer(&state, &unknown).unwrap_err();
+        let err = resolve_peer(&state, &unknown).await.unwrap_err();
         assert!(
             matches!(err, LanBeamError::PeerNotFound),
             "a valid but unknown id is PeerNotFound"
@@ -226,8 +252,8 @@ mod tests {
     /// `resolve_peer` reads the discovery table, and a live discovery entry wins
     /// over a manual one for the same id (discovery is checked first, freshest
     /// address).
-    #[test]
-    fn resolve_peer_prefers_discovery_over_manual() {
+    #[tokio::test]
+    async fn resolve_peer_prefers_discovery_over_manual() {
         let state = test_app_state();
         let id = identity::generate_identity().unwrap().device_id();
         let disc_addr = Ipv4Addr::new(192, 168, 1, 50);
@@ -248,10 +274,13 @@ mod tests {
                 name: "Manual".into(),
                 addr: manual_addr,
                 port: 52000,
+                host: None,
                 last_used: Instant::now(),
             },
         );
-        let (addr, port, _key) = resolve_peer(&state, &id).expect("a discovered peer resolves");
+        let (addr, port, _key) = resolve_peer(&state, &id)
+            .await
+            .expect("a discovered peer resolves");
         assert_eq!(addr, disc_addr, "the discovery table wins the address");
         assert_eq!(port, 51000, "the discovery table wins the port");
     }
@@ -278,6 +307,7 @@ mod tests {
                 name: "Alpha".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 4),
                 port: 52000,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -317,6 +347,7 @@ mod tests {
                 name: "Me (dialled my own address)".into(),
                 addr: Ipv4Addr::new(127, 0, 0, 1),
                 port: 51704,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -326,6 +357,7 @@ mod tests {
                 name: "Real Peer".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 2),
                 port: 51704,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -359,6 +391,7 @@ mod tests {
                 name: "Typed In".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 2),
                 port: 51704,
+                host: None,
                 last_used: Instant::now(),
             },
         );
@@ -383,5 +416,51 @@ mod tests {
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].device_id, "only");
         assert_eq!(merged[0].address, "192.168.1.1");
+    }
+
+    /// F6: a peer added by name is dialed where the name resolves now, not
+    /// where it pointed when it was added; when the name doesn't resolve, the
+    /// address it had is the fallback. And the device list shows the name.
+    #[tokio::test]
+    async fn a_peer_added_by_name_is_dialed_where_the_name_points_now() {
+        let id = identity::generate_identity().unwrap().device_id();
+        let stale = Ipv4Addr::new(10, 9, 9, 9);
+        let state = state_with_manual(
+            &id,
+            ManualPeer {
+                name: "Loop".into(),
+                addr: stale,
+                port: 52000,
+                host: Some("localhost".into()),
+                last_used: Instant::now(),
+            },
+        );
+        let (addr, port, _key) = resolve_peer(&state, &id).await.unwrap();
+        assert_eq!(addr, Ipv4Addr::LOCALHOST, "the name is resolved again");
+        assert_eq!(port, 52000);
+        let list = list_devices_snapshot(&state);
+        assert!(
+            list.iter()
+                .any(|d| d.device_id == id && d.address == "localhost"),
+            "the list shows the name it was added by"
+        );
+    }
+
+    /// F6: a name that doesn't resolve right now still leaves the address it
+    /// had to try — a resolver hiccup must not make a reachable device
+    /// unreachable. (Fed by hand: what a real resolver says about a missing
+    /// name depends on the machine; a DNS proxy may answer for anything.)
+    #[tokio::test]
+    async fn a_name_that_does_not_resolve_falls_back_to_the_last_address() {
+        let stale = Ipv4Addr::new(10, 9, 9, 9);
+        let fresh = Ipv4Addr::new(10, 9, 9, 10);
+        let miss = async { Err(LanBeamError::HostNotFound("nas.local".into())) };
+        assert_eq!(manual_dial_addr(stale, Some(miss)).await, stale);
+        assert_eq!(
+            manual_dial_addr(stale, Some(async { Ok(fresh) })).await,
+            fresh
+        );
+        let no_name: Option<std::future::Ready<Result<Ipv4Addr, LanBeamError>>> = None;
+        assert_eq!(manual_dial_addr(stale, no_name).await, stale);
     }
 }

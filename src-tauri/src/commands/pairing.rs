@@ -2,25 +2,33 @@
 //! code, adding a device by its address, and the `lanbeam://pair` link that
 //! carries both.
 
-use std::net::Ipv4Addr;
+use std::future::Future;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use serde::Serialize;
 use tauri::State;
 
-use crate::consts::DEFAULT_TCP_PORT;
+use crate::consts::{DEFAULT_TCP_PORT, RESOLVE_TIMEOUT};
 use crate::discovery;
 use crate::error::LanBeamError;
 use crate::manual_peers::{self, ManualPeer};
 use crate::state::{AppState, PairingSession};
 use crate::{transfer, transport};
 
-/// Keep a device reached by IP or pairing code dialable: in the manual table,
-/// which discovery's expiry never touches — and on disk, which a restart
-/// doesn't either.
-fn remember_manual_peer(state: &AppState, device_id: &str, name: &str, ip: Ipv4Addr, port: u16) {
+/// Keep a device reached by IP, host name or pairing code dialable: in the
+/// manual table, which discovery's expiry never touches — and on disk, which a
+/// restart doesn't either. `host` is the name it was reached by, if any (F6).
+fn remember_manual_peer(
+    state: &AppState,
+    device_id: &str,
+    name: &str,
+    ip: Ipv4Addr,
+    port: u16,
+    host: Option<&str>,
+) {
     let snapshot = match state.manual_peers.lock() {
         Ok(mut manual) => {
             manual.insert(
@@ -29,6 +37,7 @@ fn remember_manual_peer(state: &AppState, device_id: &str, name: &str, ip: Ipv4A
                     name: name.to_string(),
                     addr: ip,
                     port,
+                    host: host.map(str::to_string),
                     last_used: Instant::now(),
                 },
             );
@@ -138,7 +147,7 @@ pub fn take_pending_deep_link(state: State<'_, AppState>) -> Option<String> {
 }
 
 /// Redeem a device that is showing a pairing code. Pass its address (`ip:port`,
-/// or the pasted `lanbeam://pair…` link) and the 6-digit code; returns the
+/// a host name, or the pasted `lanbeam://pair…` link) and the 6-digit code; returns the
 /// peer's Device ID, name, and the SAS. A wrong or expired code errors with
 /// `PairRejected`; an unparseable address with `InvalidAddress`; a dial that
 /// never connects with `Unreachable`.
@@ -178,11 +187,10 @@ pub async fn join_by_code(
         .as_deref()
         .and_then(transport::decode_device_id)
         .or(target.expected);
+    let ip = target.host.resolve(target.port).await?;
     let mut sess = match expected {
-        Some(expected) => {
-            transport::connect(target.ip, target.port, &local_private, expected).await?
-        }
-        None => transport::connect_unpinned(target.ip, target.port, &local_private).await?,
+        Some(expected) => transport::connect(ip, target.port, &local_private, expected).await?,
+        None => transport::connect_unpinned(ip, target.port, &local_private).await?,
     };
     let sas = sess.sas().to_string();
     let device_id = URL_SAFE_NO_PAD.encode(sess.remote_static());
@@ -219,7 +227,14 @@ pub async fn join_by_code(
     // from `list_discovered_devices` and `resolve_peer` — a trusted peer no later
     // `send_text`/`send_files` could reach (PeerNotFound). The manual table keeps
     // it visible and dialable, independent of the discovery table's expiry.
-    remember_manual_peer(&state, &device_id, &name, target.ip, target.port);
+    remember_manual_peer(
+        &state,
+        &device_id,
+        &name,
+        ip,
+        target.port,
+        target.host.name(),
+    );
     Ok(ConnectResult {
         device_id,
         name,
@@ -227,8 +242,8 @@ pub async fn join_by_code(
     })
 }
 
-/// Connect to a device by address (`ip:port`, or a scanned `lanbeam://pair…`
-/// link) so it appears on the devices page even when it is not visible through
+/// Connect to a device by address (`ip:port`, a host name like `nas.local`, or
+/// a scanned `lanbeam://pair…` link) so it appears on the devices page even when it is not visible through
 /// automatic discovery. Returns the peer's Device ID, name, and the SAS to
 /// compare out loud. This sends nothing and grants no trust — use it to add a
 /// device you can then send to or pair with. Re-query `list_discovered_devices`
@@ -241,7 +256,8 @@ pub async fn connect_by_addr(
     let target =
         parse_dial_target(&addr).ok_or_else(|| LanBeamError::InvalidAddress(addr.trim().into()))?;
     let local_private = *state.identity.private_bytes();
-    let mut sess = transport::connect_unpinned(target.ip, target.port, &local_private).await?;
+    let ip = target.host.resolve(target.port).await?;
+    let mut sess = transport::connect_unpinned(ip, target.port, &local_private).await?;
     let sas = sess.sas().to_string();
     let device_id = URL_SAFE_NO_PAD.encode(sess.remote_static());
     // Adding yourself is not adding a device. Bail before the manual table (below)
@@ -258,7 +274,14 @@ pub async fn connect_by_addr(
     // reach it — discovery never announced it (a different subnet, or discovery
     // off on that box), so it lives in the manual table rather than the
     // discovery table (which the expiry loop would evict).
-    remember_manual_peer(&state, &device_id, &name, target.ip, target.port);
+    remember_manual_peer(
+        &state,
+        &device_id,
+        &name,
+        ip,
+        target.port,
+        target.host.name(),
+    );
     Ok(ConnectResult {
         device_id,
         name,
@@ -266,10 +289,10 @@ pub async fn connect_by_addr(
     })
 }
 
-/// A parsed dial target from `join_by_code` / `connect_by_addr`: the IPv4
-/// endpoint plus whatever a pasted pair link carried along.
+/// A parsed dial target from `join_by_code` / `connect_by_addr`: the host and
+/// port, plus whatever a pasted pair link carried along.
 struct DialTarget {
-    ip: Ipv4Addr,
+    host: DialHost,
     port: u16,
     /// The `c=` code from a `lanbeam://pair` link, if present.
     code: Option<String>,
@@ -278,8 +301,94 @@ struct DialTarget {
     expected: Option<[u8; 32]>,
 }
 
-/// Parse a dial target from either a plain `ip[:port]` or a `lanbeam://pair?…`
-/// deep link. `None` for anything that does not yield a valid IPv4 address —
+/// What a dial target points at: an IPv4 address, or a host name to resolve
+/// first (F6). Nothing here dials IPv6.
+#[derive(Debug, PartialEq)]
+enum DialHost {
+    Ip(Ipv4Addr),
+    /// A name the user typed (`nas.local`, `desktop`), resolved when dialed and
+    /// kept with the device, so a later send resolves it again.
+    Name(String),
+}
+
+impl DialHost {
+    /// The address to dial now.
+    async fn resolve(&self, port: u16) -> Result<Ipv4Addr, LanBeamError> {
+        match self {
+            DialHost::Ip(ip) => Ok(*ip),
+            DialHost::Name(name) => resolve_host_name(name, port).await,
+        }
+    }
+
+    /// The name to keep with the device, when it was reached by one.
+    fn name(&self) -> Option<&str> {
+        match self {
+            DialHost::Ip(_) => None,
+            DialHost::Name(name) => Some(name),
+        }
+    }
+}
+
+/// `s` as a host name to resolve (F6): lower-cased, without a trailing dot;
+/// `None` when it can't be one. RFC 1123 labels — letters, digits and hyphens,
+/// 1–63 characters, no hyphen at either end — plus the underscore some Windows
+/// machine names carry. At least one letter: digits and dots alone are a
+/// mistyped IPv4 address, and the system resolver would quietly read
+/// `192.168.1` as 192.168.0.1.
+fn host_name(s: &str) -> Option<String> {
+    let s = s.strip_suffix('.').unwrap_or(s);
+    if s.len() > 253 || !s.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return None;
+    }
+    let labels_ok = s.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    });
+    labels_ok.then(|| s.to_ascii_lowercase())
+}
+
+/// Resolve a host name (F6) to the IPv4 address to dial, through the system
+/// resolver — so `.local` names (mDNS), the router's DNS names and hosts-file
+/// entries all work. `HostNotFound` when it yields no IPv4 address in time.
+pub(super) async fn resolve_host_name(name: &str, port: u16) -> Result<Ipv4Addr, LanBeamError> {
+    best_ipv4(name, tokio::net::lookup_host((name, port)), RESOLVE_TIMEOUT).await
+}
+
+/// The deadline and the choice behind [`resolve_host_name`], generic over the
+/// lookup so tests can hand it answers — and a lookup that never finishes —
+/// instead of depending on this machine's resolver. Of several addresses the
+/// one most likely on the LAN wins ([`lan_ip_rank`]; the resolver's order among
+/// equals). IPv6 answers are skipped.
+async fn best_ipv4<F, I>(
+    name: &str,
+    lookup: F,
+    deadline: Duration,
+) -> Result<Ipv4Addr, LanBeamError>
+where
+    F: Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = SocketAddr>,
+{
+    let not_found = || LanBeamError::HostNotFound(name.to_string());
+    match tokio::time::timeout(deadline, lookup).await {
+        Ok(Ok(addrs)) => addrs
+            .filter_map(|a| match a.ip() {
+                IpAddr::V4(ip) => Some(ip),
+                IpAddr::V6(_) => None,
+            })
+            .min_by_key(|ip| lan_ip_rank(*ip))
+            .ok_or_else(not_found),
+        Ok(Err(_)) | Err(_) => Err(not_found()),
+    }
+}
+
+/// Parse a dial target from either a plain `host[:port]` — an IPv4 address or
+/// a host name — or a `lanbeam://pair?…` deep link. `None` for anything that is
+/// neither —
 /// including any OTHER `lanbeam://` command: only a pair link is an invitation
 /// (the frontend's deep-link allowlist makes the same call), so a `connect` or
 /// `inbox` link pasted here is a typo, not an address.
@@ -295,15 +404,18 @@ fn parse_dial_target(input: &str) -> Option<DialTarget> {
         }
         return parse_pair_uri(rest);
     }
-    // Plain `ip` or `ip:port`. IPv4 has no internal colons, so the last colon
-    // (if any) separates the port.
+    // Plain `host` or `host:port`. Neither an IPv4 address nor a host name has
+    // a colon of its own, so the last colon (if any) separates the port.
     let (host, port) = match s.rsplit_once(':') {
         Some((h, p)) => (h.trim(), p.trim().parse::<u16>().ok()?),
         None => (s, DEFAULT_TCP_PORT),
     };
-    let ip: Ipv4Addr = host.parse().ok()?;
+    let host = match host.parse::<Ipv4Addr>() {
+        Ok(ip) => DialHost::Ip(ip),
+        Err(_) => DialHost::Name(host_name(host)?),
+    };
     Some(DialTarget {
-        ip,
+        host,
         port,
         code: None,
         expected: None,
@@ -342,8 +454,10 @@ fn parse_pair_uri(rest: &str) -> Option<DialTarget> {
             _ => {}
         }
     }
+    // A link's `a=` is written by the host, which writes an address — never
+    // a name to resolve.
     ip.map(|ip| DialTarget {
-        ip,
+        host: DialHost::Ip(ip),
         port,
         code,
         expected,
@@ -490,7 +604,7 @@ mod tests {
     #[test]
     fn parse_dial_target_handles_addr_and_link() {
         let t = parse_dial_target("192.168.1.5:52637").expect("ip:port parses");
-        assert_eq!(t.ip, Ipv4Addr::new(192, 168, 1, 5));
+        assert_eq!(t.host, DialHost::Ip(Ipv4Addr::new(192, 168, 1, 5)));
         assert_eq!(t.port, 52637);
         assert!(t.code.is_none());
 
@@ -501,11 +615,11 @@ mod tests {
         );
 
         let t = parse_dial_target("  10.0.0.7:51704  ").expect("surrounding space is trimmed");
-        assert_eq!(t.ip, Ipv4Addr::new(10, 0, 0, 7));
+        assert_eq!(t.host, DialHost::Ip(Ipv4Addr::new(10, 0, 0, 7)));
 
         let link = "lanbeam://pair?d=abc&n=My%20PC&a=192.168.1.9&p=51999&c=482913";
         let t = parse_dial_target(link).expect("link parses");
-        assert_eq!(t.ip, Ipv4Addr::new(192, 168, 1, 9));
+        assert_eq!(t.host, DialHost::Ip(Ipv4Addr::new(192, 168, 1, 9)));
         assert_eq!(t.port, 51999);
         assert_eq!(t.code.as_deref(), Some("482913"));
         assert!(
@@ -528,7 +642,7 @@ mod tests {
             .expect("link parses");
         assert_eq!(t.expected, Some([7u8; 32]));
 
-        assert!(parse_dial_target("not-an-ip").is_none());
+        assert!(parse_dial_target("not an address").is_none());
         assert!(
             parse_dial_target("999.1.1.1:5").is_none(),
             "an out-of-range octet is rejected"
@@ -553,7 +667,7 @@ mod tests {
         assert!(uri.contains("a=192.168.1.20"));
 
         let t = parse_dial_target(&uri).expect("the built link must parse");
-        assert_eq!(t.ip, ip);
+        assert_eq!(t.host, DialHost::Ip(ip));
         assert_eq!(t.port, 51704);
         assert_eq!(t.code.as_deref(), Some("482913"));
 
@@ -681,7 +795,7 @@ mod tests {
     fn parse_pair_uri_tolerates_malformed_query_params() {
         let link = "lanbeam://pair?flag&a=192.168.1.9&c=&p=notaport";
         let t = parse_dial_target(link).expect("a= still yields a target");
-        assert_eq!(t.ip, Ipv4Addr::new(192, 168, 1, 9));
+        assert_eq!(t.host, DialHost::Ip(Ipv4Addr::new(192, 168, 1, 9)));
         assert_eq!(
             t.port, DEFAULT_TCP_PORT,
             "an unparseable port keeps the default"
@@ -704,22 +818,141 @@ mod tests {
         let state = crate::commands::test_support::test_app_state();
         *state.manual_peers.lock().unwrap() = manual_peers::ManualPeers::load(file.clone());
 
-        remember_manual_peer(&state, "nas", "NAS", Ipv4Addr::new(10, 2, 0, 9), 52000);
+        remember_manual_peer(
+            &state,
+            "nas",
+            "NAS",
+            Ipv4Addr::new(10, 2, 0, 9),
+            52000,
+            Some("nas.local"),
+        );
 
         // Written on the blocking pool — give it a moment.
         let mut reloaded = None;
         for _ in 0..200 {
             if let Some(p) = manual_peers::ManualPeers::load(file.clone()).get("nas") {
-                reloaded = Some((p.name.clone(), p.addr, p.port));
+                reloaded = Some((p.name.clone(), p.addr, p.port, p.host.clone()));
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(
             reloaded,
-            Some(("NAS".to_string(), Ipv4Addr::new(10, 2, 0, 9), 52000)),
-            "the address survives a restart"
+            Some((
+                "NAS".to_string(),
+                Ipv4Addr::new(10, 2, 0, 9),
+                52000,
+                Some("nas.local".to_string())
+            )),
+            "the address, and the name it was added by, survive a restart"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F6: a host name is a dial target too — kept lower-case, without the
+    /// trailing dot, with or without a port — while digits and dots alone stay
+    /// an IPv4 address or nothing.
+    #[test]
+    fn parse_dial_target_takes_host_names() {
+        let t = parse_dial_target("nas.local").expect("a .local name parses");
+        assert_eq!(t.host, DialHost::Name("nas.local".into()));
+        assert_eq!(t.port, DEFAULT_TCP_PORT);
+
+        let t = parse_dial_target(" Study-MBP.Local.:51999 ").expect("name:port parses");
+        assert_eq!(t.host, DialHost::Name("study-mbp.local".into()));
+        assert_eq!(t.port, 51999);
+
+        for name in ["desktop", "my_pc", "a1.lan", "x.y.z.example"] {
+            let t = parse_dial_target(name).unwrap_or_else(|| panic!("{name} parses"));
+            assert_eq!(t.host, DialHost::Name(name.into()));
+        }
+        assert!(parse_dial_target("nas.local:0x10").is_none(), "a bad port");
+
+        for bad in [
+            "192.168.1",  // a short IPv4 the resolver would read as 192.168.0.1
+            "10.1",       // ditto
+            "-nas.local", // a label can't start with a hyphen…
+            "nas-.local", // …or end with one
+            "nas..local", // no empty label
+            ".local",     // ditto
+            "my pc",      // no spaces
+            "nas/share",  // not a path
+            "fe80::1",    // nothing here dials IPv6
+            "书房.local", // nor non-ASCII names
+        ] {
+            assert!(parse_dial_target(bad).is_none(), "{bad:?} must not parse");
+        }
+        let long_label = format!("{}.local", "a".repeat(64));
+        assert!(
+            parse_dial_target(&long_label).is_none(),
+            "labels stop at 63"
+        );
+        let long_name = vec!["abcdefghi"; 26].join(".");
+        assert!(long_name.len() > 253);
+        assert!(parse_dial_target(&long_name).is_none(), "names stop at 253");
+
+        // A pair link's `a=` is written by the host, which writes an address.
+        assert!(parse_dial_target("lanbeam://pair?a=nas.local&c=111111").is_none());
+    }
+
+    fn sock(ip: &str) -> SocketAddr {
+        SocketAddr::new(ip.parse().unwrap(), 51704)
+    }
+
+    /// F6: of the addresses a name resolves to, the one on the likeliest LAN
+    /// wins; IPv6 answers are skipped; no IPv4 answer, a failed lookup and one
+    /// that never finishes are all "host not found".
+    #[tokio::test]
+    async fn best_ipv4_picks_the_lan_address_and_reports_a_miss() {
+        let deadline = Duration::from_secs(5);
+        let answers = vec![
+            sock("fe80::1"),
+            sock("169.254.3.4"),
+            sock("172.17.0.1"),
+            sock("192.168.1.20"),
+            sock("10.0.0.9"),
+        ];
+        let ip = best_ipv4("nas.local", async { Ok(answers.into_iter()) }, deadline)
+            .await
+            .unwrap();
+        assert_eq!(ip, Ipv4Addr::new(192, 168, 1, 20), "first of the best rank");
+
+        let only_v6 = vec![sock("fe80::1"), sock("::1")];
+        let miss = best_ipv4("nas.local", async { Ok(only_v6.into_iter()) }, deadline).await;
+        assert!(
+            matches!(&miss, Err(LanBeamError::HostNotFound(n)) if n == "nas.local"),
+            "got {miss:?}"
+        );
+
+        let failed = best_ipv4(
+            "nas.local",
+            async { Err::<std::vec::IntoIter<SocketAddr>, _>(std::io::Error::other("nxdomain")) },
+            deadline,
+        )
+        .await;
+        assert!(
+            matches!(failed, Err(LanBeamError::HostNotFound(_))),
+            "got {failed:?}"
+        );
+
+        let stalled = best_ipv4(
+            "nas.local",
+            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>(),
+            Duration::from_millis(50),
+        )
+        .await;
+        assert!(
+            matches!(stalled, Err(LanBeamError::HostNotFound(_))),
+            "got {stalled:?}"
+        );
+    }
+
+    /// The real resolver, on the one name every machine has.
+    #[tokio::test]
+    async fn localhost_resolves_to_loopback() {
+        assert_eq!(
+            resolve_host_name("localhost", 51704).await.unwrap(),
+            Ipv4Addr::LOCALHOST
+        );
     }
 }

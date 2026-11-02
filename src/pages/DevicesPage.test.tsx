@@ -11,6 +11,7 @@ import {
   useData,
   useOverlays,
   usePrefs,
+  useToast,
   useTransfers,
   useTrust,
 } from "../lib/store";
@@ -125,7 +126,9 @@ describe("DevicesPage — empty state", () => {
     seedDevices([]);
     renderUI(<DevicesPage />);
     expect(screen.getByText(i18n.t("devices.emptyTitle"))).toBeTruthy();
-    expect(screen.getByPlaceholderText("192.168.1.__")).toBeTruthy();
+    expect(
+      screen.getByPlaceholderText("192.168.1.__ / nas.local"),
+    ).toBeTruthy();
     expect(screen.getByText(i18n.t("devices.ipDirect"))).toBeTruthy();
     expect(screen.getByText(i18n.t("devices.pairInvite"))).toBeTruthy();
     expect(screen.getByText(i18n.t("devices.emptyHint"))).toBeTruthy();
@@ -182,12 +185,12 @@ describe("DevicesPage — manual IP connect", () => {
     seedDevices([]);
     renderUI(<DevicesPage />);
 
-    const input = screen.getByPlaceholderText("192.168.1.__");
+    const input = screen.getByPlaceholderText("192.168.1.__ / nas.local");
     fireEvent.change(input, { target: { value: "192.168.1.42" } });
     fireEvent.click(screen.getByText(i18n.t("devices.ipDirect")));
 
     await waitFor(() =>
-      expect(api.connectByAddr).toHaveBeenCalledWith("192.168.1.42"),
+      expect(api.connectByAddr).toHaveBeenCalledWith("192.168.1.42:51704"),
     );
     // it re-queries the merged list so a manually-added peer shows on the radar
     await waitFor(() => expect(api.listDiscoveredDevices).toHaveBeenCalled());
@@ -197,13 +200,34 @@ describe("DevicesPage — manual IP connect", () => {
     seedDevices([]);
     renderUI(<DevicesPage />);
 
-    const input = screen.getByPlaceholderText("192.168.1.__");
+    const input = screen.getByPlaceholderText("192.168.1.__ / nas.local");
     fireEvent.change(input, { target: { value: "10.0.0.7:6000" } });
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() =>
       expect(api.connectByAddr).toHaveBeenCalledWith("10.0.0.7:6000"),
     );
+  });
+
+  it("adds a device by host name, even one without a dot (F6)", async () => {
+    seedDevices([]);
+    renderUI(<DevicesPage />);
+    const input = screen.getByPlaceholderText("192.168.1.__ / nas.local");
+    fireEvent.change(input, { target: { value: "My-PC" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(api.connectByAddr).toHaveBeenCalledWith("my-pc:51704"),
+    );
+  });
+
+  it("says what an address looks like instead of sending a non-address", () => {
+    seedDevices([]);
+    renderUI(<DevicesPage />);
+    const input = screen.getByPlaceholderText("192.168.1.__ / nas.local");
+    fireEvent.change(input, { target: { value: "pc/share" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(useToast.getState().msg).toBe(i18n.t("devices.badAddr"));
+    expect(api.connectByAddr).not.toHaveBeenCalled();
   });
 
   it("does not call connectByAddr for a blank address", () => {

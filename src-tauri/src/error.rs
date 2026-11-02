@@ -66,6 +66,11 @@ pub enum LanBeamError {
     /// address field rather than blaming the connection.
     #[error("invalid address: {0}")]
     InvalidAddress(String),
+    /// A host name the user typed (`nas.local`) resolved to no IPv4 address:
+    /// misspelt, or nothing on the network answers to it right now. Its own
+    /// kind so the UI can point at the name rather than at the connection.
+    #[error("host not found: {0}")]
+    HostNotFound(String),
     /// A join was attempted with no pairing code at all (neither typed nor
     /// carried by the link).
     #[error("no pairing code provided")]
@@ -279,6 +284,10 @@ mod tests {
             "invalid address: x"
         );
         assert_eq!(
+            LanBeamError::HostNotFound("nas.local".into()).to_string(),
+            "host not found: nas.local"
+        );
+        assert_eq!(
             LanBeamError::PairCodeMissing.to_string(),
             "no pairing code provided"
         );
@@ -328,6 +337,7 @@ mod tests {
             "protocol"
         );
         assert_eq!(LanBeamError::PairCodeMissing.ui_code(), "protocol");
+        assert_eq!(LanBeamError::HostNotFound("x".into()).ui_code(), "protocol");
         assert_eq!(LanBeamError::TextRefused.ui_code(), "text_dropped");
         assert_eq!(
             LanBeamError::ConnectionLost("x".into()).ui_code(),

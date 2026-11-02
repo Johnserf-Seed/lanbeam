@@ -636,6 +636,7 @@ mod tests {
                 name: "Manual".into(),
                 addr: Ipv4Addr::new(10, 0, 0, 9),
                 port: 51704,
+                host: None,
                 last_used: Instant::now(),
             },
         );

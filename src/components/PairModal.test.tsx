@@ -315,7 +315,7 @@ describe("PairModal", () => {
       ["a 5-digit code", "192.168.1.20", "48291", "pair.codeShort"],
       ["no code at all", "192.168.1.20", "", "errors.pairCodeMissing"],
       ["the code in the address field", "482913", "482913", "pair.codeMixup"],
-      ["a non-address", "my-laptop", "482913", "pair.badAddr"],
+      ["a non-address", "laptop/share", "482913", "pair.badAddr"],
     ])(
       "catches %s next to the field, before anything is sent",
       async (_what, addr, code, key) => {
@@ -408,9 +408,23 @@ describe("PairModal", () => {
       expect(addrField().value).toBe("192.168.1.20");
     });
 
+    it("joins by host name too (F6)", async () => {
+      mount();
+      fireEvent.click(tab("pair.roleJoin"));
+      join("NAS.local", "482913");
+      await waitFor(() =>
+        expect(api.joinByCode).toHaveBeenCalledWith(
+          "nas.local:51704",
+          "482913",
+          undefined,
+        ),
+      );
+    });
+
     it.each([
       ["PairRejected", "pair.rejected", "code"],
       ["InvalidAddress", "errors.invalidAddress", "addr"],
+      ["HostNotFound", "errors.hostNotFound", "addr"],
       ["Unreachable", "pair.unreachable", null],
       ["Timeout", "pair.unreachable", null],
       ["IdentityMismatch", "pair.identityMismatch", null],

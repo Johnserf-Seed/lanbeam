@@ -36,7 +36,7 @@ pub async fn send_text(
     if text.len() > crate::consts::MAX_TEXT_BYTES {
         return Err(LanBeamError::TextTooLong);
     }
-    let (addr, port, expected) = resolve_peer(&state, &device_id)?;
+    let (addr, port, expected) = resolve_peer(&state, &device_id).await?;
     let local_private = *state.identity.private_bytes();
     let mut session = transport::connect(addr, port, &local_private, expected).await?;
     let my_name = transfer::local_device_name(&state.settings);
@@ -65,7 +65,7 @@ pub async fn send_files(
     strip_exif: bool,
     transfer_id: Option<String>,
 ) -> Result<String, LanBeamError> {
-    let (addr, port, expected) = resolve_peer(&state, &device_id)?;
+    let (addr, port, expected) = resolve_peer(&state, &device_id).await?;
     // One id up front: it names the cancel/pause controls, the events, AND the
     // per-transfer scratch dir the metadata strip writes temp copies into.
     //

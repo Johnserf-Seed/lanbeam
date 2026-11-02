@@ -313,6 +313,14 @@ describe("validateAddr / validateJoin", () => {
     });
   });
 
+  it("accepts a host name (F6), lower-cased and given the default port", () => {
+    expect(validateAddr("my-pc")).toEqual({ ok: true, addr: "my-pc:51704" });
+    expect(validateAddr(" NAS.Local : 51999 ")).toEqual({
+      ok: true,
+      addr: "nas.local:51999",
+    });
+  });
+
   it("calls the classic mix-up by its name", () => {
     expect(validateAddr("482913")).toMatchObject({
       error: { key: "pair.codeMixup" },
@@ -325,7 +333,7 @@ describe("validateAddr / validateJoin", () => {
   it("refuses what the backend would refuse", () => {
     for (const bad of [
       "",
-      "my-pc",
+      "my pc!",
       "999.1.1.1",
       "192.168.01.1",
       "1.2.3.4:0",
@@ -339,7 +347,7 @@ describe("validateAddr / validateJoin", () => {
   });
 
   it("checks the address first, then the code", () => {
-    expect(validateJoin("x", "")).toMatchObject({ error: { field: "addr" } });
+    expect(validateJoin("x/y", "")).toMatchObject({ error: { field: "addr" } });
     expect(validateJoin("10.0.0.2", "")).toMatchObject({
       error: { field: "code", key: "errors.pairCodeMissing" },
     });
@@ -365,6 +373,10 @@ describe("joinErrorOf", () => {
     });
     expect(joinErrorOf({ kind: "InvalidAddress" }, "a")).toMatchObject({
       field: "addr",
+    });
+    expect(joinErrorOf({ kind: "HostNotFound" }, "nas.local")).toEqual({
+      field: "addr",
+      key: "errors.hostNotFound",
     });
     expect(joinErrorOf({ kind: "Unreachable" }, "10.0.0.2:51704")).toEqual({
       field: "form",

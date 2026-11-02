@@ -127,6 +127,7 @@ pub(super) async fn handle_pair_request<R: Runtime>(
                             name: joiner_name.clone(),
                             addr: ip,
                             port: port.unwrap_or(crate::consts::DEFAULT_TCP_PORT),
+                            host: None,
                             last_used: Instant::now(),
                         },
                     );

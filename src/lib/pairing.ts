@@ -27,7 +27,7 @@ import type { ConnectResult, PairingInvite } from "../bridge/api";
 import {
   normalizeAddr,
   normalizePairCode,
-  parseJoinTarget,
+  parseHostTarget,
   parsePairLink,
 } from "./deepLink";
 import { errText } from "./sendops";
@@ -272,17 +272,18 @@ export function pairReducer(s: PairState, a: PairAction): PairState {
   }
 }
 
-/** Check the address field. A bare 6-digit number is the classic mix-up (the
- *  code typed where the address goes) and gets its own hint. */
+/** Check the address field: an IPv4 address or a host name, either with an
+ *  optional port. A bare 6-digit number is the classic mix-up (the code typed
+ *  where the address goes) and gets its own hint. */
 export function validateAddr(
   addr: string,
 ): { ok: true; addr: string } | { ok: false; error: JoinError } {
   const s = normalizeAddr(addr);
   if (/^\d{6}$/.test(s))
     return { ok: false, error: { field: "addr", key: "pair.codeMixup" } };
-  const t = parseJoinTarget(s);
+  const t = parseHostTarget(s);
   if (!t) return { ok: false, error: { field: "addr", key: "pair.badAddr" } };
-  return { ok: true, addr: `${t.ip}:${t.port}` };
+  return { ok: true, addr: `${t.host}:${t.port}` };
 }
 
 /** Check the whole join form before anything is sent: the normalized request,
@@ -316,6 +317,8 @@ export function joinErrorOf(
   switch ((e as { kind?: string } | null)?.kind) {
     case "InvalidAddress":
       return { field: "addr", key: "errors.invalidAddress" };
+    case "HostNotFound":
+      return { field: "addr", key: "errors.hostNotFound" };
     case "PairCodeMissing":
       return { field: "code", key: "errors.pairCodeMissing" };
     case "PairRejected":
