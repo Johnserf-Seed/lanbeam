@@ -2,7 +2,7 @@
 //! and retrieved in commands with `state: State<AppState>`.
 
 use std::collections::{HashMap, VecDeque};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -683,54 +683,6 @@ pub struct PairingState {
     pub rate: Mutex<PairRateLimiter>,
 }
 
-/// A peer added by hand through `connect_by_addr` (M7.2) rather than seen via
-/// discovery. Kept in its own table — never expired by the discovery loop — so
-/// an IP-dialed device stays on the devices page; merged BEHIND live discovery
-/// entries in `list_discovered_devices`, and consulted as a fallback dial
-/// target when a send/connect can't find the id in the discovery table.
-#[derive(Clone)]
-pub struct ManualPeer {
-    pub name: String,
-    pub addr: Ipv4Addr,
-    pub port: u16,
-    /// When this entry was last inserted or refreshed (a dial / re-pair).
-    /// Monotonic [`Instant`], never displayed or persisted — the eviction key
-    /// [`insert_manual_peer`] uses to keep the table bounded. Manual peers never
-    /// expire (the discovery expiry loop deliberately skips them), so without an
-    /// ordering carrier there would be no "oldest" to evict.
-    pub last_used: Instant,
-}
-
-/// Cap on how many hand-added peers [`AppState::manual_peers`] retains within a
-/// session. Manual peers never expire, so this bound is the only thing stopping
-/// a long session's worth of IP dials / re-pairs — e.g. a counterpart that keeps
-/// resetting its identity, minting a fresh `device_id` each time — from growing
-/// the map without limit. In-memory only (cleared on restart), so this caps a
-/// single session, not the whole install.
-pub const MAX_MANUAL_PEERS: usize = 256;
-
-/// Insert (or refresh) a manual peer, then evict the least-recently-used entries
-/// while the table exceeds [`MAX_MANUAL_PEERS`]. Eviction is by the `last_used`
-/// stamp (oldest first); re-dialing an existing id refreshes its stamp so it is
-/// not the next victim. Keeps the table bounded without a dedicated expiry loop.
-pub fn insert_manual_peer(
-    map: &mut HashMap<String, ManualPeer>,
-    device_id: String,
-    peer: ManualPeer,
-) {
-    map.insert(device_id, peer);
-    while map.len() > MAX_MANUAL_PEERS {
-        let Some(oldest) = map
-            .iter()
-            .min_by_key(|(_, p)| p.last_used)
-            .map(|(id, _)| id.clone())
-        else {
-            break;
-        };
-        map.remove(&oldest);
-    }
-}
-
 /// Completed-transfer history with bounded memory.
 ///
 /// WHY a cap: this map lives for the whole app lifetime and every entry holds
@@ -837,10 +789,12 @@ pub struct AppState {
     /// against it (and records failures) on the listener side. See
     /// [`PairingState`].
     pub pairing: Arc<PairingState>,
-    /// Peers added by hand via `connect_by_addr` (M7.2) — kept so an IP-dialed
-    /// device stays visible on the devices page and reachable by a later send,
-    /// independent of the discovery table's expiry. See [`ManualPeer`].
-    pub manual_peers: Arc<Mutex<HashMap<String, ManualPeer>>>,
+    /// Peers added by hand via `connect_by_addr` (M7.2) or a pairing code —
+    /// kept so an IP-dialed device stays visible on the devices page and
+    /// reachable by a later send, independent of the discovery table's expiry,
+    /// and persisted to `manual_peers.json` so it still is after a restart. See
+    /// [`crate::manual_peers::ManualPeers`].
+    pub manual_peers: Arc<Mutex<crate::manual_peers::ManualPeers>>,
     /// Live browser shares (token → Share) for the HTTP fallback (M8.1a).
     /// Shared with the share server task so a share the share commands mint is
     /// instantly serveable. See [`crate::share::ShareRegistry`].
@@ -861,6 +815,7 @@ pub struct AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     fn p(i: usize) -> Vec<PathBuf> {
         vec![PathBuf::from(format!("file-{i}"))]
@@ -1365,99 +1320,5 @@ mod tests {
         // The throttle behind the same state admits a fresh source.
         let ip: IpAddr = Ipv4Addr::new(172, 16, 0, 5).into();
         assert!(ps.rate.lock().unwrap().allowed(ip, Instant::now()));
-    }
-
-    // ── manual peer table (M7.2) ──────────────────────────────────────────
-
-    /// Filling past the cap evicts the least-recently-used entry (smallest
-    /// `last_used`), keeping the table bounded to [`MAX_MANUAL_PEERS`].
-    #[test]
-    fn insert_manual_peer_evicts_oldest_beyond_cap() {
-        let mut map: HashMap<String, ManualPeer> = HashMap::new();
-        let t0 = Instant::now();
-        let mk = |i: u64| ManualPeer {
-            name: format!("dev-{i}"),
-            addr: Ipv4Addr::new(192, 168, 0, 1),
-            port: 5000,
-            last_used: t0 + std::time::Duration::from_millis(i),
-        };
-        for i in 0..(MAX_MANUAL_PEERS as u64) {
-            insert_manual_peer(&mut map, format!("id-{i}"), mk(i));
-        }
-        assert_eq!(map.len(), MAX_MANUAL_PEERS);
-
-        // One more with the newest stamp pushes over the cap: the oldest (id-0) goes.
-        insert_manual_peer(&mut map, "id-new".into(), mk(MAX_MANUAL_PEERS as u64 + 100));
-        assert_eq!(map.len(), MAX_MANUAL_PEERS, "still bounded after eviction");
-        assert!(!map.contains_key("id-0"), "least-recently-used evicted");
-        assert!(map.contains_key("id-1"), "next-oldest survives");
-        assert!(map.contains_key("id-new"), "the new peer is retained");
-    }
-
-    /// Re-inserting an existing id refreshes it in place (new fields, same slot)
-    /// without growing the table.
-    #[test]
-    fn insert_manual_peer_refresh_updates_without_growing() {
-        let mut map: HashMap<String, ManualPeer> = HashMap::new();
-        let t0 = Instant::now();
-        insert_manual_peer(
-            &mut map,
-            "a".into(),
-            ManualPeer {
-                name: "a".into(),
-                addr: Ipv4Addr::LOCALHOST,
-                port: 1,
-                last_used: t0,
-            },
-        );
-        insert_manual_peer(
-            &mut map,
-            "a".into(),
-            ManualPeer {
-                name: "a2".into(),
-                addr: Ipv4Addr::LOCALHOST,
-                port: 2,
-                last_used: t0 + std::time::Duration::from_secs(1),
-            },
-        );
-        assert_eq!(map.len(), 1, "refresh replaces, does not add");
-        assert_eq!(map.get("a").unwrap().name, "a2");
-        assert_eq!(map.get("a").unwrap().port, 2);
-    }
-
-    /// Re-dialing the oldest entry refreshes its `last_used` stamp, so the NEXT
-    /// eviction takes a different (now-oldest) victim rather than the refreshed one.
-    #[test]
-    fn insert_manual_peer_refresh_spares_from_eviction() {
-        let mut map: HashMap<String, ManualPeer> = HashMap::new();
-        let t0 = Instant::now();
-        let mk = |i: u64, t: Instant| ManualPeer {
-            name: format!("d{i}"),
-            addr: Ipv4Addr::LOCALHOST,
-            port: 1,
-            last_used: t,
-        };
-        for i in 0..(MAX_MANUAL_PEERS as u64) {
-            insert_manual_peer(
-                &mut map,
-                format!("id-{i}"),
-                mk(i, t0 + std::time::Duration::from_millis(i)),
-            );
-        }
-        // Refresh the oldest (id-0) with a fresh stamp so it is no longer the victim.
-        insert_manual_peer(
-            &mut map,
-            "id-0".into(),
-            mk(0, t0 + std::time::Duration::from_secs(3600)),
-        );
-        // A new peer pushes over the cap: now id-1 (next-oldest) is evicted, not id-0.
-        insert_manual_peer(
-            &mut map,
-            "id-new".into(),
-            mk(999, t0 + std::time::Duration::from_secs(7200)),
-        );
-        assert_eq!(map.len(), MAX_MANUAL_PEERS);
-        assert!(map.contains_key("id-0"), "refreshed peer spared");
-        assert!(!map.contains_key("id-1"), "next-oldest evicted instead");
     }
 }

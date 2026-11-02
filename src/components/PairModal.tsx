@@ -196,6 +196,14 @@ export default function PairModal() {
   };
 
   const rejectPeer = () => {
+    const c = live.current.compare;
+    // The screens disagree, so whoever answered may not be the device you meant.
+    // Drop the address this pairing filed for it: the backend keeps that table
+    // on disk, so it would otherwise stay in the device list for good, under a
+    // name that device picked for itself. A device you already trust keeps its
+    // entry: its id is its key, so the handshake did reach that very device.
+    if (c && !useTrust.getState().records[c.deviceId]?.trusted)
+      void api.forgetDevice(c.deviceId).catch(() => {});
     showToast(t("pair.mismatchToast"), undefined, 8000);
     setPair(false);
   };

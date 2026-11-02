@@ -13,24 +13,31 @@ use tauri::State;
 use crate::consts::DEFAULT_TCP_PORT;
 use crate::discovery;
 use crate::error::LanBeamError;
-use crate::state::{AppState, ManualPeer, PairingSession};
+use crate::manual_peers::{self, ManualPeer};
+use crate::state::{AppState, PairingSession};
 use crate::{transfer, transport};
 
 /// Keep a device reached by IP or pairing code dialable: in the manual table,
-/// which discovery's expiry never touches.
+/// which discovery's expiry never touches — and on disk, which a restart
+/// doesn't either.
 fn remember_manual_peer(state: &AppState, device_id: &str, name: &str, ip: Ipv4Addr, port: u16) {
-    if let Ok(mut manual) = state.manual_peers.lock() {
-        crate::state::insert_manual_peer(
-            &mut manual,
-            device_id.to_string(),
-            ManualPeer {
-                name: name.to_string(),
-                addr: ip,
-                port,
-                last_used: Instant::now(),
-            },
-        );
-    }
+    let snapshot = match state.manual_peers.lock() {
+        Ok(mut manual) => {
+            manual.insert(
+                device_id.to_string(),
+                ManualPeer {
+                    name: name.to_string(),
+                    addr: ip,
+                    port,
+                    last_used: Instant::now(),
+                },
+            );
+            manual.snapshot()
+        }
+        Err(_) => None,
+    };
+    // File I/O after the guard drops, and off this async worker.
+    manual_peers::persist_async(snapshot);
 }
 
 /// A fresh pairing invitation: the 6-digit code, the pair link (`qr` — the
@@ -685,5 +692,34 @@ mod tests {
             parse_dial_target("lanbeam://pair?p=51999&c=123456").is_none(),
             "a link without a= yields no dial target"
         );
+    }
+
+    /// The joiner's half of F1: the address `join_by_code` / `connect_by_addr`
+    /// records reaches the disk, so the device is still dialable after a restart.
+    #[test]
+    fn remembered_address_is_written_to_disk() {
+        let dir = std::env::temp_dir().join(format!("lanbeam-remember-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("manual_peers.json");
+        let state = crate::commands::test_support::test_app_state();
+        *state.manual_peers.lock().unwrap() = manual_peers::ManualPeers::load(file.clone());
+
+        remember_manual_peer(&state, "nas", "NAS", Ipv4Addr::new(10, 2, 0, 9), 52000);
+
+        // Written on the blocking pool — give it a moment.
+        let mut reloaded = None;
+        for _ in 0..200 {
+            if let Some(p) = manual_peers::ManualPeers::load(file.clone()).get("nas") {
+                reloaded = Some((p.name.clone(), p.addr, p.port));
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            reloaded,
+            Some(("NAS".to_string(), Ipv4Addr::new(10, 2, 0, 9), 52000)),
+            "the address survives a restart"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

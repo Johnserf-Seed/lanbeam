@@ -30,6 +30,7 @@ vi.mock("../bridge/api", async (importOriginal) => {
     joinByCode: vi.fn(),
     connectByAddr: vi.fn(),
     listDiscoveredDevices: vi.fn(),
+    forgetDevice: vi.fn(),
     onEvent: vi.fn((name: string, cb: (p: unknown) => void) => {
       let set = h.listeners.get(name);
       if (!set) {
@@ -106,6 +107,7 @@ beforeEach(async () => {
     .mockReset()
     .mockResolvedValue({ deviceId: "added-1", name: "NAS", sas: "111222" });
   vi.mocked(api.listDiscoveredDevices).mockReset().mockResolvedValue([]);
+  vi.mocked(api.forgetDevice).mockReset().mockResolvedValue(undefined);
   vi.mocked(sendops.copyText).mockClear();
 });
 
@@ -519,6 +521,43 @@ describe("PairModal", () => {
       expect(useToast.getState().msg).toBe(T("pair.mismatchToast"));
     });
 
+    it("forgets the address the pairing filed when the codes don't match", async () => {
+      // The backend keeps that address on disk — left there, whoever answered
+      // would stay in the device list across restarts under a name it chose.
+      await joinToCompare();
+      fireEvent.click(screen.getByRole("button", { name: T("pair.mismatch") }));
+      expect(api.forgetDevice).toHaveBeenCalledWith(PEER.deviceId);
+    });
+
+    it("forgets the joiner's address on the host side too", async () => {
+      mount();
+      await screen.findByText("482 913");
+      emit("pair_joined", { deviceId: "j1", name: "ThinkPad", sas: "246810" });
+      fireEvent.click(screen.getByRole("button", { name: T("pair.mismatch") }));
+      expect(api.forgetDevice).toHaveBeenCalledWith("j1");
+    });
+
+    it("leaves a device you already trust alone when the codes don't match", async () => {
+      // Its id is its key: the handshake reached that very device, so a
+      // misread number must not cost an earlier decision, or its address.
+      useTrust.setState({
+        records: {
+          [PEER.deviceId]: {
+            deviceId: PEER.deviceId,
+            name: PEER.name,
+            trusted: true,
+            autoAccept: true,
+            addedAt: 1,
+            lastSeen: 1,
+          },
+        },
+      });
+      await joinToCompare();
+      fireEvent.click(screen.getByRole("button", { name: T("pair.mismatch") }));
+      expect(api.forgetDevice).not.toHaveBeenCalled();
+      expect(useTrust.getState().records[PEER.deviceId]?.trusted).toBe(true);
+    });
+
     it("trusts nothing when dismissed, and doesn't do it silently", async () => {
       // Walking away is a "no". The dangerous version of this bug is the quiet
       // one: the user closes the box believing they paired.
@@ -528,6 +567,8 @@ describe("PairModal", () => {
       );
       expect(useTrust.getState().records[PEER.deviceId]).toBeUndefined();
       expect(useToast.getState().msg).toBe(T("pair.unconfirmedToast"));
+      // Undecided is not a mismatch: the address stays, like an IP-direct add.
+      expect(api.forgetDevice).not.toHaveBeenCalled();
     });
 
     it("a pair_joined during the compare step changes nothing", async () => {

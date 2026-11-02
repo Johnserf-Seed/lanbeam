@@ -5,7 +5,8 @@
 //!   * a loopback pair with the right code emits `pair_joined` (carrying the
 //!     SAS), consumes the one-shot code, and trusts nothing on its own;
 //!   * a code typed the way it is displayed ("482 913") is accepted, and the
-//!     host records the joiner's address so the pairing is dialable both ways;
+//!     host records the joiner's address so the pairing is dialable both ways —
+//!     on disk too, so it still is after the host restarts;
 //!   * a wrong code is rejected with no trust change and leaves the code live;
 //!   * an expired code is rejected and cleared, with no trust change;
 //!   * the `connect_by_addr` (IP-direct) transport flow learns the peer's
@@ -29,6 +30,7 @@ use tokio::net::{TcpListener, TcpStream};
 
 use lanbeam_lib::consts::{DEFAULT_TCP_PORT, TRANSFER_V3};
 use lanbeam_lib::identity::{generate_identity, Identity};
+use lanbeam_lib::manual_peers::ManualPeers;
 use lanbeam_lib::partials::PartialsStore;
 use lanbeam_lib::settings::Settings;
 use lanbeam_lib::state::{CompletedLog, ConcurrencyGate, PairingSession, PairingState};
@@ -57,7 +59,7 @@ fn make_host_ctx<R: tauri::Runtime>(
         identity,
         tcp_port: Arc::new(AtomicU16::new(0)),
         download_dir: Arc::new(RwLock::new(dl_dir.to_path_buf())),
-        manual_peers: Default::default(),
+        manual_peers: Arc::new(Mutex::new(ManualPeers::load(tmp.join("manual_peers.json")))),
         settings: Arc::new(RwLock::new(settings)),
         peers: Arc::new(Mutex::new(HashMap::new())),
         pending: Arc::new(Mutex::new(HashMap::new())),
@@ -276,17 +278,37 @@ async fn spaced_code_is_accepted_and_the_joiner_becomes_dialable() {
         .unwrap()
         .expect("a successful pair is a clean Ok(())");
 
-    let manual = ctx.manual_peers.lock().unwrap();
-    let rec = manual
-        .get(&joiner_id)
-        .expect("the host records the joiner as a manual peer");
-    assert_eq!(rec.addr, Ipv4Addr::LOCALHOST, "the connection's source IP");
-    assert_eq!(rec.port, 51999, "the listen port the joiner declared");
-    assert_eq!(rec.name, "Joiner Device");
-    drop(manual);
+    {
+        let manual = ctx.manual_peers.lock().unwrap();
+        let rec = manual
+            .get(&joiner_id)
+            .expect("the host records the joiner as a manual peer");
+        assert_eq!(rec.addr, Ipv4Addr::LOCALHOST, "the connection's source IP");
+        assert_eq!(rec.port, 51999, "the listen port the joiner declared");
+        assert_eq!(rec.name, "Joiner Device");
+    }
     assert!(
         ctx.trusted.read().unwrap().list().is_empty(),
         "reachable is not trusted — the SAS compare still decides that"
+    );
+
+    // ...and the address reaches the disk, so a restarted host can still dial
+    // the joiner — the case pairing exists for. Written off the async worker,
+    // so give the blocking pool a moment.
+    let file = tmp.join("manual_peers.json");
+    let mut reloaded = None;
+    for _ in 0..200 {
+        let table = ManualPeers::load(file.clone());
+        if let Some(rec) = table.get(&joiner_id) {
+            reloaded = Some((rec.addr, rec.port));
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        reloaded,
+        Some((Ipv4Addr::LOCALHOST, 51999)),
+        "the joiner's address survives a host restart"
     );
 
     let events = updates.lock().unwrap();

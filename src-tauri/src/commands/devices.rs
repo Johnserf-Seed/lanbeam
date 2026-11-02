@@ -8,7 +8,8 @@ use tauri::State;
 
 use crate::discovery::{self, DiscoveredDevice};
 use crate::error::LanBeamError;
-use crate::state::{AppState, ManualPeer};
+use crate::manual_peers::ManualPeer;
+use crate::state::AppState;
 use crate::transport;
 
 #[tauri::command]
@@ -23,7 +24,7 @@ pub(super) fn list_devices_snapshot(state: &AppState) -> Vec<DiscoveredDevice> {
     let discovered = discovery::snapshot(&state.peers);
     let my_id = state.identity.device_id();
     match state.manual_peers.lock() {
-        Ok(manual) => merge_devices(discovered, &manual, &my_id),
+        Ok(manual) => merge_devices(discovered, manual.peers(), &my_id),
         // Poisoned lock: show discovery alone rather than panic the command.
         Err(_) => discovered,
     }

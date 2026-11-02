@@ -32,7 +32,7 @@ pub const APP_DIR: &str = "LanBeam";
 
 /// The JSON files this app owns. Used by the migration; a file not on this list is
 /// not ours and is left alone.
-const OWNED: &[&str] = &["settings", "trusted", "partials"];
+const OWNED: &[&str] = &["settings", "trusted", "partials", "manual_peers"];
 
 /// Settings, trust store, resume state. Falls back to the temp dir exactly as the
 /// call sites did before, so an unresolvable OS dir degrades instead of panicking.
@@ -166,6 +166,7 @@ mod tests {
         write(&old, "trusted.json", "TRUST-CIRCLE");
         write(&old, "settings.json", "SETTINGS");
         write(&old, "partials.json", "PARTIALS");
+        write(&old, "manual_peers.json", "ADDRESSES");
         // A per-instance profile (LANBEAM_INSTANCE=b) must not be left behind.
         write(&old, "trusted-b.json", "INSTANCE-B");
         // Something that is not ours: left strictly alone.
@@ -180,6 +181,7 @@ mod tests {
         );
         assert!(new.join("settings.json").exists());
         assert!(new.join("partials.json").exists());
+        assert!(new.join("manual_peers.json").exists());
         assert!(new.join("trusted-b.json").exists(), "instance profiles too");
         assert!(!old.join("trusted.json").exists(), "and it was a MOVE");
         assert!(

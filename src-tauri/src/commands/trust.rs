@@ -87,14 +87,24 @@ pub fn forget_device(app: AppHandle, state: State<'_, AppState>, device_id: Stri
         trust::emit_updated(&app, list);
     }
     // Manual address. This is the half that was missing.
-    let dropped = state
-        .manual_peers
-        .lock()
-        .map(|mut m| m.remove(&device_id).is_some())
-        .unwrap_or(false);
-    if dropped {
+    if forget_manual_peer(&state, &device_id) {
         let _ = app.emit("devices_updated", list_devices_snapshot(&state));
     }
+}
+
+/// Drop a device's hand-added address, from the table and from its file — the
+/// file matters as much: left there, the device is back after a restart.
+/// `true` when there was one to drop.
+fn forget_manual_peer(state: &AppState, device_id: &str) -> bool {
+    let dropped = match state.manual_peers.lock() {
+        Ok(mut m) => m.remove(device_id).then(|| m.snapshot()),
+        Err(_) => None,
+    };
+    let Some(snapshot) = dropped else {
+        return false;
+    };
+    crate::manual_peers::persist_async(snapshot);
+    true
 }
 
 /// Remove a peer from the trust store. Persists + emits `trust_updated` only
@@ -113,4 +123,50 @@ pub fn remove_trusted(app: AppHandle, state: State<'_, AppState>, device_id: Str
     };
     trust::persist_async(snapshot);
     trust::emit_updated(&app, list);
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::commands::test_support::test_app_state;
+    use crate::manual_peers::{ManualPeer, ManualPeers};
+
+    /// 删除设备 sticks: the address leaves the file as well as the table, so the
+    /// device does not come back on the next start.
+    #[test]
+    fn forgotten_address_leaves_the_file() {
+        let dir = std::env::temp_dir().join(format!("lanbeam-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let file = dir.join("manual_peers.json");
+        let mut table = ManualPeers::load(file.clone());
+        table.insert(
+            "nas".into(),
+            ManualPeer {
+                name: "NAS".into(),
+                addr: Ipv4Addr::new(10, 2, 0, 9),
+                port: 52000,
+                last_used: Instant::now(),
+            },
+        );
+        table.snapshot().unwrap().persist();
+        let state = test_app_state();
+        *state.manual_peers.lock().unwrap() = table;
+
+        assert!(forget_manual_peer(&state, "nas"));
+        assert!(!forget_manual_peer(&state, "nas"), "nothing left to drop");
+        assert!(state.manual_peers.lock().unwrap().get("nas").is_none());
+        // Written on the blocking pool — give it a moment.
+        let gone = (0..200).any(|_| {
+            let on_disk = ManualPeers::load(file.clone()).get("nas").is_some();
+            if on_disk {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            !on_disk
+        });
+        assert!(gone, "the forgotten address must not survive a restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -23,6 +23,8 @@ pub mod exif;
 #[doc(hidden)]
 pub mod identity;
 #[doc(hidden)]
+pub mod manual_peers;
+#[doc(hidden)]
 pub mod partials;
 #[doc(hidden)]
 pub mod paths;
@@ -644,10 +646,19 @@ pub fn run() {
             // Manually-added peers (M7.2): kept out of the discovery table so the
             // expiry loop never evicts an IP-dialed device. Shared by AppState
             // (the connect_by_addr/join_by_code commands record here, and sends
-            // resolve against it) and DiscoveryCtx (every devices_updated emit
-            // merges it in, so a discovery change never drops a manual peer). The
-            // listener's TransportCtx still never reads it.
-            let manual_peers = Arc::new(Mutex::new(HashMap::new()));
+            // resolve against it), DiscoveryCtx (every devices_updated emit
+            // merges it in, so a discovery change never drops a manual peer) and
+            // the listener's TransportCtx (the host side of a pairing records the
+            // joiner). Its own JSON file, per-instance like the trust store, so a
+            // device paired across subnets is still dialable after a restart.
+            let manual_peers = {
+                let dir = paths::data_dir(app.handle());
+                let file = match &instance {
+                    Some(id) => format!("manual_peers-{id}.json"),
+                    None => "manual_peers.json".to_string(),
+                };
+                Arc::new(Mutex::new(manual_peers::ManualPeers::load(dir.join(file))))
+            };
 
             // Browser-share state (M8.1a): the live share registry + the port its
             // HTTP server binds. Shared by AppState (the share commands mint/stop

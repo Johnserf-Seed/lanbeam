@@ -4,7 +4,7 @@
 mod frame;
 pub mod noise;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -19,10 +19,11 @@ use crate::consts::CONNECT_TIMEOUT;
 use crate::discovery::PeerTable;
 use crate::error::{LanBeamError, Result};
 use crate::identity::Identity;
+use crate::manual_peers::ManualPeers;
 use crate::settings::Settings;
 use crate::state::{
-    CompletedLog, ConcurrencyGate, FileRequestRateLimiter, ManualPeer, NetDegraded, PairingState,
-    PendingMap, TextRateLimiter, TransfersCtl,
+    CompletedLog, ConcurrencyGate, FileRequestRateLimiter, NetDegraded, PairingState, PendingMap,
+    TextRateLimiter, TransfersCtl,
 };
 use crate::trust::TrustStore;
 use noise::NoiseSession;
@@ -63,7 +64,7 @@ pub struct TransportCtx<R: Runtime = Wry> {
     /// device discovery never announced (a different subnet) — until now only
     /// the joiner remembered the host, and a cross-subnet pairing left the host
     /// "trusted · offline" with nothing to dial.
-    pub manual_peers: Arc<Mutex<HashMap<String, ManualPeer>>>,
+    pub manual_peers: Arc<Mutex<ManualPeers>>,
     /// Live settings — the hello exchange reads `device_name` at session time
     /// so a rename reaches the very next transfer (M4.2).
     pub settings: Arc<RwLock<Settings>>,

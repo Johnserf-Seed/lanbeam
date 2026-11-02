@@ -73,7 +73,7 @@ mod test_support {
             ))),
             concurrency: Arc::new(crate::state::ConcurrencyGate::new(3)),
             pairing: Arc::new(crate::state::PairingState::default()),
-            manual_peers: Arc::new(Mutex::new(HashMap::new())),
+            manual_peers: Default::default(),
             shares: crate::share::new_registry(),
             share_port: Arc::new(AtomicU16::new(0)),
             pending_deep_link: Arc::new(Mutex::new(None)),
