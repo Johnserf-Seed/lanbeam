@@ -14,7 +14,7 @@ const PANEL_W = 440;
 const PANEL_H = 326;
 const TEXT = "https://figma.com/file/lb-review\n评审改到周四 10:30，帮我转给组里";
 const RECV = { x: 1490, y: 650 };
-const SEND_AT = 3.35;
+const SEND_AT = 3.28;
 
 export function QuickText({ t }: { t: number }) {
   const q = t;
@@ -34,9 +34,9 @@ export function QuickText({ t }: { t: number }) {
   // the text flies to the other screen
   const from = { x: left + 200 * Z, y: top + 120 * Z };
   const to = { x: RECV.x - 120, y: RECV.y + 6 };
-  const flyAt = (s: number) => bez(from, { x: from.x + 260, y: from.y - 260 }, { x: to.x - 260, y: to.y - 220 }, to, prog(s, SEND_AT + 0.1, SEND_AT + 0.62, E.inOut));
-  const flyOn = q > SEND_AT + 0.05 && q < SEND_AT + 0.85 ? 1 - prog(q, SEND_AT + 0.62, SEND_AT + 0.85) : 0;
-  const arrive = SEND_AT + 0.6;
+  const flyAt = (s: number) => bez(from, { x: from.x + 260, y: from.y - 260 }, { x: to.x - 260, y: to.y - 220 }, to, prog(s, SEND_AT + 0.08, SEND_AT + 0.5, E.inOut));
+  const flyOn = q > SEND_AT + 0.05 && q < SEND_AT + 0.72 ? 1 - prog(q, SEND_AT + 0.5, SEND_AT + 0.72) : 0;
+  const arrive = SEND_AT + 0.5;
   const rIn = spr(q, arrive, SPRING.pop);
   const rOut = prog(q, fold - 0.1, fold + 0.25, E.in);
 

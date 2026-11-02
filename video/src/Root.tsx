@@ -6,7 +6,7 @@ import { Composition } from "remotion";
 import { Promo } from "./Promo";
 import { DURATION } from "./lib/timeline";
 
-export const FPS = 30;
+export const FPS = 60;
 
 export function Root() {
   return (

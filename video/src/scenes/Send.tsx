@@ -17,11 +17,11 @@ const P1 = { x: 575, y: 620 }; // while the codes are compared
 const RZ = 1.7; // the incoming card's zoom
 const R = { x: 1455, y: 610 };
 
-const ACCEPT = 3.6;
-const START = 4.15;
-const PAUSE = 6.45;
-const RESUME = 7.6;
-const DONE = 9.2;
+const ACCEPT = 3.58;
+const START = 4.08;
+const PAUSE = 6.58;
+const RESUME = 7.58;
+const DONE = 8.58;
 
 function pctAt(v: number) {
   if (v < START) return 0;
@@ -70,7 +70,7 @@ export function Send({ t }: { t: number }) {
   // the codes: same digits, rolling in on both screens
   const sasAt = 1.25;
   const sas = (lh: number) => <RollDigits value="483 · 921" t={v} at={sasAt} lineHeight={lh} dur={0.95} />;
-  const glow = prog(v, 2.45, 2.75, E.outSoft) * (1 - prog(v, 3.9, 4.3));
+  const glow = prog(v, 2.5, 2.8, E.outSoft) * (1 - prog(v, 3.9, 4.3));
   const awaiting = v < START - 0.1;
   const status = awaiting ? (
     <span>
@@ -109,9 +109,9 @@ export function Send({ t }: { t: number }) {
   const to = { x: 1455, y: 630 };
   const c1 = { x: 820, y: 930 };
   const c2 = { x: 1330, y: 900 };
-  const runAt = (s: number) => bez(from, c1, c2, to, prog(s, 2.5, 3.05, E.inOut));
-  const runOn = v >= 2.45 && v < 3.3 ? 1 - prog(v, 3.05, 3.3) : 0;
-  const match = spr(v, 3.02, SPRING.pop) * (1 - prog(v, 3.85, 4.15));
+  const runAt = (s: number) => bez(from, c1, c2, to, prog(s, 2.53, 3.08, E.inOut));
+  const runOn = v >= 2.48 && v < 3.33 ? 1 - prog(v, 3.08, 3.33) : 0;
+  const match = spr(v, 3.08, SPRING.pop) * (1 - prog(v, 3.85, 4.15));
 
   const doneGlow = prog(v, DONE, DONE + 0.3) * (1 - prog(v, DONE + 0.5, DONE + 1.0));
 
@@ -249,13 +249,13 @@ export function Send({ t }: { t: number }) {
 
       <Cursor
         t={v}
-        show={[3.0, 8.3]}
+        show={[3.0, 8.15]}
         keys={[
           { t: 3.0, x: 1760, y: 1010 },
           { t: ACCEPT, x: 1573, y: 757, click: true },
           { t: PAUSE, x: 1391, y: 593, click: true },
           { t: RESUME, x: 1391, y: 593, click: true },
-          { t: 8.3, x: 1500, y: 760 },
+          { t: 8.15, x: 1500, y: 760 },
         ]}
       />
       <div

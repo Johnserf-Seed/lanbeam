@@ -24,7 +24,7 @@ const angleOf = (x: number, y: number) => {
 };
 export const foundAt = (x: number, y: number) => SWEEP_AT + angleOf(x, y) / DEG_PER_S;
 
-const DROP = 5.05; // the file lands on the Mac mini
+const DROP = 5.08; // the file lands on the Mac mini
 
 /** Radar state at local time u. */
 export function radarState(u: number) {

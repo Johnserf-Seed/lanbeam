@@ -7,9 +7,9 @@ import { H, LOOK_C, T } from "../lib/timeline";
 // The real app (captured from the ?demo=1 build by scripts/capture-ui.mjs).
 const IMG_W = 1180;
 const IMG_H = (IMG_W * 1600) / 2560;
-const DARK = 1.9;
-const EN = 3.65;
-const OS = 5.0;
+const DARK = 1.88;
+const EN = 3.88;
+const OS = 4.88;
 
 /** One shot wiping over the previous one, with the beam riding the edge. */
 function Wipe({ p, src }: { p: number; src: string }) {

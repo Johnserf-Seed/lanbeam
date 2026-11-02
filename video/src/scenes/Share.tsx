@@ -13,8 +13,8 @@ const PANEL_W = 440;
 const PANEL_H = 323;
 const PHONE = { x: 470, y: 585 };
 const PZ = 1.2;
-const TAP = 3.95;
-const DL = 4.45;
+const TAP = 4.08;
+const DL = 4.58;
 
 export function Share({ t }: { t: number }) {
   const s = t;
@@ -32,8 +32,8 @@ export function Share({ t }: { t: number }) {
   // the scan: from the code on screen into the phone
   const qr = { x: left + 378 * Z, y: top + 113 * Z };
   const scr = { x: PHONE.x, y: PHONE.y - 40 };
-  const scanAt = (x: number) => bez(qr, { x: qr.x - 200, y: qr.y - 260 }, { x: scr.x + 260, y: scr.y - 300 }, scr, prog(x, 2.6, 3.1, E.inOut));
-  const scanOn = s > 2.55 && s < 3.35 ? 1 - prog(s, 3.1, 3.35) : 0;
+  const scanAt = (x: number) => bez(qr, { x: qr.x - 200, y: qr.y - 260 }, { x: scr.x + 260, y: scr.y - 300 }, scr, prog(x, 2.58, 3.08, E.inOut));
+  const scanOn = s > 2.53 && s < 3.33 ? 1 - prog(s, 3.08, 3.33) : 0;
 
   const tap = s >= TAP && s < TAP + 0.6 ? (s - TAP) / 0.6 : -1;
   const finger = prog(s, TAP - 0.3, TAP - 0.05, E.outSoft) * (1 - prog(s, TAP + 0.2, TAP + 0.5));
@@ -91,7 +91,7 @@ export function Share({ t }: { t: number }) {
           }}
         >
           <div style={{ zoom: PZ }}>
-            <Phone t={s} pageAt={3.05} tap={tap} />
+            <Phone t={s} pageAt={3.08} tap={tap} />
           </div>
           {finger > 0 && (
             <div

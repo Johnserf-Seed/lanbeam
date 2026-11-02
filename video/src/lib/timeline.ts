@@ -44,11 +44,15 @@ const hand = (fold: number, from: Pt, to: Pt, bend: number): Handoff => ({
   bend,
 });
 
+// The score (scripts/score.mjs) runs at 120 BPM from the moment the radar hub
+// lights up (4.78 s), and every panel opens on one of its beats: t1 = 4.78 +
+// 0.5·n. The clicks and chimes inside the scenes sit on that grid too. Move a
+// time here or in a scene, and move its cue in score.mjs with it.
 export const H = {
-  sendText: hand(19.9, SEND_C, TEXT_C, -0.35),
-  textShare: hand(24.95, TEXT_C, SHARE_C, 0.3),
-  sharePair: hand(30.95, SHARE_C, PAIR_C, -0.3),
-  pairTrust: hand(36.85, PAIR_C, TRUST_C, 0.32),
-  trustLook: hand(41.2, TRUST_C, LOOK_C, -0.4),
-  lookOutro: hand(47.4, LOOK_C, { x: 630.7, y: 449.3 }, 0.3),
+  sendText: hand(19.78, SEND_C, TEXT_C, -0.35),
+  textShare: hand(24.78, TEXT_C, SHARE_C, 0.3),
+  sharePair: hand(30.78, SHARE_C, PAIR_C, -0.3),
+  pairTrust: hand(36.78, PAIR_C, TRUST_C, 0.32),
+  trustLook: hand(41.28, TRUST_C, LOOK_C, -0.4),
+  lookOutro: hand(47.28, LOOK_C, { x: 630.7, y: 449.3 }, 0.3),
 };

@@ -7,8 +7,8 @@ import { Toast } from "../ui/primitives";
 import { TRUST_R, TrustCircle, type TrustNode } from "../ui/TrustCircle";
 
 const Z = 2.0;
-const GRAB = 1.6;
-const DROP = 2.5;
+const GRAB = 1.78;
+const DROP = 2.78;
 const PHONE_FROM = { x: -262, y: 104 };
 const PHONE_TO = { x: -58, y: 72 };
 
@@ -77,9 +77,9 @@ export function Trust({ t }: { t: number }) {
       </div>
       <Cursor
         t={r}
-        show={[1.05, DROP + 0.6]}
+        show={[1.2, DROP + 0.6]}
         keys={[
-          { t: 1.05, x: grab.x - 160, y: grab.y + 200 },
+          { t: 1.2, x: grab.x - 160, y: grab.y + 200 },
           { t: GRAB, x: grab.x + 2, y: grab.y + 2 },
           { t: DROP, x: drop.x + 2, y: drop.y + 2 },
           { t: DROP + 0.6, x: drop.x + 60, y: drop.y + 90 },

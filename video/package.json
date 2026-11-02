@@ -3,9 +3,10 @@
   "private": true,
   "description": "LanBeam promo video, made with Remotion",
   "scripts": {
-    "studio": "remotion studio",
-    "render": "remotion render LanBeamPromo out/lanbeam-promo.mp4",
-    "still": "remotion still LanBeamPromo out/still.png",
+    "score": "node scripts/score.mjs",
+    "studio": "node scripts/score.mjs && remotion studio",
+    "render": "node scripts/score.mjs && remotion render LanBeamPromo out/lanbeam-promo.mp4",
+    "still": "node scripts/score.mjs && remotion still LanBeamPromo out/still.png",
     "capture": "node scripts/capture-ui.mjs",
     "typecheck": "tsc"
   },

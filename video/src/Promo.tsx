@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { AbsoluteFill, continueRender, delayRender, useCurrentFrame, useVideoConfig } from "remotion";
+import { AbsoluteFill, continueRender, delayRender, Html5Audio, staticFile, useCurrentFrame, useVideoConfig } from "remotion";
 import { Background } from "./components/Background";
 import { HandoffComet } from "./components/Comet";
 import { E, lerp, prog } from "./lib/anim";
@@ -80,6 +80,8 @@ export function Promo() {
 
   return (
     <AbsoluteFill style={{ background: "#04070a" }}>
+      {/* synthesized by scripts/score.mjs, cut to the cues in lib/timeline.ts */}
+      <Html5Audio src={staticFile("audio/score.wav")} />
       <Background spot={spotAt(t)} spotPower={power} gridOpacity={power} />
       {inSpan(t, T.intro) && <Intro t={local(T.intro)} />}
       {inSpan(t, T.discover) && <Discover t={local(T.discover)} exit={discoverExit} />}

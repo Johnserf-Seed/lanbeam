@@ -6,4 +6,5 @@ Config.setVideoImageFormat("png");
 Config.setCodec("h264");
 Config.setCrf(16);
 Config.setPixelFormat("yuv420p");
+Config.setAudioBitrate("320k");
 Config.setConcurrency(null);

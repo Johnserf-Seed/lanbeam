@@ -13,10 +13,10 @@ const W = 500;
 // panel heights (CSS px) per view, so the light line and labels line up
 const HOST_H = 413;
 const JOIN_H = 326;
-const FLIP = 2.55;
-const PASTE = 3.55;
-const JOIN = 4.25;
-const COMPARE = 4.5;
+const FLIP = 2.58;
+const PASTE = 3.58;
+const JOIN = 4.08;
+const COMPARE = 4.33;
 
 export function Pair({ t }: { t: number }) {
   const p = t;
@@ -154,9 +154,9 @@ export function Pair({ t }: { t: number }) {
       </div>
       <Cursor
         t={p}
-        show={[3.75, COMPARE + 0.35]}
+        show={[3.2, COMPARE + 0.35]}
         keys={[
-          { t: 3.75, x: lerp(left + 300 * Z, 1180, 0.3), y: 980 },
+          { t: 3.2, x: lerp(left + 300 * Z, 1180, 0.3), y: 980 },
           { t: JOIN, x: left + 454 * Z, y: topOf(JOIN_H) + 180 * Z, click: true },
           { t: COMPARE + 0.35, x: left + 470 * Z, y: topOf(JOIN_H) + 230 * Z },
         ]}
