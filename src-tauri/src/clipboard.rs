@@ -274,7 +274,7 @@ fn thumbnail(rgba: &[u8], w: u32, h: u32, max: u32) -> (Vec<u8>, u32, u32) {
             let mut sum = [0u64; 4];
             for y in y0..y1 {
                 let row = &rgba[(y * w + x0) * 4..(y * w + x1) * 4];
-                for px in row.chunks_exact(4) {
+                for px in row.as_chunks::<4>().0 {
                     for (s, c) in sum.iter_mut().zip(px) {
                         *s += u64::from(*c);
                     }
@@ -411,7 +411,7 @@ mod tests {
     fn the_preview_is_scaled_to_fit_and_keeps_the_shape() {
         // 400×100 → 160×40, each output pixel the average of its block.
         let mut rgba = solid(400, 100, [0, 0, 0, 255]);
-        for row in rgba.chunks_exact_mut(400 * 4) {
+        for row in rgba.as_chunks_mut::<{ 400 * 4 }>().0 {
             // The right half white.
             row[200 * 4..].fill(255);
         }
