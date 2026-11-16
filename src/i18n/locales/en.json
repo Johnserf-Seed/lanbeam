@@ -45,6 +45,7 @@
     "quickText": "Quick text",
     "quickTextTitle": "Send text or a link straight to their clipboard",
     "sendFiles": "Send files",
+    "sendFilesTitle": "Choose files to send — or press {{keys}} to send a screenshot, files or text from the clipboard",
     "toggleTheme": "Toggle theme"
   },
   "common": {
@@ -70,7 +71,7 @@
     "receiving": "Receiving",
     "fpChangedNote": "Fingerprint changed · click to resolve",
     "offlineToast": "Device is offline, try again later",
-    "dragHint": "Drop files on a device to send · click a device to pick files · or drop anywhere in the window",
+    "dragHint": "Drop files on a device to send · click a device to pick files · or press {{keys}} to send a screenshot or anything copied",
     "emptyHint": "The other device must run LanBeam, join the same network and be discoverable",
     "emptyTitle": "No devices found · check these",
     "emptySub": "Usually caused by network isolation",
@@ -404,6 +405,8 @@
     "step2": "2 Pick devices",
     "step3": "{{n}} Confirm",
     "pickFromDisk": "Choose from computer…",
+    "pasteClipboard": "Paste clipboard",
+    "pasteClipboardTitle": "Add the screenshot or files on the clipboard ({{keys}})",
     "selLine": "{{n}} selected · {{size}}",
     "selNone": "No files selected",
     "devLine_one": "{{count}} device selected",
@@ -444,7 +447,7 @@
     "startTrustedToast_other": "Sending to {{count}} trusted devices",
     "sendFailedToast": "Sending to {{name}} failed: {{err}}",
     "declinedToast": "The peer declined the transfer",
-    "poolEmpty": "No recent files — choose some from disk, or drop them onto the window"
+    "poolEmpty": "No recent files — choose some from disk, drop them onto the window, or press {{keys}} to paste a screenshot"
   },
   "net": {
     "udpDegraded": "Discovery receive degraded (port busy) · others may not see you",
@@ -493,6 +496,7 @@
     "show": "Show LanBeam",
     "send": "Send files…",
     "quickText": "Quick text…",
+    "clipboard": "Send clipboard…",
     "share": "Receive in a browser…",
     "pair": "Pair a device…",
     "discoverable": "Discoverable",
@@ -652,6 +656,15 @@
     "forgetOld": "Delete the old record",
     "pairAgain": "Pair with it",
     "foot": "A key can't be \"restored\" — it can only be met again"
+  },
+  "clip": {
+    "addedToast_one": "Added {{count}} item from the clipboard",
+    "addedToast_other": "Added {{count}} items from the clipboard",
+    "imageTakenToast": "Took the image from the clipboard · there is text on it too",
+    "sendTextInstead": "Send the text instead",
+    "textNotFileToast": "The clipboard holds text, not files — send it with Quick text",
+    "emptyToast": "Nothing on the clipboard to send — take a screenshot, or copy files or text, then press {{keys}}",
+    "readFailedToast": "Couldn't read the clipboard: {{err}}"
   },
   "drag": {
     "hint": "Drop on a device to send directly · release anywhere else to pick a device"

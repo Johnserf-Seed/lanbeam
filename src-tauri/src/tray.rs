@@ -47,6 +47,7 @@ pub struct TraySync {
     pub show: String,
     pub send: String,
     pub quick_text: String,
+    pub clipboard: String,
     pub share: String,
     pub pair: String,
     pub discoverable: String,
@@ -92,6 +93,7 @@ pub struct TrayHandles {
     show: MenuItem<Wry>,
     send: MenuItem<Wry>,
     quick_text: MenuItem<Wry>,
+    clipboard: MenuItem<Wry>,
     share: MenuItem<Wry>,
     pair: MenuItem<Wry>,
     discoverable: CheckMenuItem<Wry>,
@@ -112,6 +114,7 @@ fn apply(app: &AppHandle, sync: &TraySync) {
     swallow("show", h.show.set_text(&sync.show));
     swallow("send", h.send.set_text(&sync.send));
     swallow("quick_text", h.quick_text.set_text(&sync.quick_text));
+    swallow("clipboard", h.clipboard.set_text(&sync.clipboard));
     swallow("share", h.share.set_text(&sync.share));
     swallow("pair", h.pair.set_text(&sync.pair));
     swallow(
@@ -158,9 +161,8 @@ fn route(id: &str) -> Action {
     match id {
         "show" => Action::Show,
         "quit" => Action::Quit,
-        "send" | "quick_text" | "share" | "pair" | "inbox" | "transfers" | "settings" => {
-            Action::EmitWithWindow
-        }
+        "send" | "quick_text" | "clipboard" | "share" | "pair" | "inbox" | "transfers"
+        | "settings" => Action::EmitWithWindow,
         "open_dir" | "discoverable" => Action::Emit,
         _ => Action::Ignore,
     }
@@ -188,6 +190,7 @@ pub fn build(app: &tauri::App) -> tauri::Result<()> {
     let show = MenuItem::with_id(app, "show", "Show LanBeam", true, None::<&str>)?;
     let send = MenuItem::with_id(app, "send", "Send files…", true, None::<&str>)?;
     let quick_text = MenuItem::with_id(app, "quick_text", "Quick text…", true, None::<&str>)?;
+    let clipboard = MenuItem::with_id(app, "clipboard", "Send clipboard…", true, None::<&str>)?;
     let share = MenuItem::with_id(app, "share", "Receive in a browser…", true, None::<&str>)?;
     let pair = MenuItem::with_id(app, "pair", "Pair a device…", true, None::<&str>)?;
     let discoverable = CheckMenuItem::with_id(
@@ -213,6 +216,7 @@ pub fn build(app: &tauri::App) -> tauri::Result<()> {
             &PredefinedMenuItem::separator(app)?,
             &send,
             &quick_text,
+            &clipboard,
             &share,
             &pair,
             &PredefinedMenuItem::separator(app)?,
@@ -293,6 +297,7 @@ pub fn build(app: &tauri::App) -> tauri::Result<()> {
         show,
         send,
         quick_text,
+        clipboard,
         share,
         pair,
         discoverable,
@@ -326,11 +331,12 @@ mod tests {
     /// Mirrors the ids [`build`] creates. Test-only: its whole job is to keep
     /// [`route`] honest — an item added to the menu (and listed here) but left
     /// unrouted would otherwise ship as an entry that silently does nothing.
-    const MENU_IDS: [&str; 12] = [
+    const MENU_IDS: [&str; 13] = [
         "status",
         "show",
         "send",
         "quick_text",
+        "clipboard",
         "share",
         "pair",
         "discoverable",
@@ -356,6 +362,7 @@ mod tests {
         for id in [
             "send",
             "quick_text",
+            "clipboard",
             "share",
             "pair",
             "inbox",

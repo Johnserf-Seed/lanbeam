@@ -336,6 +336,7 @@ export type TraySync = {
   show: string;
   send: string;
   quickText: string;
+  clipboard: string;
   share: string;
   pair: string;
   discoverable: string;
@@ -750,6 +751,40 @@ export const sendFiles = (
         transferId: transferId ?? null,
       })
     : Promise.reject(new Error("browser demo: no transport"));
+
+/** A clipboard image, written out as a PNG so it can be sent as a file. */
+export type ClipboardImage = {
+  path: string;
+  /** the file name the receiver will see */
+  name: string;
+  size: number;
+  width: number;
+  height: number;
+  /** a small preview, as a `data:` URL */
+  thumb: string;
+};
+
+/** What the system clipboard holds that could be sent. `files` (copied in the
+ *  file manager) excludes the other two; an image and text can both be there. */
+export type ClipboardPayload = {
+  files: string[];
+  image: ClipboardImage | null;
+  text: string | null;
+};
+
+/** Read the system clipboard for something to send (paste-to-send). Reads
+ *  only. The browser demo has no backend to reach copied files or pixels, so
+ *  there it is the DOM's text or nothing. */
+export const readClipboard = (): Promise<ClipboardPayload> =>
+  isTauri
+    ? invoke<ClipboardPayload>("read_clipboard")
+    : Promise.resolve(navigator.clipboard?.readText?.() ?? "")
+        .catch(() => "")
+        .then((text) => ({
+          files: [],
+          image: null,
+          text: text.trim() ? text : null,
+        }));
 
 // `conflict` (M6.5) is the ConflictModal's choice — "rename" (keep both) or
 // "overwrite" — folded into the same reply as accept. Omitted for a bare

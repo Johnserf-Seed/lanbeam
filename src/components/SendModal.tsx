@@ -17,6 +17,7 @@ import {
 import type { UITransfer } from "../lib/store";
 import { fmtBytes, fmtSas } from "../lib/format";
 import { catColors, fileCat } from "../lib/filecat";
+import { pasteKeys, sendFromClipboard } from "../lib/clipboardSend";
 import { beginSend, pickFiles } from "../lib/sendops";
 import { useEscape } from "../lib/useEscape";
 import { ExtChip, MODAL_W, ModalHead } from "./ui";
@@ -46,6 +47,27 @@ function CheckBox({ on, size }: { on: boolean; size: number }) {
     >
       {on ? "✓" : ""}
     </div>
+  );
+}
+
+/** A pasted image's preview, in the slot a file's extension chip takes: the
+ *  name of a clipboard image ("clipboard-20261116-143025.png") is no way to
+ *  tell which screenshot is about to go out. */
+function Thumb({ src, size }: { src: string; size: number }) {
+  return (
+    <img
+      src={src}
+      alt=""
+      style={{
+        width: size,
+        height: size,
+        borderRadius: Math.round(size / 4),
+        objectFit: "cover",
+        border: "1px solid var(--border2)",
+        boxSizing: "border-box",
+        flex: "none",
+      }}
+    />
   );
 }
 
@@ -384,7 +406,11 @@ export default function SendModal() {
                     }}
                   >
                     <CheckBox on={on} size={17} />
-                    <ExtChip ext={f.ext} size={30} fontSize={8.5} />
+                    {f.thumb ? (
+                      <Thumb src={f.thumb} size={30} />
+                    ) : (
+                      <ExtChip ext={f.ext} size={30} fontSize={8.5} />
+                    )}
                     <div
                       style={{
                         flex: 1,
@@ -423,7 +449,7 @@ export default function SendModal() {
                     color: "var(--muted)",
                   }}
                 >
-                  {t("send.poolEmpty")}
+                  {t("send.poolEmpty", { keys: pasteKeys() })}
                 </div>
               )}
             </div>
@@ -442,6 +468,14 @@ export default function SendModal() {
                 onClick={() => void pick()}
               >
                 {t("send.pickFromDisk")}
+              </button>
+              <button
+                type="button"
+                className="btn ink"
+                title={t("send.pasteClipboardTitle", { keys: pasteKeys() })}
+                onClick={() => void sendFromClipboard()}
+              >
+                {t("send.pasteClipboard")}
               </button>
               <div
                 style={{
@@ -786,20 +820,24 @@ export default function SendModal() {
                       borderBottom: "1px solid var(--border)",
                     }}
                   >
-                    <span
-                      style={{
-                        fontFamily: "var(--mono)",
-                        fontSize: 8.5,
-                        fontWeight: 600,
-                        color: fg,
-                        background: bg,
-                        borderRadius: 6,
-                        padding: "4px 6px",
-                        flex: "none",
-                      }}
-                    >
-                      {f.ext}
-                    </span>
+                    {f.thumb ? (
+                      <Thumb src={f.thumb} size={40} />
+                    ) : (
+                      <span
+                        style={{
+                          fontFamily: "var(--mono)",
+                          fontSize: 8.5,
+                          fontWeight: 600,
+                          color: fg,
+                          background: bg,
+                          borderRadius: 6,
+                          padding: "4px 6px",
+                          flex: "none",
+                        }}
+                      >
+                        {f.ext}
+                      </span>
+                    )}
                     <span
                       style={{
                         flex: 1,

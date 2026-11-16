@@ -25,6 +25,13 @@ vi.mock("../lib/sendops", () => ({
   pickFiles: vi.fn(async () => [] as SendFile[]),
 }));
 import { beginSend } from "../lib/sendops";
+// 粘贴剪贴板 hands over to the paste-to-send flow, which has its own tests
+// (lib/clipboardSend.test.ts); here it only has to be called.
+vi.mock("../lib/clipboardSend", () => ({
+  pasteKeys: () => "Ctrl+V",
+  sendFromClipboard: vi.fn(async () => {}),
+}));
+import { pasteKeys, sendFromClipboard } from "../lib/clipboardSend";
 // The waiting step's 取消未确认的请求 cancels for real (M20); observe it.
 vi.mock("../bridge/api", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../bridge/api")>()),
@@ -84,7 +91,34 @@ describe("SendModal · files step", () => {
     useData.setState({ devices: [mini] });
     useOverlays.getState().openSend("demo-mini", []);
     renderUI(<SendModal />);
-    expect(screen.getByText(i18n.t("send.poolEmpty"))).toBeInTheDocument();
+    expect(
+      screen.getByText(i18n.t("send.poolEmpty", { keys: pasteKeys() })),
+    ).toBeInTheDocument();
+  });
+
+  it("粘贴剪贴板 pulls what is on the clipboard into the selection", () => {
+    useData.setState({ devices: [mini] });
+    useOverlays.getState().openSend("demo-mini", [fileA]);
+    renderUI(<SendModal />);
+    fireEvent.click(screen.getByText(i18n.t("send.pasteClipboard")));
+    expect(sendFromClipboard).toHaveBeenCalledTimes(1);
+  });
+
+  it("a pasted image shows its preview where the extension chip would be", () => {
+    useData.setState({ devices: [mini] });
+    const shot: SendFile = {
+      path: "/cache/clipboard-20261116-143025.png",
+      name: "clipboard-20261116-143025.png",
+      ext: "png",
+      size: 4096,
+      thumb: "data:image/png;base64,AAAA",
+      temp: true,
+    };
+    useOverlays.getState().openSend("demo-mini", [fileA], [shot]);
+    const { container } = renderUI(<SendModal />);
+    const imgs = container.querySelectorAll("img");
+    expect(imgs).toHaveLength(1);
+    expect(imgs[0].getAttribute("src")).toBe(shot.thumb);
   });
 
   it("toggles a file's selection when its row is clicked", () => {

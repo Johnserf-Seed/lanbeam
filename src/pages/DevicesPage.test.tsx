@@ -15,6 +15,7 @@ import {
   useTransfers,
   useTrust,
 } from "../lib/store";
+import { pasteKeys } from "../lib/clipboardSend";
 import { CHIP_TEXT_MAX } from "../lib/format";
 import type { TrustRecord } from "../lib/store";
 import { fireEvent, renderUI, screen, waitFor } from "../test/render";
@@ -104,7 +105,9 @@ describe("DevicesPage — discovered devices", () => {
   it("shows the drag hint (not the empty hint) when devices are present", () => {
     seedDevices([dev()]);
     renderUI(<DevicesPage />);
-    expect(screen.getByText(i18n.t("devices.dragHint"))).toBeTruthy();
+    expect(
+      screen.getByText(i18n.t("devices.dragHint", { keys: pasteKeys() })),
+    ).toBeTruthy();
     expect(screen.queryByText(i18n.t("devices.emptyHint"))).toBeNull();
   });
 

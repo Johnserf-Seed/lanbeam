@@ -4,6 +4,7 @@
 //! One module per area. Every command `lib.rs` registers is re-exported
 //! below, so `generate_handler!` keeps naming each one by its bare name.
 
+mod clipboard;
 mod devices;
 mod diag;
 mod identity;
@@ -14,6 +15,8 @@ mod share;
 mod transfer;
 mod trust;
 
+pub(crate) use clipboard::clipboard_root;
+pub use clipboard::read_clipboard;
 pub use devices::list_discovered_devices;
 pub(crate) use devices::merge_devices;
 pub use diag::{export_diagnostics, get_log_dir};

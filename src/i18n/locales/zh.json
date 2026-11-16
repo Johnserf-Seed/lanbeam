@@ -44,6 +44,7 @@
     "quickText": "快传文本",
     "quickTextTitle": "发送一段文字或链接，可直达对方剪贴板",
     "sendFiles": "发送文件",
+    "sendFilesTitle": "选择文件发送 · 也可以按 {{keys}} 直接发送剪贴板里的截图、文件或文字",
     "toggleTheme": "切换主题"
   },
   "common": {
@@ -69,7 +70,7 @@
     "receiving": "接收中",
     "fpChangedNote": "指纹已变化 · 点击处理",
     "offlineToast": "设备已离线，稍后再试",
-    "dragHint": "把文件拖到设备上直接发送 · 点击设备选择文件 · 也可拖入窗口任意位置",
+    "dragHint": "把文件拖到设备上直接发送 · 点击设备选择文件 · 截图或复制后按 {{keys}} 粘贴发送",
     "emptyHint": "对方需打开 LanBeam、连接同一网络并开启「可被发现」",
     "emptyTitle": "还没发现设备 · 排查一下",
     "emptySub": "多数是网络隔离导致",
@@ -390,6 +391,8 @@
     "step2": "2 选择设备",
     "step3": "{{n}} 确认发送",
     "pickFromDisk": "从电脑选择…",
+    "pasteClipboard": "粘贴剪贴板",
+    "pasteClipboardTitle": "加入剪贴板里的截图或文件（{{keys}}）",
     "selLine": "已选 {{n}} 个 · {{size}}",
     "selNone": "未选择文件",
     "devLine_other": "已选 {{count}} 台设备",
@@ -424,7 +427,7 @@
     "startTrustedToast_other": "开始发送到 {{count}} 台受信任设备",
     "sendFailedToast": "发送到 {{name}} 失败：{{err}}",
     "declinedToast": "对方拒绝了传输请求",
-    "poolEmpty": "还没有最近的文件 · 点「从磁盘选择」，或直接把文件拖进窗口"
+    "poolEmpty": "还没有最近的文件 · 点「从电脑选择」，把文件拖进窗口，或按 {{keys}} 粘贴截图"
   },
   "net": {
     "udpDegraded": "本机收不到发现广播（端口被占用）· 其他设备可能看不到你",
@@ -473,6 +476,7 @@
     "show": "显示 LanBeam",
     "send": "发送文件…",
     "quickText": "快传文本…",
+    "clipboard": "发送剪贴板…",
     "share": "用浏览器接收…",
     "pair": "配对设备…",
     "discoverable": "可被发现",
@@ -628,6 +632,14 @@
     "forgetOld": "删除旧记录",
     "pairAgain": "去配对",
     "foot": "密钥没法被「恢复」—— 只能重新认识一次"
+  },
+  "clip": {
+    "addedToast_other": "已从剪贴板加入 {{count}} 项",
+    "imageTakenToast": "已取剪贴板里的图片 · 剪贴板里还有文字",
+    "sendTextInstead": "改发文字",
+    "textNotFileToast": "剪贴板里是文字，不是文件 · 请用「快传文本」发送",
+    "emptyToast": "剪贴板里没有可发送的内容 · 先截图，或复制文件、文字，再按 {{keys}}",
+    "readFailedToast": "读取剪贴板失败：{{err}}"
   },
   "drag": {
     "hint": "拖到设备上直接发送 · 在任意位置松开则选择设备"

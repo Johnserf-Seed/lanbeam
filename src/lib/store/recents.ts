@@ -10,6 +10,12 @@ export type SendFile = {
   name: string;
   ext: string;
   size?: number;
+  /** A preview (`data:` URL) — a pasted clipboard image has one, since its
+   *  file name says nothing about what it shows. */
+  thumb?: string;
+  /** Written by the app for this send (a pasted image) and aged out of its
+   *  cache: not something to offer again later as a recent file. */
+  temp?: boolean;
 };
 
 interface RecentsState {
@@ -23,9 +29,13 @@ export const useRecents = create<RecentsState>()(
       items: [],
       add: (files) =>
         set((s) => {
-          const seen = new Set(files.map((f) => f.path ?? f.name));
+          // A temp file's path stops existing; a recent that cannot be sent
+          // is worse than no recent.
+          const kept = files.filter((f) => !f.temp);
+          if (!kept.length) return s;
+          const seen = new Set(kept.map((f) => f.path ?? f.name));
           const rest = s.items.filter((f) => !seen.has(f.path ?? f.name));
-          return { items: [...files, ...rest].slice(0, 8) };
+          return { items: [...kept, ...rest].slice(0, 8) };
         }),
     }),
     {

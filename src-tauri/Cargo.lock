@@ -2430,6 +2430,7 @@ dependencies = [
 name = "lanbeam"
 version = "0.2.0"
 dependencies = [
+ "arboard",
  "axum",
  "base64 0.22.1",
  "chrono",
@@ -2439,6 +2440,7 @@ dependencies = [
  "img-parts",
  "keyring",
  "log",
+ "png 0.18.1",
  "proptest",
  "serde",
  "serde_json",
