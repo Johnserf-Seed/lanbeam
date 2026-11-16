@@ -465,10 +465,11 @@ Releases are cut by [`release.yml`](.github/workflows/release.yml):
    the portable exe, `SHA256SUMS.txt` and provenance attestations to a **draft** release.
 4. Review the draft, then publish it.
 
-A pull request that touches packaging (the Tauri config, icons, lockfiles, the workflow
-itself) runs the same three builds and attaches the installers to the run as artifacts —
-CI only compiles and tests, so this is what proves a change still *packages*. Any branch
-can get that on demand from *Actions → Release → Run workflow*. Neither releases anything.
+The release pull request (the version bump, titled `release: vX.Y.Z`) runs the same three
+builds and attaches the installers to the run as artifacts — CI only compiles and tests, so
+this is what proves the release still *packages* before it is tagged. Other pull requests
+don't build installers, even when they touch packaging files; any branch can get them on
+demand from *Actions → Release → Run workflow*. Neither releases anything.
 
 Notes:
 - **Code signing** — not set up yet. macOS builds are ad‑hoc signed (what Apple Silicon

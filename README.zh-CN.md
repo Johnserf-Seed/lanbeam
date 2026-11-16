@@ -318,7 +318,7 @@ cargo llvm-cov --summary-only -- --test-threads=1   # 覆盖率
 3. CI 并行构建 Windows、macOS(通用包)和 Linux,把所有安装包、便携版 exe、`SHA256SUMS.txt` 和构建来源证明一起挂到一个**草稿** Release 上。
 4. 检查草稿无误后,点发布。
 
-凡是改动了打包相关文件(Tauri 配置、图标、锁文件、工作流本身)的 PR,也会跑同样的三平台构建,并把安装包作为 workflow artifacts 附在运行记录上 —— CI 只负责编译和测试,这一步才能证明改动后**还能打包**。任意分支也可以在「Actions → Release → Run workflow」手动触发。两者都不会发布任何东西。
+发版 PR(改版本号的那个,标题为 `release: vX.Y.Z`)也会跑同样的三平台构建,并把安装包作为 workflow artifacts 附在运行记录上 —— CI 只负责编译和测试,这一步才能在打 tag 之前证明这个版本**还能打包**。其他 PR 即使改动了打包相关文件也不再打包;任意分支都可以在「Actions → Release → Run workflow」手动触发。两者都不会发布任何东西。
 
 说明:
 - **代码签名** —— 目前还没有。macOS 包做了 ad-hoc 签名(Apple 芯片上,未签名的下载文件必须至少有它才能打开)。在仓库 secrets 里加上 `release.yml` 列出的那几个 `APPLE_*`,即可启用 Developer ID 签名 + 公证。
