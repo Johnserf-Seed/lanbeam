@@ -5,10 +5,18 @@ name: Release
 #   • push a tag `vX.Y.Z`  → build every platform, attach the installers to a
 #     DRAFT GitHub Release, add SHA256SUMS.txt + build-provenance attestations.
 #     Nothing is public until a maintainer reviews the draft and presses Publish.
-#   • a pull request that touches packaging, or "Run workflow" (workflow_dispatch)
-#     → the same builds, uploaded as workflow artifacts only. No tag, no release:
-#     it is how a change proves it still PACKAGES on all three platforms, which
-#     `ci.yml` (compile + test) cannot tell you — before release day, not on it.
+#   • a RELEASE pull request (titled `release: vX.Y.Z`), or "Run workflow"
+#     (workflow_dispatch) → the same builds, uploaded as workflow artifacts only.
+#     No tag, no release: it is how a release proves it still PACKAGES on all
+#     three platforms, which `ci.yml` (compile + test) cannot tell you — before
+#     the tag, not after it.
+#
+#     Other pull requests no longer build here, even ones that touch the files
+#     below. Every dependency bump touches Cargo.lock, and a three-platform
+#     package is ~10 minutes of waiting per push for something the release PR
+#     checks anyway. A change that needs proof sooner — this workflow itself, the
+#     icons, the Tauri config — runs it on its branch: Actions → Release → Run
+#     workflow.
 #
 # Code signing is opt-in through repository secrets (see the macOS step below).
 # Without them the builds are unsigned — the macOS app is ad-hoc signed
@@ -19,6 +27,9 @@ on:
   push:
     tags: ['v*.*.*']
   pull_request:
+    # Still narrowed by paths: a release PR always touches package.json, and
+    # most other PRs then never start a run at all. One that does touch these
+    # files starts a run whose jobs are all skipped (see `prepare`).
     paths:
       - .github/workflows/release.yml
       - .github/release-notes.md
@@ -46,6 +57,13 @@ env:
 jobs:
   prepare:
     name: Prepare
+    # On a pull request, only a release PR builds (see the header). Everything
+    # else needs this job, so skipping it skips the whole run. Matched on the
+    # title, which every release PR has had (`release: v0.1.1` … `v0.3.0`),
+    # rather than the branch name, which has not. Read when the PR is opened
+    # or pushed to: retitling an open PR does not start a build — push to it,
+    # or run the workflow by hand.
+    if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'release:')
     runs-on: ubuntu-latest
     permissions:
       contents: write # create the draft release
