@@ -85,8 +85,9 @@ gh attestation verify LanBeam_0.1.0_x64-setup.exe --repo Johnserf-Seed/lanbeam
 1. **Open LanBeam on two devices on the same network.** Within a couple of seconds each
    shows up on the other's radar — no setup, no account.
 2. **Send.** Drop files onto a device on the radar (or anywhere in the window), or click a
-   device to pick files. *Quick text* sends a snippet or a link instead, optionally straight
-   onto the other device's clipboard.
+   device to pick files. A screenshot needs no file first: press Ctrl+V (⌘V on macOS) in the
+   window to send what is on the clipboard — an image, copied files, or text. *Quick text*
+   sends a snippet or a link instead, optionally straight onto the other device's clipboard.
 3. **Accept.** The receiver sees who is sending what, next to a short code. If it matches
    the code on the sender's screen, accept. Tick *Auto‑accept this device* and files from it
    simply arrive from then on — it's now in your trust circle.

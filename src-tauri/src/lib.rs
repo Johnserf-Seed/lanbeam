@@ -11,6 +11,8 @@
 // cannot live in lib unit tests — a mock-runtime Tauri app links comctl32-v6
 // imports, and cargo can attach the required Windows manifest linker args
 // only to integration-test targets (see build.rs).
+#[doc(hidden)]
+pub mod clipboard;
 mod commands;
 #[doc(hidden)]
 pub mod consts;
@@ -63,14 +65,14 @@ use commands::{
     cancel_pairing, cancel_transfer, connect_by_addr, discard_partials, export_diagnostics,
     forget_device, get_download_dir, get_listen_port, get_log_dir, get_my_identity, get_net_status,
     get_network_info, get_settings, join_by_code, list_discovered_devices, list_partials,
-    list_shares, list_trusted, open_local_path, pause_transfer, pending_requests, remove_trusted,
-    reply_file_request, reset_identity, resume_transfer, reveal_received, send_files, send_text,
-    set_auto_open, set_autostart, set_clip_share, set_conflict_policy, set_device_name,
-    set_discoverable, set_download_dir, set_hotkey, set_hotkey_enabled, set_iface_filter,
-    set_listen_port, set_log_level, set_max_concurrent, set_notif_system, set_organize,
-    set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_trusted, set_ui_lang,
-    set_ui_zoom, set_verify_hash, start_pairing, start_share, stop_share, take_pending_deep_link,
-    update_share,
+    list_shares, list_trusted, open_local_path, pause_transfer, pending_requests, read_clipboard,
+    remove_trusted, reply_file_request, reset_identity, resume_transfer, reveal_received,
+    send_files, send_text, set_auto_open, set_autostart, set_clip_share, set_conflict_policy,
+    set_device_name, set_discoverable, set_download_dir, set_hotkey, set_hotkey_enabled,
+    set_iface_filter, set_listen_port, set_log_level, set_max_concurrent, set_notif_system,
+    set_organize, set_rate_limit, set_recv_policy, set_strip_exif, set_tray_close, set_trusted,
+    set_ui_lang, set_ui_zoom, set_verify_hash, start_pairing, start_share, stop_share,
+    take_pending_deep_link, update_share,
 };
 use discovery::{DiscoveryCtx, PeerTable};
 use identity::Identity;
@@ -844,6 +846,20 @@ pub fn run() {
                 });
             }
 
+            // Pasted images outlive their send (再次发送 needs the file), so
+            // they are aged out instead — here, and after every paste.
+            {
+                let root = commands::clipboard_root(app.handle());
+                tauri::async_runtime::spawn_blocking(move || {
+                    clipboard::sweep(
+                        &root,
+                        std::time::SystemTime::now(),
+                        clipboard::MAX_AGE,
+                        clipboard::KEEP,
+                    )
+                });
+            }
+
             // Autostart reconcile (M5.5): the persisted setting is the source
             // of truth. The OS entry can drift behind our back (removed via
             // Task Manager, rewritten by a reinstall), so every launch reads
@@ -1017,6 +1033,7 @@ pub fn run() {
             take_pending_deep_link,
             send_text,
             send_files,
+            read_clipboard,
             start_share,
             update_share,
             stop_share,

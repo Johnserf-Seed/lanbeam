@@ -25,6 +25,7 @@ import {
 } from "../lib/store";
 import { CHIP_TEXT_MAX, estChipW, etaClock, fmtBytes } from "../lib/format";
 import { validateAddr } from "../lib/pairing";
+import { pasteKeys } from "../lib/clipboardSend";
 import { errText } from "../lib/sendops";
 import { radarBasePos, resolveChips, type ChipNode } from "../lib/radar";
 import { ExtChip } from "../components/ui";
@@ -1151,7 +1152,9 @@ export default function DevicesPage() {
           letterSpacing: ".02em",
         }}
       >
-        {devices.length ? t("devices.dragHint") : t("devices.emptyHint")}
+        {devices.length
+          ? t("devices.dragHint", { keys: pasteKeys() })
+          : t("devices.emptyHint")}
       </div>
     </div>
   );

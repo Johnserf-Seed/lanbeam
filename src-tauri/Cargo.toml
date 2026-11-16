@@ -100,12 +100,24 @@ axum = "0.7"
 # `getrandom::getrandom`).
 getrandom = "0.4"
 
+# ── Paste-to-send: a clipboard image becomes a PNG the send flow can pick up ──
+# Encoder only, and already in the tree at this version (arboard's and tauri's
+# `image` both resolve to it), so it adds no crate.
+png = "0.18"
+
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = "2"
 # ── M5.4/M5.5: system integration (desktop-only surfaces) ──
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-global-shortcut = "2"
+# Paste-to-send reads what the clipboard plugin does not expose: the FILES
+# copied in the file manager, and an image as raw pixels on the Rust side (the
+# plugin's JS `readImage` would marshal a whole screenshot through IPC only for
+# it to come straight back to be written). The plugin's own backend, same
+# version and the same feature it enables — no new crate. Desktop-only, as
+# arboard has no mobile backend.
+arboard = { version = "3.6", features = ["wayland-data-control"] }
 # Deep links (lanbeam://pair): let a pairing link launch/focus LanBeam and
 # pre-fill the join form. The installer registers the scheme; a running instance
 # gets the URL via single-instance argv (Windows/Linux) or on_open_url (macOS).

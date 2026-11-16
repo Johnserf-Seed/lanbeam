@@ -59,6 +59,7 @@ import {
 import { maybeSeedDemo } from "../lib/demo";
 import { suppressBrowserShortcuts } from "../lib/browserShortcuts";
 import { installZoomHotkeys } from "../lib/uiZoom";
+import { installPasteToSend, sendFromClipboard } from "../lib/clipboardSend";
 import { routeDeepLink } from "../lib/deepLinkRoute";
 import {
   errText,
@@ -126,6 +127,7 @@ function pushTray(lang: string): void {
       show: L("tray.show"),
       send: L("tray.send"),
       quickText: L("tray.quickText"),
+      clipboard: L("tray.clipboard"),
       share: L("tray.share"),
       pair: L("tray.pair"),
       discoverable: L("tray.discoverable"),
@@ -278,6 +280,10 @@ export default function AppShell() {
   // with a scale setting and no Ctrl +/-/0 is just missing its front door.
   useEffect(() => installZoomHotkeys(), []);
 
+  // Ctrl/⌘+V sends what is on the clipboard — a screenshot above all, which
+  // exists nowhere else to be dragged or picked.
+  useEffect(() => installPasteToSend(), []);
+
   // Native menu → "About" lands on the settings page (关于 section).
   useEffect(
     () => api.onEvent("menu:about", () => navRef.current("/settings")),
@@ -343,6 +349,8 @@ export default function AppShell() {
         useOverlays.getState().openSend(null, useRecents.getState().items);
       }),
       api.onEvent("tray:quick_text", () => useOverlays.getState().setQt(true)),
+      // Screenshot → tray → 发送剪贴板: the same staging the paste chord does.
+      api.onEvent("tray:clipboard", () => void sendFromClipboard()),
       api.onEvent("tray:share", () => useOverlays.getState().setShare(true)),
       api.onEvent("tray:pair", () => useOverlays.getState().setPair(true)),
       api.onEvent("tray:inbox", () => navRef.current("/inbox")),

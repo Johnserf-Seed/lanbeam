@@ -15,6 +15,7 @@ import {
   transferList,
 } from "../lib/store";
 import { nextThemeMode } from "../lib/theme";
+import { pasteKeys } from "../lib/clipboardSend";
 
 export default function Header() {
   const { t } = useTranslation();
@@ -129,7 +130,12 @@ export default function Header() {
           >
             {t("header.quickText")}
           </button>
-          <button type="button" className="btn primary" onClick={sendGlobal}>
+          <button
+            type="button"
+            className="btn primary"
+            title={t("header.sendFilesTitle", { keys: pasteKeys() })}
+            onClick={sendGlobal}
+          >
             <span style={{ fontSize: 14, lineHeight: 1 }}>↑</span>
             {t("header.sendFiles")}
           </button>
